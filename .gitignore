@@ -1,0 +1,41 @@
+# Build output
+bin/
+dist/
+build/
+*.exe
+*.test
+*.out
+
+# Dependencies
+node_modules/
+vendor/
+
+# Runtime data (frames, acks, uploads, merged files)
+data/
+storage/
+/tmp/
+
+# Environment
+.env
+.env.local
+*.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Next.js
+.next/
+out/
+next-env.d.ts
+
+# Coverage
+coverage/
+coverage.*
+*.lcov
+
+# Logs
+*.log
+npm-debug.log*
