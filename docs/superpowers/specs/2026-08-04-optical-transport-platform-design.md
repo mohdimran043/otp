@@ -22,11 +22,22 @@ Four decisions were settled before design:
    `GoCVCameraSource` implement the same interfaces for real deployments.
 2. **Full API surface**, every endpoint the source documents list, backed by real jobs and
    real database writes. No stub handlers.
-3. **FEC:** `none` and `reed-solomon` fully implemented. `raptorq` and `ldpc` are registered
-   in the plugin registry returning `ErrNotImplemented` and documented as future work — the
-   interface is proven, so adding them later is a drop-in.
+3. **FEC:** all four codecs implemented for real — `none`, `reed-solomon`, `raptorq`
+   (RFC 6330 fountain code), and `ldpc` (belief-propagation decoder).
 4. **Marketing site ships after the platform works**, so its generated API reference and
    protocol documentation describe real code.
+
+Scope was subsequently widened to *everything*, with nothing deferred. That adds real RaptorQ
+and LDPC codecs, MinIO object storage alongside the filesystem backend, a RabbitMQ broker
+adapter alongside the internal queue, the GoCV camera and OpenGL display paths, and the
+commercial surface a marketable product needs — licensing, pricing, releases with checksums,
+and legal pages.
+
+Hardware paths are validated without physical hardware, not merely compiled: GoCV is driven
+through the same `VideoCapture` API a USB or GigE camera uses, fed a generated video of
+optical frames inside an OpenCV container; the OpenGL sink runs headless under Xvfb with Mesa,
+and its framebuffer is read back and decoded to prove the GPU render path emits decodable
+frames.
 
 ## Repository layout
 
@@ -105,9 +116,9 @@ All encoders implement `Encode`, `Decode`, `Validate`, `EstimateCapacity`.
 | Encoders | Compression | FEC |
 |---|---|---|
 | `binary` — 1 bit/cell | `none` | `none` |
-| `grayscale` — 2–3 bits/cell | `gzip` | `reed-solomon` (erasure-coded) |
-| `color8` — 3 bits/cell | `lz4` | `raptorq` — registered, `ErrNotImplemented` |
-| `color16` — 4 bits/cell | `zstd` | `ldpc` — registered, `ErrNotImplemented` |
+| `grayscale` — 2–3 bits/cell | `gzip` | `reed-solomon` — erasure-coded |
+| `color8` — 3 bits/cell | `lz4` | `raptorq` — RFC 6330 fountain code |
+| `color16` — 4 bits/cell | `zstd` | `ldpc` — belief propagation |
 | `rolling` — band-interleaved with band parity | `brotli` | |
 
 Chunk payload size is derived from encoder capacity at the configured grid, so one chunk maps
@@ -243,10 +254,17 @@ the route registry, protocol MDX from the protocol definitions.
 
 Each phase completes before the next begins.
 
+## Pluggable infrastructure
+
+Two further interfaces keep infrastructure swappable, each with a shared conformance test
+suite run against every backend:
+
+- **`ObjectStore`** — uploads, frames, merged files, and the acknowledgement channel. Backed
+  by the filesystem (default) or MinIO/S3, selected by configuration.
+- **`Broker`** — job dispatch. Backed by the internal Go queue (default) or RabbitMQ.
+
 ## Out of scope
 
-- RaptorQ and LDPC codec implementations (interfaces registered, marked not implemented).
-- RabbitMQ or any external broker; the internal Go job queue is sufficient.
-- MinIO object storage; the filesystem-backed store implements the same interface, so MinIO
-  is a later drop-in.
-- Real camera and display hardware validation, which requires physical equipment.
+Nothing is deferred. The only thing that cannot be verified here is behaviour against
+specific physical camera and monitor hardware; the code paths themselves are exercised
+through the same APIs that hardware uses, as described under scope decisions above.
