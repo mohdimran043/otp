@@ -11,9 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"sort"
-	"sync"
 
+	"github.com/opticaltransport/otp/shared/internal/registry"
 	"github.com/opticaltransport/otp/shared/protocol"
 )
 
@@ -105,71 +104,24 @@ type Encoder interface {
 	EstimateCapacity(l protocol.Layout, bitDepth uint8) (Capacity, error)
 }
 
-var (
-	registryMu sync.RWMutex
-	byID       = map[uint8]Encoder{}
-	byName     = map[string]Encoder{}
-)
+var encoders = registry.New[Encoder]("encoder", ErrUnknownEncoder)
 
 // Register adds an encoder to the registry. It panics on a duplicate id or name,
 // because that is a programming error that would otherwise surface as frames
 // decoded by the wrong encoder.
-func Register(e Encoder) {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	if prev, dup := byID[e.ID()]; dup {
-		panic(fmt.Sprintf("encoding: id %d already registered to %q", e.ID(), prev.Name()))
-	}
-	if prev, dup := byName[e.Name()]; dup {
-		panic(fmt.Sprintf("encoding: name %q already registered to id %d", e.Name(), prev.ID()))
-	}
-	byID[e.ID()] = e
-	byName[e.Name()] = e
-}
+func Register(e Encoder) { encoders.Register(e) }
 
 // ByID returns the encoder with that wire identifier.
-func ByID(id uint8) (Encoder, error) {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-	e, ok := byID[id]
-	if !ok {
-		return nil, fmt.Errorf("%w: id %d", ErrUnknownEncoder, id)
-	}
-	return e, nil
-}
+func ByID(id uint8) (Encoder, error) { return encoders.ByID(id) }
 
 // ByName returns the encoder with that configuration name.
-func ByName(name string) (Encoder, error) {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-	e, ok := byName[name]
-	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrUnknownEncoder, name)
-	}
-	return e, nil
-}
+func ByName(name string) (Encoder, error) { return encoders.ByName(name) }
 
 // All returns every registered encoder, ordered by id.
-func All() []Encoder {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-	out := make([]Encoder, 0, len(byID))
-	for _, e := range byID {
-		out = append(out, e)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID() < out[j].ID() })
-	return out
-}
+func All() []Encoder { return encoders.All() }
 
 // Names returns every registered encoder name, ordered by id.
-func Names() []string {
-	all := All()
-	out := make([]string, len(all))
-	for i, e := range all {
-		out[i] = e.Name()
-	}
-	return out
-}
+func Names() []string { return encoders.Names() }
 
 // Decode dispatches to whichever encoder produced the frame.
 //
