@@ -45,6 +45,17 @@ type Geometry struct {
 	// Contrast is the luminance gap between set and clear fiducial cells.
 	Contrast float64
 
+	// BandErrorRate is the fraction of header-band bits that had to be repaired by majority vote
+	// across the band's repeated copies.
+	//
+	// It is the closest thing to a bit error rate this protocol can measure honestly. The payload
+	// gives no such figure — a payload either matches its checksum or does not, with nothing in
+	// between — but the header is written several times over, so disagreement between the copies
+	// is directly observable. A rising rate across frames that still decode is the earliest
+	// warning that a camera is drifting out of focus, which is exactly when an operator wants to
+	// hear about it rather than after frames start failing.
+	BandErrorRate float64
+
 	// Header is the header read at this geometry.
 	Header Header
 
@@ -367,18 +378,19 @@ func tryLayout(l Layout, o orientation, img image.Image, gray *GrayMap, opts Loc
 	}
 
 	return &Geometry{
-		Layout:      l,
-		Homography:  hm,
-		Distortion:  opts.Distortion,
-		Corners:     dst,
-		ModuleSize:  module,
-		FinderScore: s.FinderScore(),
-		TimingScore: s.TimingScore(),
-		Contrast:    s.Contrast(),
-		Header:      h,
-		Orientation: o.quarterTurns,
-		Mirrored:    o.mirrored,
-		Attempts:    attempts,
+		Layout:        l,
+		Homography:    hm,
+		Distortion:    opts.Distortion,
+		Corners:       dst,
+		ModuleSize:    module,
+		FinderScore:   s.FinderScore(),
+		TimingScore:   s.TimingScore(),
+		Contrast:      s.Contrast(),
+		BandErrorRate: s.BandErrorRate(),
+		Header:        h,
+		Orientation:   o.quarterTurns,
+		Mirrored:      o.mirrored,
+		Attempts:      attempts,
 	}, true
 }
 

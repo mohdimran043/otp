@@ -517,6 +517,10 @@ func (p *Pipeline) render(ctx context.Context, jc *jobs.Context) error {
 			ParityShards: uint16(tx.FECParityShards),
 			ShardSize:    uint32(tx.ChunkSize),
 		},
+		// The URL a caller supplied on the API. It rides in the manifest because the receiver is the
+		// side that ends up with a merged, verified file to deliver, and the optical channel is the
+		// only path from here to there.
+		CallbackURL: tx.CallbackURL,
 	}
 	if err := manifest.Validate(); err != nil {
 		return jobs.Permanent(err)

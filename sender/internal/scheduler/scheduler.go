@@ -1,0 +1,418 @@
+// Package scheduler decides which frame is on the display next.
+//
+// It is where the protocol's delivery guarantee actually lives, and the guarantee is worth stating
+// precisely: every chunk is displayed repeatedly until the receiver says it arrived. Nothing else in
+// the system promises delivery — a frame can be lost to a tear, a hand, a refresh caught mid-scan,
+// and none of that is detectable at the moment it happens. What makes the transfer lossless is that
+// the sender does not move on. A chunk leaves the queue when an acknowledgement for it arrives, and
+// only then.
+//
+// Two consequences follow, and both are the point rather than side effects.
+//
+// An acknowledged chunk is never displayed again. That is what turns a fixed sequence of frames into
+// a channel that converges: as acknowledgements come in, the set of frames still worth showing
+// shrinks, and the display spends its time on what has not arrived instead of cycling through what
+// has.
+//
+// And the display never goes idle. If everything in the current window is waiting on
+// acknowledgements that have not come yet, the oldest unacknowledged frame is shown again rather
+// than showing nothing — because a camera pointed at a blank screen learns nothing, and the frame
+// most likely to be missing is the one that has been outstanding longest.
+package scheduler
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"go.uber.org/zap"
+
+	"github.com/opticaltransport/otp/sender/internal/config"
+	"github.com/opticaltransport/otp/sender/internal/objectstore"
+	"github.com/opticaltransport/otp/sender/internal/optical"
+	"github.com/opticaltransport/otp/sender/internal/store"
+)
+
+// Priority orders what gets displayed first.
+type Priority int
+
+// Display priorities.
+const (
+	// PriorityRetransmit is a chunk whose acknowledgement has timed out. It goes first, always: it
+	// is the only thing standing between the transmission and completion, while a fresh chunk is
+	// merely more work.
+	PriorityRetransmit Priority = iota
+
+	// PriorityFresh is a chunk that has not been displayed yet.
+	PriorityFresh
+
+	// PriorityKeepAlive is a repeat of the oldest outstanding frame, shown because there is nothing
+	// better to show.
+	PriorityKeepAlive
+)
+
+// String renders a priority for logs.
+func (p Priority) String() string {
+	switch p {
+	case PriorityRetransmit:
+		return "retransmit"
+	case PriorityFresh:
+		return "fresh"
+	default:
+		return "keep-alive"
+	}
+}
+
+// Scheduler displays one transmission's frames until the receiver has all of them.
+type Scheduler struct {
+	store   *store.Store
+	objects objectstore.Store
+	sink    optical.Sink
+	cfg     *config.Watcher
+	log     *zap.Logger
+
+	// sequence is the display counter, shared across everything this sink shows.
+	mu       sync.Mutex
+	sequence int64
+
+	// sent records when each chunk was last displayed, which is what the acknowledgement timeout is
+	// measured against. It is in memory rather than in the database because it describes this run of
+	// this process: a restart re-displays everything outstanding, which is correct — it cannot know
+	// what the receiver saw while it was gone.
+	sent map[int]time.Time
+
+	// shown counts displays per chunk, for the retry ceiling and the operator's counters.
+	shown map[int]int
+}
+
+// Stats is what a display run achieved.
+type Stats struct {
+	// FramesShown is how many frames went to the display, including repeats.
+	FramesShown int64
+
+	// Retransmissions is how many of those were repeats of a chunk whose acknowledgement had timed
+	// out, and KeepAlives how many were shown only because there was nothing else to show.
+	Retransmissions int
+	KeepAlives      int
+
+	// ChunksAcked is how many distinct chunks the receiver confirmed.
+	ChunksAcked int
+
+	// Complete is whether every chunk was acknowledged.
+	Complete bool
+
+	// Duration is how long the display ran, and Bytes how many payload bytes the transmission
+	// carried, so throughput can be computed from a completed run rather than estimated.
+	Duration time.Duration
+	Bytes    int64
+}
+
+// Throughput is the transferred bytes per second, or zero if it cannot be computed.
+func (s Stats) Throughput() float64 {
+	if s.Duration <= 0 {
+		return 0
+	}
+	return float64(s.Bytes) / s.Duration.Seconds()
+}
+
+// ErrStalled means a chunk exhausted its retries without being acknowledged.
+//
+// It is deliberately distinct from a transport failure. A stalled transmission means the channel is
+// not working — the camera is misaimed, the display is off, the room is dark — and no amount of
+// further retrying will fix it. An operator needs to be told, rather than having the sender loop for
+// ever looking busy.
+var ErrStalled = errors.New("scheduler: a chunk was not acknowledged within its retry limit")
+
+// New returns a scheduler.
+func New(st *store.Store, objects objectstore.Store, sink optical.Sink, cfg *config.Watcher, log *zap.Logger) *Scheduler {
+	return &Scheduler{
+		store:   st,
+		objects: objects,
+		sink:    sink,
+		cfg:     cfg,
+		log:     log.Named("scheduler"),
+		sent:    map[int]time.Time{},
+		shown:   map[int]int{},
+	}
+}
+
+// Run displays a transmission until every chunk is acknowledged or the context is done.
+func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, error) {
+	tx, err := s.store.Transmissions.Get(ctx, transmissionID)
+	if err != nil {
+		return Stats{}, err
+	}
+	if tx.FrameCount == 0 {
+		return Stats{}, fmt.Errorf("scheduler: transmission %s has no frames to display", transmissionID)
+	}
+
+	frames, err := s.store.Frames.List(ctx, transmissionID)
+	if err != nil {
+		return Stats{}, err
+	}
+
+	// The manifest frames are indexed separately, because they are shown on a schedule of their own:
+	// they carry no chunk, so nothing acknowledges them, and a receiver that joined late needs one
+	// before anything else it captures makes sense.
+	var manifests []store.Frame
+	byChunk := map[uuid.UUID]store.Frame{}
+	for _, f := range frames {
+		if f.IsManifest {
+			manifests = append(manifests, f)
+			continue
+		}
+		if f.ChunkID != nil {
+			byChunk[*f.ChunkID] = f
+		}
+	}
+
+	cfg := s.cfg.Current()
+	if err := s.store.Transmissions.SetStatus(ctx, transmissionID, store.TxTransmitting, ""); err != nil {
+		return Stats{}, err
+	}
+
+	session, err := s.store.Sessions.Open(ctx, store.DisplaySession{
+		TransmissionID: transmissionID,
+		Sink:           s.sink.Name(),
+		FPS:            cfg.Display.FPS,
+		Brightness:     cfg.Display.Brightness,
+		Gamma:          cfg.Display.Gamma,
+		WindowSize:     cfg.Display.WindowSize,
+	})
+	if err != nil {
+		return Stats{}, err
+	}
+
+	stats := Stats{}
+	started := time.Now()
+	ticker := time.NewTicker(cfg.FrameInterval())
+	defer ticker.Stop()
+
+	// The manifest is shown first and then periodically, so a receiver that came online mid-stream
+	// can join. Its cadence is counted in frames displayed rather than in time, so it scales with
+	// the frame rate instead of drifting relative to it.
+	manifestEvery := cfg.Optical.ManifestInterval
+	if manifestEvery < 1 {
+		manifestEvery = 1
+	}
+	nextManifest := 0
+
+	for {
+		select {
+		case <-ctx.Done():
+			stats.Duration = time.Since(started)
+			if err := s.store.Sessions.Close(ctx, session.ID, "stopped", ""); err != nil {
+				s.log.Warn("could not close the display session", zap.Error(err))
+			}
+			return stats, ctx.Err()
+		case <-ticker.C:
+		}
+
+		// Configuration is re-read on every frame, because the frame rate and the window size are
+		// reloadable: an operator turning the rate down while a transmission runs is the main lever
+		// they have when the receiver reports it is falling behind.
+		cfg = s.cfg.Current()
+		ticker.Reset(cfg.FrameInterval())
+
+		pending, err := s.store.Chunks.Pending(ctx, transmissionID, cfg.Display.WindowSize)
+		if err != nil {
+			return stats, err
+		}
+
+		if len(pending) == 0 {
+			// Everything has been acknowledged. That is the only condition that ends a transmission
+			// successfully, and it is checked against the chunk rows rather than a counter so a
+			// duplicate acknowledgement cannot make it look complete early.
+			acked, err := s.store.Transmissions.RecountAcked(ctx, transmissionID)
+			if err != nil {
+				return stats, err
+			}
+			stats.ChunksAcked = acked
+			stats.Complete = true
+			stats.Duration = time.Since(started)
+			stats.FramesShown = s.sink.Shown()
+			stats.Bytes = tx.OriginalSize
+
+			if err := s.store.Sessions.Close(ctx, session.ID, "completed", ""); err != nil {
+				s.log.Warn("could not close the display session", zap.Error(err))
+			}
+			s.log.Info("every chunk acknowledged",
+				zap.String("transmission", transmissionID.String()),
+				zap.Int("chunks", acked),
+				zap.Int64("frames_shown", stats.FramesShown),
+				zap.Int("retransmissions", stats.Retransmissions),
+				zap.Duration("took", stats.Duration))
+			return stats, nil
+		}
+
+		if nextManifest <= 0 && len(manifests) > 0 {
+			frame := manifests[0]
+			if err := s.show(ctx, frame, PriorityKeepAlive); err != nil {
+				return stats, err
+			}
+			nextManifest = manifestEvery
+			continue
+		}
+		nextManifest--
+
+		choice, priority, err := s.choose(ctx, pending, byChunk, cfg)
+		if err != nil {
+			return stats, err
+		}
+		if choice == nil {
+			// Nothing to show at all, which happens only if the window holds chunks whose frames are
+			// missing from the store. That is a bug rather than a channel condition, so it is reported
+			// rather than absorbed by displaying nothing.
+			return stats, fmt.Errorf("scheduler: no frame available for any of %d pending chunks", len(pending))
+		}
+
+		if err := s.show(ctx, *choice, priority); err != nil {
+			return stats, err
+		}
+		// Recorded after the frame is actually out, so the acknowledgement timeout is measured from
+		// when the receiver could first have seen it rather than from when the sender decided to.
+		if chunk := s.chunkOf(pending, *choice); chunk != nil {
+			s.noteSent(chunk.ESI)
+		}
+		switch priority {
+		case PriorityRetransmit:
+			stats.Retransmissions++
+			if err := s.store.Transmissions.AddCounters(ctx, transmissionID, 1, 0); err != nil {
+				s.log.Warn("could not record a retransmission", zap.Error(err))
+			}
+		case PriorityKeepAlive:
+			stats.KeepAlives++
+		}
+
+		// A chunk that has been shown too many times without acknowledgement means the channel is not
+		// working. Continuing to display it would keep the process looking busy while making no
+		// progress, which is the worst possible thing to present to an operator.
+		if chunk := s.chunkOf(pending, *choice); chunk != nil && s.shown[chunk.ESI] > cfg.Ack.MaxRetries {
+			stats.Duration = time.Since(started)
+			reason := fmt.Sprintf("chunk %d was displayed %d times without being acknowledged",
+				chunk.ESI, s.shown[chunk.ESI])
+			if err := s.store.Sessions.Close(ctx, session.ID, "failed", reason); err != nil {
+				s.log.Warn("could not close the display session", zap.Error(err))
+			}
+			if err := s.store.Transmissions.SetStatus(ctx, transmissionID, store.TxFailed, reason); err != nil {
+				s.log.Warn("could not fail the transmission", zap.Error(err))
+			}
+			return stats, fmt.Errorf("%w: %s", ErrStalled, reason)
+		}
+	}
+}
+
+// choose picks the next frame to display.
+//
+// The order is retransmissions, then fresh chunks, then a repeat. Retransmissions first because an
+// outstanding chunk is what the transmission is waiting on, while a fresh one only adds to the
+// backlog — a scheduler that displayed new chunks first would keep the window full of work the
+// receiver cannot confirm and finish later than one that fills the gaps as they appear.
+func (s *Scheduler) choose(ctx context.Context, pending []store.Chunk, byChunk map[uuid.UUID]store.Frame, cfg config.Config) (*store.Frame, Priority, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+
+	// A chunk that was displayed and not acknowledged within the timeout is assumed lost. The
+	// assumption is necessary rather than lazy: a frame the camera missed produces no report at all,
+	// so silence is the only signal there is, and waiting longer than the timeout would mean waiting
+	// for something that is never coming.
+	for _, chunk := range pending {
+		at, displayed := s.sent[chunk.ESI]
+		if !displayed || now.Sub(at) < cfg.Ack.Timeout {
+			continue
+		}
+		if frame, ok := byChunk[chunk.ID]; ok {
+			return &frame, PriorityRetransmit, nil
+		}
+	}
+
+	for _, chunk := range pending {
+		if _, displayed := s.sent[chunk.ESI]; displayed {
+			continue
+		}
+		if frame, ok := byChunk[chunk.ID]; ok {
+			return &frame, PriorityFresh, nil
+		}
+	}
+
+	if !cfg.Display.KeepAlive {
+		return nil, PriorityKeepAlive, nil
+	}
+
+	// The oldest outstanding chunk: displayed longest ago, so most likely to be the one that was
+	// missed.
+	var oldest *store.Chunk
+	var oldestAt time.Time
+	for i := range pending {
+		at, displayed := s.sent[pending[i].ESI]
+		if !displayed {
+			continue
+		}
+		if oldest == nil || at.Before(oldestAt) {
+			oldest, oldestAt = &pending[i], at
+		}
+	}
+	if oldest != nil {
+		if frame, ok := byChunk[oldest.ID]; ok {
+			return &frame, PriorityKeepAlive, nil
+		}
+	}
+	return nil, PriorityKeepAlive, nil
+}
+
+// show displays one frame and records that it went out.
+func (s *Scheduler) show(ctx context.Context, frame store.Frame, priority Priority) error {
+	body, err := objectstore.GetBytes(ctx, s.objects, frame.StoredPath, 64<<20)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.sequence++
+	sequence := s.sequence
+	s.mu.Unlock()
+
+	if err := s.sink.Show(ctx, optical.Frame{
+		Sequence: sequence,
+		Number:   frame.FrameNumber,
+		PNG:      body,
+	}); err != nil {
+		return err
+	}
+
+	if err := s.store.Frames.MarkDisplayed(ctx, frame.ID); err != nil {
+		s.log.Warn("could not record a display", zap.Error(err))
+	}
+
+	s.log.Debug("frame displayed",
+		zap.Int64("sequence", sequence),
+		zap.Int("frame", frame.FrameNumber),
+		zap.String("priority", priority.String()))
+	return nil
+}
+
+// noteSent records that a chunk's frame has just been displayed.
+func (s *Scheduler) noteSent(esi int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sent[esi] = time.Now()
+	s.shown[esi]++
+}
+
+// chunkOf finds which pending chunk a frame carries.
+func (s *Scheduler) chunkOf(pending []store.Chunk, frame store.Frame) *store.Chunk {
+	if frame.ChunkID == nil {
+		return nil
+	}
+	for i := range pending {
+		if pending[i].ID == *frame.ChunkID {
+			return &pending[i]
+		}
+	}
+	return nil
+}

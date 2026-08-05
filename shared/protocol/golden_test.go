@@ -63,10 +63,16 @@ const (
 	// checksum 0xf818, then four bits of padding.
 	goldenDescriptorHex = "060060083f8180"
 
+	// The manifest gained a callback URL after this vector was first written. That was a
+	// deliberate wire-format change made before anything was deployed — the golden test is what
+	// forced it to be a decision rather than an accident — so the vector was regenerated rather
+	// than the protocol version raised. Once a build is in the field, the same failure means the
+	// version has to move and both applications have to be redeployed together.
 	goldenManifestHex = "" +
 		"4f5450 4d" + // magic OTPM
 		"0001" + // version 1
 		"18" + // filename length 24
+		"0000" + // callback URL length 0
 		"0000000006400000" + // original size 104857600
 		"8b2c4f0a4e26f5f0d3a2f7bd2a5e2f6a7c0e91b4e9c5f61b39a9e2d1c47a3f8e" + // original sha256
 		"0000000002800000" + // compressed size 41943040
@@ -79,7 +85,7 @@ const (
 		"00000800" + // shard size 2048
 		"0000000000000000" + // reserved
 		"7175617274 65726c792d7265706f72742e7461722e7a7374" + // "quarterly-report.tar.zst"
-		"f8b33752" // manifest crc32
+		"aa829f91" // manifest crc32
 )
 
 // goldenHeader is the header the vector above encodes.

@@ -237,3 +237,176 @@ func AckPath(transmissionID uuid.UUID, sequence uint64) string {
 func AckTempPath(transmissionID uuid.UUID, sequence uint64) string {
 	return path.Join(AckDir(transmissionID), fmt.Sprintf(".%020d.json.tmp", sequence))
 }
+
+// Result is the receiver's final word on a transmission, written to the acknowledgement channel
+// once the file has been merged and checked.
+//
+// It exists because of where the callback comes from. The callback URL arrives on the *sender's*
+// API, with the file — so the sender is the side that must eventually make the call. But the
+// sender cannot know whether the transfer actually worked: acknowledgements tell it every chunk
+// arrived, which is not the same as the file being right. Only the receiver can compare the
+// merged file against the hash the manifest declared.
+//
+// So the receiver reports its verdict back through the channel that already exists, signed with
+// the same secret, and the sender includes it in the callback. That keeps the optical link
+// one-way, adds no second network path, and means the callback says "arrived and verified,
+// here is the hash" rather than "we sent everything we had".
+type Result struct {
+	TransmissionID uuid.UUID `json:"transmission_id"`
+
+	// Filename, Size, and SHA256 describe the file as the receiver merged it. The hash is the
+	// figure that matters: it is compared against what the sender's manifest declared, so the
+	// two ends agree on success rather than each asserting it separately.
+	Filename string `json:"filename"`
+	Size     uint64 `json:"size"`
+	SHA256   string `json:"sha256"`
+
+	// Verified is whether the merged file matched the manifest, and Error says why not.
+	Verified bool   `json:"verified"`
+	Error    string `json:"error,omitempty"`
+
+	// ChunksExpected and ChunksReceived quantify the transfer, and ChunksRecovered how many of
+	// them came from parity rather than from a frame that arrived. A non-zero recovery count is
+	// what tells an operator the error correction is earning its channel time.
+	ChunksExpected  uint32 `json:"chunks_expected"`
+	ChunksReceived  uint32 `json:"chunks_received"`
+	ChunksRecovered uint32 `json:"chunks_recovered"`
+
+	// FramesCaptured and FramesFailed describe the optical channel itself: how many frames the
+	// camera saw and how many of those were unreadable.
+	FramesCaptured uint64 `json:"frames_captured"`
+	FramesFailed   uint64 `json:"frames_failed"`
+
+	// StartedMS and CompletedMS bound the transfer, in Unix milliseconds, so throughput can be
+	// computed from the record rather than estimated.
+	StartedMS   uint64 `json:"started_ms"`
+	CompletedMS uint64 `json:"completed_ms"`
+
+	// CallbackURL is where the receiver delivered the merged file, and CallbackDelivered and
+	// CallbackStatus are what came of it.
+	//
+	// These are what close the loop the caller started. Somebody handed the sender a file and a
+	// URL; the file crossed the optical gap, was reassembled, verified, and posted to that URL —
+	// and this is how the sender finds out, since it has no other view of what happened on the
+	// far side. A transfer whose chunks all arrived but whose delivery failed is not a success,
+	// and without these fields the sender could not tell the two apart.
+	CallbackURL       string `json:"callback_url,omitempty"`
+	CallbackDelivered bool   `json:"callback_delivered"`
+	CallbackStatus    int    `json:"callback_status,omitempty"`
+	CallbackError     string `json:"callback_error,omitempty"`
+}
+
+// Duration is how long the transfer took.
+func (r Result) Duration() time.Duration {
+	if r.CompletedMS <= r.StartedMS {
+		return 0
+	}
+	return time.Duration(r.CompletedMS-r.StartedMS) * time.Millisecond
+}
+
+// ThroughputBytesPerSecond is the rate the file arrived at, or zero if it cannot be computed.
+func (r Result) ThroughputBytesPerSecond() float64 {
+	seconds := r.Duration().Seconds()
+	if seconds <= 0 {
+		return 0
+	}
+	return float64(r.Size) / seconds
+}
+
+// Validate checks a result describes something that could have happened.
+func (r Result) Validate() error {
+	if r.TransmissionID == uuid.Nil {
+		return fmt.Errorf("%w: no transmission id", ErrAckMalformed)
+	}
+	if err := checkFilename(r.Filename); err != nil {
+		return err
+	}
+	if r.Verified && len(r.SHA256) != 64 {
+		return fmt.Errorf("%w: a verified result needs a hash", ErrAckMalformed)
+	}
+	if r.ChunksReceived > r.ChunksExpected && r.ChunksExpected > 0 {
+		return fmt.Errorf("%w: %d chunks received of %d expected",
+			ErrAckMalformed, r.ChunksReceived, r.ChunksExpected)
+	}
+	if err := CheckCallbackURL(r.CallbackURL); err != nil {
+		return err
+	}
+	if r.CallbackDelivered && r.CallbackURL == "" {
+		return fmt.Errorf("%w: a delivered callback needs a URL", ErrAckMalformed)
+	}
+	return nil
+}
+
+// SignResult serialises and signs a result, in the same envelope acknowledgements use.
+func SignResult(secret []byte, r Result) ([]byte, error) {
+	if len(secret) == 0 {
+		return nil, fmt.Errorf("%w: no signing secret", ErrAckSignature)
+	}
+	if err := r.Validate(); err != nil {
+		return nil, err
+	}
+
+	record, err := json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	mac := hmac.New(sha256.New, secret)
+	mac.Write(record)
+
+	return json.Marshal(SignedAck{
+		Record:    record,
+		Signature: hex.EncodeToString(mac.Sum(nil)),
+	})
+}
+
+// ParseResult verifies a signed result and returns it.
+//
+// The signature matters more here than anywhere else in the protocol, because this record is what
+// the sender turns into a callback: an unsigned result would let anything able to write the
+// acknowledgement directory make the sender report a transfer as verified when it was not.
+func ParseResult(secret, data []byte) (Result, error) {
+	if len(secret) == 0 {
+		return Result{}, fmt.Errorf("%w: no signing secret", ErrAckSignature)
+	}
+
+	var signed SignedAck
+	if err := json.Unmarshal(data, &signed); err != nil {
+		return Result{}, fmt.Errorf("%w: %s", ErrAckMalformed, err)
+	}
+	if len(signed.Record) == 0 {
+		return Result{}, fmt.Errorf("%w: no record", ErrAckMalformed)
+	}
+
+	want, err := hex.DecodeString(signed.Signature)
+	if err != nil {
+		return Result{}, fmt.Errorf("%w: signature is not hex", ErrAckSignature)
+	}
+	mac := hmac.New(sha256.New, secret)
+	mac.Write(signed.Record)
+	if !hmac.Equal(mac.Sum(nil), want) {
+		return Result{}, ErrAckSignature
+	}
+
+	var r Result
+	if err := json.Unmarshal(signed.Record, &r); err != nil {
+		return Result{}, fmt.Errorf("%w: %s", ErrAckMalformed, err)
+	}
+	if err := r.Validate(); err != nil {
+		return Result{}, err
+	}
+	return r, nil
+}
+
+// ResultPath is where the receiver's verdict is written.
+//
+// It sits beside the acknowledgements rather than in the sequence-numbered namespace, so the
+// sender's watcher can tell a per-chunk report from the final verdict by name alone and does not
+// have to parse every record to find out which it has.
+func ResultPath(transmissionID uuid.UUID) string {
+	return path.Join(AckDir(transmissionID), "result.json")
+}
+
+// ResultTempPath is the name a result is written under before being renamed into place.
+func ResultTempPath(transmissionID uuid.UUID) string {
+	return path.Join(AckDir(transmissionID), ".result.json.tmp")
+}

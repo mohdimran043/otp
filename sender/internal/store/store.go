@@ -9,6 +9,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -30,6 +31,8 @@ type Store struct {
 	Transmissions *Transmissions
 	Chunks        *Chunks
 	Frames        *Frames
+	Sessions      *Sessions
+	Callbacks     *Callbacks
 	Stats         *Stats
 }
 
@@ -41,6 +44,8 @@ func New(pool *db.Pool) *Store {
 		Transmissions: &Transmissions{pool: pool},
 		Chunks:        &Chunks{pool: pool},
 		Frames:        &Frames{pool: pool},
+		Sessions:      &Sessions{pool: pool},
+		Callbacks:     &Callbacks{pool: pool},
 		Stats:         &Stats{pool: pool},
 	}
 }
@@ -173,6 +178,10 @@ type Transmission struct {
 	QuietZone        int    `json:"quiet_zone"`
 	Encrypted        bool   `json:"encrypted"`
 
+	// CallbackURL is where the receiver delivers the merged file. It is recorded here because it
+	// travels in the manifest, and the manifest is built from this row.
+	CallbackURL string `json:"callback_url,omitempty"`
+
 	OriginalSize   int64 `json:"original_size"`
 	CompressedSize int64 `json:"compressed_size"`
 	ChunkSize      int   `json:"chunk_size"`
@@ -205,7 +214,7 @@ const txColumns = `id, file_id, status, priority, compression_profile, encoding_
 	encoder, bit_depth, compression, compression_level, fec_codec, fec_data_shards,
 	fec_parity_shards, grid_width, grid_height, cell_pixels, quiet_zone, encrypted,
 	original_size, compressed_size, chunk_size, chunk_count, frame_count,
-	acked_chunks, retransmits, dropped_frames, error, started_at, completed_at,
+	acked_chunks, retransmits, dropped_frames, callback_url, error, started_at, completed_at,
 	created_at, updated_at`
 
 func scanTransmission(row pgx.Row) (Transmission, error) {
@@ -215,7 +224,8 @@ func scanTransmission(row pgx.Row) (Transmission, error) {
 		&t.FECCodec, &t.FECDataShards, &t.FECParityShards, &t.GridWidth, &t.GridHeight,
 		&t.CellPixels, &t.QuietZone, &t.Encrypted, &t.OriginalSize, &t.CompressedSize,
 		&t.ChunkSize, &t.ChunkCount, &t.FrameCount, &t.AckedChunks, &t.Retransmits,
-		&t.DroppedFrames, &t.Error, &t.StartedAt, &t.CompletedAt, &t.CreatedAt, &t.UpdatedAt)
+		&t.DroppedFrames, &t.CallbackURL, &t.Error, &t.StartedAt, &t.CompletedAt,
+		&t.CreatedAt, &t.UpdatedAt)
 	return t, err
 }
 
@@ -234,13 +244,13 @@ func (r *Transmissions) Create(ctx context.Context, t Transmission) (Transmissio
 		INSERT INTO transmissions (id, file_id, status, priority, compression_profile,
 			encoding_profile, encoder, bit_depth, compression, compression_level, fec_codec,
 			fec_data_shards, fec_parity_shards, grid_width, grid_height, cell_pixels,
-			quiet_zone, encrypted, original_size)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+			quiet_zone, encrypted, original_size, callback_url)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		RETURNING `+txColumns,
 		t.ID, t.FileID, t.Status, t.Priority, t.CompressionProfile, t.EncodingProfile,
 		t.Encoder, t.BitDepth, t.Compression, t.CompressionLevel, t.FECCodec,
 		t.FECDataShards, t.FECParityShards, t.GridWidth, t.GridHeight, t.CellPixels,
-		t.QuietZone, t.Encrypted, t.OriginalSize))
+		t.QuietZone, t.Encrypted, t.OriginalSize, t.CallbackURL))
 }
 
 // Get returns one transmission.
@@ -580,6 +590,175 @@ func (r *Frames) MarkDisplayed(ctx context.Context, id uuid.UUID) error {
 		UPDATE encoded_frames SET displayed_count = displayed_count + 1, last_displayed = now()
 		WHERE id = $1`, id)
 	return err
+}
+
+// DisplaySession is one run of the display for a transmission.
+//
+// It is a row rather than in-memory state because it records the settings the frames were shown
+// under — frame rate, brightness, gamma, window size — and those are reloadable. An operator who
+// turned the rate down halfway through and then asked why the transfer took as long as it did needs
+// the session to say what was in force, not what is in force now.
+type DisplaySession struct {
+	ID             uuid.UUID  `json:"id"`
+	TransmissionID uuid.UUID  `json:"transmission_id"`
+	Status         string     `json:"status"`
+	Sink           string     `json:"sink"`
+	FPS            float64    `json:"fps"`
+	Brightness     float64    `json:"brightness"`
+	Gamma          float64    `json:"gamma"`
+	WindowSize     int        `json:"window_size"`
+	FramesShown    int64      `json:"frames_shown"`
+	StartedAt      time.Time  `json:"started_at"`
+	EndedAt        *time.Time `json:"ended_at,omitempty"`
+	Error          string     `json:"error,omitempty"`
+}
+
+// Sessions is the display-session repository.
+type Sessions struct{ pool *db.Pool }
+
+// Open records the start of a display run.
+func (r *Sessions) Open(ctx context.Context, s DisplaySession) (DisplaySession, error) {
+	if s.ID == uuid.Nil {
+		s.ID = uuid.New()
+	}
+	if s.Gamma <= 0 {
+		s.Gamma = 1
+	}
+	var out DisplaySession
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO display_sessions (id, transmission_id, status, sink, fps, brightness, gamma,
+			window_size)
+		VALUES ($1, $2, 'running', $3, $4, $5, $6, $7)
+		RETURNING id, transmission_id, status, sink, fps, brightness, gamma, window_size,
+		          frames_shown, started_at, ended_at, error`,
+		s.ID, s.TransmissionID, s.Sink, s.FPS, s.Brightness, s.Gamma, s.WindowSize).Scan(
+		&out.ID, &out.TransmissionID, &out.Status, &out.Sink, &out.FPS, &out.Brightness,
+		&out.Gamma, &out.WindowSize, &out.FramesShown, &out.StartedAt, &out.EndedAt, &out.Error)
+	return out, err
+}
+
+// Close ends a display run.
+func (r *Sessions) Close(ctx context.Context, id uuid.UUID, status, reason string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE display_sessions SET status = $2, error = $3, ended_at = now(), updated_at = now()
+		WHERE id = $1`, id, status, reason)
+	return err
+}
+
+// CountShown records frames displayed.
+func (r *Sessions) CountShown(ctx context.Context, id uuid.UUID, frames int64) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE display_sessions SET frames_shown = frames_shown + $2, updated_at = now() WHERE id = $1`,
+		id, frames)
+	return err
+}
+
+// Get returns one display session.
+func (r *Sessions) Get(ctx context.Context, id uuid.UUID) (DisplaySession, error) {
+	var s DisplaySession
+	err := r.pool.QueryRow(ctx, `
+		SELECT id, transmission_id, status, sink, fps, brightness, gamma, window_size,
+		       frames_shown, started_at, ended_at, error
+		FROM display_sessions WHERE id = $1`, id).Scan(&s.ID, &s.TransmissionID, &s.Status,
+		&s.Sink, &s.FPS, &s.Brightness, &s.Gamma, &s.WindowSize, &s.FramesShown,
+		&s.StartedAt, &s.EndedAt, &s.Error)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DisplaySession{}, fmt.Errorf("%w: display session %s", ErrNotFound, id)
+	}
+	return s, err
+}
+
+// Callback is an outbound notification the sender owes somebody.
+type Callback struct {
+	ID             uuid.UUID       `json:"id"`
+	TransmissionID *uuid.UUID      `json:"transmission_id,omitempty"`
+	URL            string          `json:"url"`
+	Event          string          `json:"event"`
+	Status         string          `json:"status"`
+	Attempts       int             `json:"attempts"`
+	LastStatus     *int            `json:"last_status,omitempty"`
+	LastError      string          `json:"last_error,omitempty"`
+	Payload        json.RawMessage `json:"payload"`
+	DeliveredAt    *time.Time      `json:"delivered_at,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+}
+
+// Callbacks is the sender's callback repository.
+//
+// The sender records the callback URL a request supplied, but does not deliver the file itself: the
+// receiver does that, because the receiver is the side that ends up holding a merged and verified
+// file. What the sender keeps here is the record — which URL was asked for, and what the receiver
+// reported back about delivering to it — so a caller can ask the sender what became of their request
+// rather than having to ask across the air gap.
+type Callbacks struct{ pool *db.Pool }
+
+// Record stores the callback a transmission was created with.
+func (r *Callbacks) Record(ctx context.Context, c Callback) (Callback, error) {
+	if c.ID == uuid.Nil {
+		c.ID = uuid.New()
+	}
+	if len(c.Payload) == 0 {
+		c.Payload = json.RawMessage("{}")
+	}
+	var out Callback
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO callbacks (id, transmission_id, url, event, payload)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, transmission_id, url, event, status, attempts, last_status, last_error,
+		          payload, delivered_at, created_at`,
+		c.ID, c.TransmissionID, c.URL, c.Event, c.Payload).Scan(&out.ID, &out.TransmissionID,
+		&out.URL, &out.Event, &out.Status, &out.Attempts, &out.LastStatus, &out.LastError,
+		&out.Payload, &out.DeliveredAt, &out.CreatedAt)
+	return out, err
+}
+
+// Settle records what the receiver reported about delivering to the URL.
+func (r *Callbacks) Settle(ctx context.Context, transmissionID uuid.UUID, delivered bool, status int, reason string, payload any) error {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	state := "failed"
+	if delivered {
+		state = "delivered"
+	}
+	_, err = r.pool.Exec(ctx, `
+		UPDATE callbacks SET status = $2, last_status = $3, last_error = $4, payload = $5,
+			attempts = attempts + 1,
+			delivered_at = CASE WHEN $2 = 'delivered' THEN now() ELSE delivered_at END,
+			updated_at = now()
+		WHERE transmission_id = $1`, transmissionID, state, nullableStatus(status), reason, encoded)
+	return err
+}
+
+// ForTransmission returns a transmission's callbacks.
+func (r *Callbacks) ForTransmission(ctx context.Context, transmissionID uuid.UUID) ([]Callback, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, transmission_id, url, event, status, attempts, last_status, last_error,
+		       payload, delivered_at, created_at
+		FROM callbacks WHERE transmission_id = $1 ORDER BY created_at`, transmissionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Callback
+	for rows.Next() {
+		var c Callback
+		if err := rows.Scan(&c.ID, &c.TransmissionID, &c.URL, &c.Event, &c.Status, &c.Attempts,
+			&c.LastStatus, &c.LastError, &c.Payload, &c.DeliveredAt, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func nullableStatus(status int) *int {
+	if status == 0 {
+		return nil
+	}
+	return &status
 }
 
 // Stats records measurements over time.

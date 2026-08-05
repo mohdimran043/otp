@@ -1,0 +1,76 @@
+# The whole test suite, in containers.
+#
+# Nothing here needs installing on the host: the Go toolchain, both databases, and the object store all
+# come from images. `make test` runs it end to end and exits with the suite's status, which is what a CI
+# job wants and also what somebody trying the project for the first time wants.
+#
+# The module cache is a named volume rather than a bind mount, so a second run does not re-download the
+# dependency graph — the difference is minutes.
+
+name: otp-test
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: otp
+      POSTGRES_PASSWORD: otp
+      # One server, several databases. The sender and the receiver each get their own, created by the
+      # init script, because they have separate databases in every real deployment and sharing one here
+      # would hide any place the code assumed otherwise.
+      POSTGRES_DB: otp_sender
+    volumes:
+      - ./deploy/postgres-init.sql:/docker-entrypoint-initdb.d/10-databases.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U otp -d otp_sender"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      # The database is thrown away with the container, so it may as well live in memory: it makes the
+      # integration tests noticeably quicker and nothing here is worth keeping.
+      - /var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: otptest
+      MINIO_ROOT_PASSWORD: otptestsecret
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    tmpfs:
+      - /data
+
+  tests:
+    image: golang:1.26-bookworm
+    working_dir: /src
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      # Where the integration tests find their databases. A test that cannot see these skips rather than
+      # fails, so the suite is honest about what it did and did not cover.
+      OTP_TEST_DATABASE_URL: postgres://otp:otp@postgres:5432/otp_test?sslmode=disable
+      OTP_TEST_SENDER_DATABASE_URL: postgres://otp:otp@postgres:5432/otp_sender?sslmode=disable
+      OTP_TEST_RECEIVER_DATABASE_URL: postgres://otp:otp@postgres:5432/otp_receiver?sslmode=disable
+      OTP_TEST_MINIO_ENDPOINT: minio:9000
+      OTP_TEST_MINIO_ACCESS_KEY: otptest
+      OTP_TEST_MINIO_SECRET_KEY: otptestsecret
+      GOFLAGS: -mod=mod
+      GOCACHE: /gocache
+      GOMODCACHE: /gomodcache
+    volumes:
+      - .:/src
+      - go-mod-cache:/gomodcache
+      - go-build-cache:/gocache
+    command: ["./deploy/run-tests.sh"]
+
+volumes:
+  go-mod-cache:
+  go-build-cache:

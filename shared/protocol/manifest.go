@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	"net/url"
 	"strings"
 	"unicode/utf8"
 )
@@ -44,6 +45,21 @@ type Manifest struct {
 	// FEC describes the error-correction the sender applied.
 	FEC FECParams `json:"fec"`
 
+	// CallbackURL is where the receiver delivers the merged file once it has verified it.
+	//
+	// It travels in the manifest because of who has it and who needs it. The URL is supplied on
+	// the *sender's* API, with the file — that is where a caller says where the result should go
+	// — but the receiver is the side that ends up holding a merged, verified file to deliver. The
+	// optical link is the only path between them, so the URL rides across it.
+	//
+	// A receiver must treat it as hostile input. It arrives from outside the receiver's trust
+	// boundary and is then used to make an outbound request, which is a server-side request
+	// forgery waiting to happen: a URL naming an internal address would have the receiver fetch
+	// or post to somewhere its operator never intended. CheckCallbackURL rejects the shapes that
+	// cannot be legitimate, and a receiver is expected to hold an allowlist of hosts on top of
+	// that. Empty means no callback.
+	CallbackURL string `json:"callback_url,omitempty"`
+
 	// Reserved carries forward compatibility, like the header's.
 	Reserved [8]byte `json:"-"`
 }
@@ -73,13 +89,16 @@ type FECParams struct {
 
 // Manifest wire limits.
 const (
-	// MaxFilenameBytes bounds the filename field. A manifest has to fit in a single
-	// frame's payload at the smallest usable grid, and the name is the only
-	// variable-length part of it.
+	// MaxFilenameBytes bounds the filename field.
 	MaxFilenameBytes = 255
 
-	// manifestFixedSize is the serialised size of everything but the filename.
-	manifestFixedSize = 4 + 2 + 1 + 8 + 32 + 8 + 4 + 4 + 1 + 1 + 2 + 2 + 4 + 8 + 4
+	// MaxCallbackURLBytes bounds the callback URL. It is generous for a real URL and small
+	// enough that a manifest still fits one frame at a modest grid — the manifest is the first
+	// frame of every transmission, so it has to fit wherever the payload does.
+	MaxCallbackURLBytes = 512
+
+	// manifestFixedSize is the serialised size of everything but the two variable-length fields.
+	manifestFixedSize = 4 + 2 + 1 + 2 + 8 + 32 + 8 + 4 + 4 + 1 + 1 + 2 + 2 + 4 + 8 + 4
 )
 
 var manifestMagic = [4]byte{'O', 'T', 'P', 'M'}
@@ -98,10 +117,22 @@ var (
 
 	// ErrManifestInconsistent means the manifest's own fields contradict each other.
 	ErrManifestInconsistent = fmt.Errorf("protocol: manifest fields are inconsistent")
+
+	// ErrBadCallbackURL means the callback URL is not one a receiver should act on.
+	ErrBadCallbackURL = fmt.Errorf("protocol: invalid callback URL")
 )
 
 // Size is the serialised length of this manifest.
-func (m Manifest) Size() int { return manifestFixedSize + len(m.Filename) }
+func (m Manifest) Size() int {
+	return manifestFixedSize + len(m.Filename) + len(m.CallbackURL)
+}
+
+// CheckManifestFilename rejects anything that must not reach a receiver's filesystem.
+//
+// It is exported because the sender's API needs the same judgement at the moment a caller supplies a
+// name, rather than discovering the problem when the manifest is built — by which time the upload has
+// been read and the caller has been told it was accepted.
+func CheckManifestFilename(name string) error { return checkFilename(name) }
 
 // checkFilename rejects anything that must not reach a receiver's filesystem.
 //
@@ -130,6 +161,52 @@ func checkFilename(name string) error {
 		if r < 0x20 || r == 0x7F {
 			return fmt.Errorf("%w: %q contains a control character", ErrBadFilename, name)
 		}
+	}
+	return nil
+}
+
+// CheckCallbackURL rejects callback URLs a receiver must not act on.
+//
+// The URL crossed the optical channel, so it is attacker-influenced input that will be turned
+// into an outbound request. What is checked here is only what can be judged from the string: the
+// scheme has to be one an HTTP client should speak, and the URL has to name a host. It cannot
+// judge *where* that host is, which is the more dangerous question — a URL naming an address
+// inside the receiver's network passes every test here. That is why a receiver is expected to
+// hold an allowlist of hosts as well, and why this function is not the whole defence.
+func CheckCallbackURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	if len(raw) > MaxCallbackURLBytes {
+		return fmt.Errorf("%w: %d bytes exceeds the %d-byte field",
+			ErrBadCallbackURL, len(raw), MaxCallbackURLBytes)
+	}
+	if !utf8.ValidString(raw) {
+		return fmt.Errorf("%w: not valid UTF-8", ErrBadCallbackURL)
+	}
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7F {
+			// A control character in a URL is how a request gets split into two.
+			return fmt.Errorf("%w: contains a control character", ErrBadCallbackURL)
+		}
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrBadCallbackURL, err)
+	}
+	switch u.Scheme {
+	case "http", "https":
+	default:
+		return fmt.Errorf("%w: scheme %q is not http or https", ErrBadCallbackURL, u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%w: %q names no host", ErrBadCallbackURL, raw)
+	}
+	if u.User != nil {
+		// Credentials in a URL would be sent by the receiver on its operator's behalf to a host
+		// the operator did not choose.
+		return fmt.Errorf("%w: %q carries credentials", ErrBadCallbackURL, raw)
 	}
 	return nil
 }
@@ -165,6 +242,9 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("%w: %d chunks of %d bytes cannot hold %d compressed bytes",
 			ErrManifestInconsistent, m.ChunkCount, m.ChunkSize, m.CompressedSize)
 	}
+	if err := CheckCallbackURL(m.CallbackURL); err != nil {
+		return err
+	}
 	if m.FEC.ID != 0 && m.FEC.DataShards == 0 {
 		return fmt.Errorf("%w: FEC codec %d with no source shards", ErrManifestInconsistent, m.FEC.ID)
 	}
@@ -181,18 +261,20 @@ func (m Manifest) MarshalBinary() ([]byte, error) {
 	copy(b[0:4], manifestMagic[:])
 	binary.BigEndian.PutUint16(b[4:6], Current)
 	b[6] = uint8(len(m.Filename))
-	binary.BigEndian.PutUint64(b[7:15], m.OriginalSize)
-	copy(b[15:47], m.OriginalSHA256[:])
-	binary.BigEndian.PutUint64(b[47:55], m.CompressedSize)
-	binary.BigEndian.PutUint32(b[55:59], m.ChunkCount)
-	binary.BigEndian.PutUint32(b[59:63], m.ChunkSize)
-	b[63] = m.CompressionID
-	b[64] = m.FEC.ID
-	binary.BigEndian.PutUint16(b[65:67], m.FEC.DataShards)
-	binary.BigEndian.PutUint16(b[67:69], m.FEC.ParityShards)
-	binary.BigEndian.PutUint32(b[69:73], m.FEC.ShardSize)
-	copy(b[73:81], m.Reserved[:])
-	copy(b[81:81+len(m.Filename)], m.Filename)
+	binary.BigEndian.PutUint16(b[7:9], uint16(len(m.CallbackURL)))
+	binary.BigEndian.PutUint64(b[9:17], m.OriginalSize)
+	copy(b[17:49], m.OriginalSHA256[:])
+	binary.BigEndian.PutUint64(b[49:57], m.CompressedSize)
+	binary.BigEndian.PutUint32(b[57:61], m.ChunkCount)
+	binary.BigEndian.PutUint32(b[61:65], m.ChunkSize)
+	b[65] = m.CompressionID
+	b[66] = m.FEC.ID
+	binary.BigEndian.PutUint16(b[67:69], m.FEC.DataShards)
+	binary.BigEndian.PutUint16(b[69:71], m.FEC.ParityShards)
+	binary.BigEndian.PutUint32(b[71:75], m.FEC.ShardSize)
+	copy(b[75:83], m.Reserved[:])
+	copy(b[83:83+len(m.Filename)], m.Filename)
+	copy(b[83+len(m.Filename):83+len(m.Filename)+len(m.CallbackURL)], m.CallbackURL)
 	binary.BigEndian.PutUint32(b[m.Size()-4:], crc32.ChecksumIEEE(b[:m.Size()-4]))
 	return b, nil
 }
@@ -212,10 +294,11 @@ func (m *Manifest) UnmarshalBinary(b []byte) error {
 	}
 
 	nameLen := int(b[6])
-	size := manifestFixedSize + nameLen
+	urlLen := int(binary.BigEndian.Uint16(b[7:9]))
+	size := manifestFixedSize + nameLen + urlLen
 	if len(b) < size {
-		return fmt.Errorf("%w: manifest declares a %d-byte name, needing %d bytes, got %d",
-			ErrShortBuffer, nameLen, size, len(b))
+		return fmt.Errorf("%w: manifest declares a %d-byte name and a %d-byte URL, needing %d bytes, got %d",
+			ErrShortBuffer, nameLen, urlLen, size, len(b))
 	}
 
 	// The record is checksummed at its declared length rather than the whole
@@ -225,20 +308,21 @@ func (m *Manifest) UnmarshalBinary(b []byte) error {
 		return fmt.Errorf("%w: computed %08x, manifest declares %08x", ErrManifestCRC, got, want)
 	}
 
-	m.OriginalSize = binary.BigEndian.Uint64(b[7:15])
-	copy(m.OriginalSHA256[:], b[15:47])
-	m.CompressedSize = binary.BigEndian.Uint64(b[47:55])
-	m.ChunkCount = binary.BigEndian.Uint32(b[55:59])
-	m.ChunkSize = binary.BigEndian.Uint32(b[59:63])
-	m.CompressionID = b[63]
+	m.OriginalSize = binary.BigEndian.Uint64(b[9:17])
+	copy(m.OriginalSHA256[:], b[17:49])
+	m.CompressedSize = binary.BigEndian.Uint64(b[49:57])
+	m.ChunkCount = binary.BigEndian.Uint32(b[57:61])
+	m.ChunkSize = binary.BigEndian.Uint32(b[61:65])
+	m.CompressionID = b[65]
 	m.FEC = FECParams{
-		ID:           b[64],
-		DataShards:   binary.BigEndian.Uint16(b[65:67]),
-		ParityShards: binary.BigEndian.Uint16(b[67:69]),
-		ShardSize:    binary.BigEndian.Uint32(b[69:73]),
+		ID:           b[66],
+		DataShards:   binary.BigEndian.Uint16(b[67:69]),
+		ParityShards: binary.BigEndian.Uint16(b[69:71]),
+		ShardSize:    binary.BigEndian.Uint32(b[71:75]),
 	}
-	copy(m.Reserved[:], b[73:81])
-	m.Filename = string(b[81 : 81+nameLen])
+	copy(m.Reserved[:], b[75:83])
+	m.Filename = string(b[83 : 83+nameLen])
+	m.CallbackURL = string(b[83+nameLen : 83+nameLen+urlLen])
 
 	// Validation runs on the way in as well as out. A manifest that passed its CRC
 	// is intact, not trustworthy: it was authored by whatever was on the other end
@@ -248,9 +332,13 @@ func (m *Manifest) UnmarshalBinary(b []byte) error {
 
 // String renders a manifest for logs and the transmission UI.
 func (m Manifest) String() string {
-	return fmt.Sprintf("%q %d bytes -> %d compressed in %d chunks of %d (compression %d, fec %d %d+%d)",
+	callback := "no callback"
+	if m.CallbackURL != "" {
+		callback = "callback " + m.CallbackURL
+	}
+	return fmt.Sprintf("%q %d bytes -> %d compressed in %d chunks of %d (compression %d, fec %d %d+%d, %s)",
 		m.Filename, m.OriginalSize, m.CompressedSize, m.ChunkCount, m.ChunkSize,
-		m.CompressionID, m.FEC.ID, m.FEC.DataShards, m.FEC.ParityShards)
+		m.CompressionID, m.FEC.ID, m.FEC.DataShards, m.FEC.ParityShards, callback)
 }
 
 // NewManifestFrame builds the frame that carries a manifest.
