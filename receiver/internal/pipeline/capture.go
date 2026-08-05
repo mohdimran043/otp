@@ -218,9 +218,34 @@ func (s *FileSource) Close() error { return nil }
 func OpenSource(cfg config.Capture) (Source, error) {
 	switch cfg.Source {
 	case "file":
-		return NewFileSource(FileSourceOptions{Dir: cfg.Dir, Consume: cfg.Consume})
+		return NewFileSource(FileSourceOptions{
+			Dir:     cfg.Dir,
+			Consume: cfg.Consume,
+			Degrade: simulatedOptics(cfg.Simulate),
+		})
 	default:
 		return nil, fmt.Errorf("pipeline: %q is not a known capture source", cfg.Source)
+	}
+}
+
+// simulatedOptics maps a configured profile name onto a degradation.
+//
+// The zero value is a perfect channel, which is what a file-to-file deployment gets by default — and which
+// proves only that the decoder can read the encoder's own output. Naming a profile makes the virtual channel
+// behave like a real one: blur, sensor noise, an off-axis camera, vignetting, and the compression a camera
+// applies on the way out.
+func simulatedOptics(profile string) simulate.Profile {
+	switch profile {
+	case "clean":
+		return simulate.Clean
+	case "typical":
+		return simulate.Typical
+	case "harsh":
+		return simulate.Harsh
+	case "rolling-shutter":
+		return simulate.RollingShutter
+	default:
+		return simulate.Profile{}
 	}
 }
 

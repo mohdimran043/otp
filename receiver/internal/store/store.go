@@ -392,6 +392,18 @@ func (r *Chunks) SetMissing(ctx context.Context, transmissionID uuid.UUID, missi
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
+	// Nothing outstanding is its own case rather than an empty list, because in SQL they are not the same
+	// thing: `chunk_number <> ALL('{}')` is true, but an empty Go slice arrives as NULL and `<> ALL(NULL)`
+	// is NULL — so the delete matched nothing and a completed transfer went on reporting chunks it was
+	// waiting for.
+	if len(missing) == 0 {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM missing_chunks WHERE transmission_id = $1`, transmissionID); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM missing_chunks WHERE transmission_id = $1 AND chunk_number <> ALL ($2)`,
 		transmissionID, missing); err != nil {

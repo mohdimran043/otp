@@ -1,0 +1,148 @@
+// The receiver's API, as the browser sees it.
+//
+// The receiver has almost no write surface: frames arrive whether anybody asks or not, so what this app
+// does is watch. The types below are the operator's view of a capture — is it decoding, how well, what is
+// missing, and did the file that was supposed to arrive arrive intact.
+
+export interface SessionView {
+  capturing?: boolean
+  id: string
+  status: string
+  source: string
+  transmission_id?: string
+  frames_captured: number
+  frames_decoded: number
+  frames_failed: number
+  decode_rate: number
+  started_at: string
+  uptime_seconds: number
+}
+
+export interface MergedView {
+  filename: string
+  size_bytes: number
+  sha256: string
+  verified: boolean
+  verify_error?: string
+  verified_at?: string
+}
+
+export interface TransmissionView {
+  transmission_id: string
+  filename: string
+  original_size: number
+  expected_sha256: string
+  chunk_count: number
+  chunk_size: number
+  callback_url?: string
+  chunks_arrived: number
+  chunks_recovered: number
+  missing_count: number
+  progress: number
+  merged?: MergedView
+  manifest_received_at: string
+}
+
+export interface Chunk {
+  id: string
+  chunk_number: number
+  is_parity: boolean
+  size_bytes: number
+  recovered: boolean
+  received_at: string
+}
+
+export interface CapturedFrame {
+  id: string
+  sequence: number
+  decoded: boolean
+  decode_error?: string
+  frame_number?: number
+  chunk_number?: number
+  is_manifest: boolean
+  is_parity: boolean
+  bit_error_rate: number
+  finder_score: number
+  timing_score: number
+  contrast: number
+  captured_at: string
+}
+
+export interface DecoderConfig {
+  protocol_version: number
+  capture: { source: string; dir: string; idle_interval: string }
+  decoder: { min_finder_score: number; min_timing_score: number; encrypted: boolean }
+  callback: { allowed_hosts: string[] | null; allow_any_host: boolean }
+}
+
+export class ApiError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message)
+  }
+}
+
+async function request<T>(path: string): Promise<T> {
+  const response = await fetch(path, { headers: { Accept: 'application/json' } })
+  const text = await response.text()
+  if (!response.ok) {
+    let message = text
+    try {
+      const parsed = JSON.parse(text) as { error?: string }
+      if (parsed.error) message = parsed.error
+    } catch {
+      // Keep the raw body: a proxy error is HTML, and "Unexpected token <" would tell nobody anything.
+    }
+    throw new ApiError(response.status, message || response.statusText)
+  }
+  return text ? (JSON.parse(text) as T) : ({} as T)
+}
+
+export const api = {
+  session: () => request<SessionView>('/api/v1/session'),
+  transmissions: () =>
+    request<{ transmissions: TransmissionView[] | null }>('/api/v1/transmissions').then(
+      (r) => r.transmissions ?? [],
+    ),
+  transmission: (id: string) => request<TransmissionView>(`/api/v1/transmissions/${id}`),
+  chunks: (id: string) =>
+    request<{ chunks: Chunk[] | null }>(`/api/v1/transmissions/${id}/chunks`).then((r) => r.chunks ?? []),
+  missing: (id: string) =>
+    request<{ missing: number[] | null; count: number }>(`/api/v1/transmissions/${id}/missing`),
+  failedFrames: (limit = 30) =>
+    request<{ frames: CapturedFrame[] | null }>(`/api/v1/frames/failed?limit=${limit}`).then(
+      (r) => r.frames ?? [],
+    ),
+  config: () => request<DecoderConfig>('/api/v1/config'),
+  health: () => request<{ status: string; protocol_version: number }>('/health'),
+
+  // The stored capture, served straight from the object store. It is a URL rather than a fetch because it
+  // goes into an <img>: a frame an operator is looking at is exactly what the camera saw, and re-encoding
+  // it through JavaScript would be showing them something else.
+  frameImageUrl: (id: string) => `/api/v1/frames/${id}/image`,
+  downloadUrl: (id: string) => `/api/v1/transmissions/${id}/file`,
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KiB', 'MiB', 'GiB', 'TiB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value.toFixed(value < 10 ? 2 : 1)} ${units[unit]}`
+}
+
+export function formatPercent(fraction: number): string {
+  if (!Number.isFinite(fraction)) return '—'
+  return `${(fraction * 100).toFixed(1)}%`
+}
+
+export function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '—'
+  if (seconds < 60) return `${seconds.toFixed(0)}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${Math.round(seconds % 60)}s`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}

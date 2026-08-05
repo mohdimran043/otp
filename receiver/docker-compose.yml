@@ -1,0 +1,79 @@
+# The receiver, deployable on its own.
+#
+# A compose file per side is not a stylistic choice — it is what the architecture already says. The sender and
+# the receiver share a protocol, a volume, and nothing else: no network call passes between them, and either
+# can be restarted, upgraded, or replaced while the other keeps running. Two files make that concrete, and
+# they are the two things an operator actually installs, usually on two machines that cannot reach each other
+# over anything but the shared storage and a monitor pointed at a camera.
+
+name: otp-receiver
+
+services:
+  receiver:
+    build:
+      # The build context is the repository root, because the image needs the shared protocol module as well
+      # as this directory. That is the one thing the two applications genuinely share.
+      context: ..
+      dockerfile: receiver/Dockerfile
+    ports:
+      # Only nginx is published. The API listens on the loopback interface inside the container, so the proxy
+      # is the only route to it rather than merely the recommended one.
+      - "${OTP_RECEIVER_HTTP_PORT:-8081}:80"
+    environment:
+      OTP_RECEIVER_DATABASE_URL: postgres://otp:${OTP_RECEIVER_DB_PASSWORD:-otp}@postgres:5432/otp_sender?sslmode=disable
+
+      # Both secrets have no defaults in the application, and none are invented here: a compose file that
+      # supplied one would put a known signing key into every deployment that forgot to override it.
+      OTP_RECEIVER_ACK_SECRET: ${OTP_RECEIVER_ACK_SECRET:?set OTP_RECEIVER_ACK_SECRET, and use the same value as the sender}
+      OTP_RECEIVER_JWT_SECRET: ${OTP_RECEIVER_JWT_SECRET:?set OTP_RECEIVER_JWT_SECRET to at least 32 random bytes}
+
+      OTP_RECEIVER_STORAGE_ROOT: /var/lib/otp/receiver
+      # The display and the acknowledgement directory are the channel. In a real installation this volume is
+      # the only thing both machines can reach.
+      # The camera and the acknowledgement directory are the two ends of the channel from this side: frames
+      # are read out of one, reports are written into the other.
+      OTP_RECEIVER_CAPTURE_DIR: /var/lib/otp/shared/frames
+      OTP_RECEIVER_ACK_DIR: /var/lib/otp/shared
+
+      # Which hosts a merged file may be delivered to. There is no default, and that is deliberate: the
+      # callback URL crosses the optical channel from outside this machine, so a receiver with no allowlist
+      # would post files wherever the far side told it to. Empty means nothing is delivered — files still
+      # arrive, are verified, and can be downloaded from the UI.
+      OTP_RECEIVER_CALLBACK_ALLOWED_HOSTS: ${OTP_RECEIVER_CALLBACK_ALLOWED_HOSTS:-}
+      OTP_RECEIVER_LOG_LEVEL: ${OTP_RECEIVER_LOG_LEVEL:-info}
+    volumes:
+      - receiver-storage:/var/lib/otp/receiver
+      # Bind-mounted rather than a named volume, because this is the one path an operator has to be able to
+      # point at the same place on both machines — an NFS mount, a SAN share, a synced directory.
+      - ${OTP_SHARED_DIR:-./shared}:/var/lib/otp/shared
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      # Readiness rather than liveness, because this is what a load balancer should gate on: the process
+      # being up is not the same as it being able to serve.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: otp
+      POSTGRES_PASSWORD: ${OTP_RECEIVER_DB_PASSWORD:-otp}
+      POSTGRES_DB: otp_sender
+    volumes:
+      - receiver-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U otp -d otp_sender"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  receiver-storage:
+  receiver-postgres:

@@ -84,8 +84,14 @@ type Scheduler struct {
 	// what the receiver saw while it was gone.
 	sent map[int]time.Time
 
-	// shown counts displays per chunk, for the retry ceiling and the operator's counters.
-	shown map[int]int
+	// attempts counts *deliberate* sends of a chunk: the first display, and each retransmission after an
+	// acknowledgement timed out. Keep-alive repeats are excluded on purpose.
+	//
+	// The distinction is what the retry ceiling depends on. A keep-alive is the display filling time while a
+	// window waits — at thirty frames a second against a two-second acknowledgement poll, one chunk can be
+	// repeated sixty times before the news of its arrival gets back, and counting those as retries trips the
+	// ceiling on a transfer that was working perfectly. Attempts count what was actually tried.
+	attempts map[int]int
 }
 
 // Stats is what a display run achieved.
@@ -129,13 +135,13 @@ var ErrStalled = errors.New("scheduler: a chunk was not acknowledged within its 
 // New returns a scheduler.
 func New(st *store.Store, objects objectstore.Store, sink optical.Sink, cfg *config.Watcher, log *zap.Logger) *Scheduler {
 	return &Scheduler{
-		store:   st,
-		objects: objects,
-		sink:    sink,
-		cfg:     cfg,
-		log:     log.Named("scheduler"),
-		sent:    map[int]time.Time{},
-		shown:   map[int]int{},
+		store:    st,
+		objects:  objects,
+		sink:     sink,
+		cfg:      cfg,
+		log:      log.Named("scheduler"),
+		sent:     map[int]time.Time{},
+		attempts: map[int]int{},
 	}
 }
 
@@ -272,10 +278,10 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 		if err := s.show(ctx, *choice, priority); err != nil {
 			return stats, err
 		}
-		// Recorded after the frame is actually out, so the acknowledgement timeout is measured from
-		// when the receiver could first have seen it rather than from when the sender decided to.
+		// Recorded after the frame is actually out, so the acknowledgement timeout is measured from when the
+		// receiver could first have seen it rather than from when the sender decided to.
 		if chunk := s.chunkOf(pending, *choice); chunk != nil {
-			s.noteSent(chunk.ESI)
+			s.noteSent(chunk.ESI, priority)
 		}
 		switch priority {
 		case PriorityRetransmit:
@@ -287,13 +293,14 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 			stats.KeepAlives++
 		}
 
-		// A chunk that has been shown too many times without acknowledgement means the channel is not
-		// working. Continuing to display it would keep the process looking busy while making no
-		// progress, which is the worst possible thing to present to an operator.
-		if chunk := s.chunkOf(pending, *choice); chunk != nil && s.shown[chunk.ESI] > cfg.Ack.MaxRetries {
+		// A chunk that has been *sent* too many times without acknowledgement means the channel is not
+		// working. Continuing would keep the process looking busy while making no progress, which is the
+		// worst thing to present to an operator. Keep-alive repeats do not count, for the reason given on
+		// the attempts field.
+		if chunk := s.chunkOf(pending, *choice); chunk != nil && s.attemptsOf(chunk.ESI) > cfg.Ack.MaxRetries {
 			stats.Duration = time.Since(started)
-			reason := fmt.Sprintf("chunk %d was displayed %d times without being acknowledged",
-				chunk.ESI, s.shown[chunk.ESI])
+			reason := fmt.Sprintf("chunk %d was sent %d times without being acknowledged",
+				chunk.ESI, s.attemptsOf(chunk.ESI))
 			if err := s.store.Sessions.Close(ctx, session.ID, "failed", reason); err != nil {
 				s.log.Warn("could not close the display session", zap.Error(err))
 			}
@@ -397,11 +404,24 @@ func (s *Scheduler) show(ctx context.Context, frame store.Frame, priority Priori
 }
 
 // noteSent records that a chunk's frame has just been displayed.
-func (s *Scheduler) noteSent(esi int) {
+//
+// The timestamp is updated whatever the reason it was shown, because the acknowledgement timeout is about
+// when the receiver last had a chance to see it. The attempt count is not, because it is about how many
+// times the sender has genuinely tried.
+func (s *Scheduler) noteSent(esi int, priority Priority) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sent[esi] = time.Now()
-	s.shown[esi]++
+	if priority != PriorityKeepAlive {
+		s.attempts[esi]++
+	}
+}
+
+// attemptsOf is how many times a chunk has been deliberately sent.
+func (s *Scheduler) attemptsOf(esi int) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts[esi]
 }
 
 // chunkOf finds which pending chunk a frame carries.

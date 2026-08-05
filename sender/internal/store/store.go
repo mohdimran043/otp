@@ -332,16 +332,23 @@ func (r *Transmissions) SetFrameCount(ctx context.Context, id uuid.UUID, frames 
 
 // RecountAcked recomputes the acknowledged-chunk total from the chunks themselves.
 //
-// Deriving it rather than incrementing a counter is what makes it correct under
-// retransmission. Acknowledgements arrive more than once for the same chunk — an
-// acknowledgement and a retransmission cross in flight routinely — and a counter incremented
-// per acknowledgement would climb past the chunk count and report a transmission as more than
-// finished.
+// Deriving it rather than incrementing a counter is what makes it correct under retransmission.
+// Acknowledgements arrive more than once for the same chunk — an acknowledgement and a retransmission
+// cross in flight routinely — and a counter incremented per acknowledgement would climb past the chunk
+// count and report a transmission as more than finished.
+//
+// Only source chunks are counted. Parity shards are acknowledged too, and counting them would do the same
+// thing by a different route: chunk_count is the number of source chunks, so including parity made the
+// figure exceed it and progress read as more than complete. Parity is scaffolding — it never appears in
+// the file — so it does not belong in a measure of how much of the file has arrived.
 func (r *Transmissions) RecountAcked(ctx context.Context, id uuid.UUID) (int, error) {
 	var acked int
 	err := r.pool.QueryRow(ctx, `
 		UPDATE transmissions SET
-			acked_chunks = (SELECT count(*) FROM chunks WHERE transmission_id = $1 AND acked),
+			acked_chunks = (
+				SELECT count(*) FROM chunks
+				WHERE transmission_id = $1 AND acked AND NOT is_parity
+			),
 			updated_at = now()
 		WHERE id = $1
 		RETURNING acked_chunks`, id).Scan(&acked)

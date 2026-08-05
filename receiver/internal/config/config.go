@@ -94,6 +94,15 @@ type Capture struct {
 	// RetainFrames keeps captured frames after a transmission completes. They are what a replay
 	// works from, so an installation still being tuned wants them.
 	RetainFrames bool `yaml:"retain_frames"`
+
+	// Simulate degrades every frame before it is decoded, as a lens and a sensor would: "clean", "typical",
+	// "harsh", or "rolling-shutter". Empty means frames are read exactly as they were written.
+	//
+	// It exists for the file-backed source, where there is no optics at all — and without it a file-to-file
+	// deployment proves only that the decoder can read the encoder's own output, which is the easiest
+	// possible case. Naming a profile makes the virtual channel behave like a real one, so a demonstration
+	// or a soak test exercises the tolerances a camera actually will.
+	Simulate string `yaml:"simulate"`
 }
 
 // Decoder configures how frames are read.
@@ -316,6 +325,11 @@ func (c Config) Validate() error {
 	if c.Capture.IdleInterval <= 0 {
 		add("capture.idle_interval must be positive")
 	}
+	switch c.Capture.Simulate {
+	case "", "clean", "typical", "harsh", "rolling-shutter":
+	default:
+		add("capture.simulate %q is not one of clean, typical, harsh, rolling-shutter", c.Capture.Simulate)
+	}
 
 	if c.Decoder.CellPixelsHint < 0 {
 		add("decoder.cell_pixels_hint cannot be negative")
@@ -483,6 +497,7 @@ func applyEnv(c *Config) error {
 	boolean("CAPTURE_CONSUME", &c.Capture.Consume)
 	dur("CAPTURE_IDLE_INTERVAL", &c.Capture.IdleInterval)
 	boolean("CAPTURE_RETAIN_FRAMES", &c.Capture.RetainFrames)
+	str("CAPTURE_SIMULATE", &c.Capture.Simulate)
 
 	integer("DECODER_CELL_PIXELS_HINT", &c.Decoder.CellPixelsHint)
 	float("DECODER_MIN_FINDER_SCORE", &c.Decoder.MinFinderScore)

@@ -1,0 +1,109 @@
+# The demonstration: both applications, the shared volume between them, and a callback endpoint.
+#
+# It is a third compose file rather than a merge of the other two, because those two are what a real
+# deployment installs — one per machine, on two machines that can only reach each other through storage. This
+# one puts them on one host so the whole path can be watched at once, which is what a demonstration is for and
+# not how it would be run.
+
+name: otp-demo
+
+services:
+  sender-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: otp
+      POSTGRES_PASSWORD: otp
+      POSTGRES_DB: otp_sender
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U otp -d otp_sender"]
+      interval: 3s
+      retries: 20
+    tmpfs: [/var/lib/postgresql/data]
+
+  receiver-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: otp
+      POSTGRES_PASSWORD: otp
+      POSTGRES_DB: otp_receiver
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U otp -d otp_receiver"]
+      interval: 3s
+      retries: 20
+    tmpfs: [/var/lib/postgresql/data]
+
+  callback:
+    image: python:3.12-alpine
+    command: ["python", "/app/server.py"]
+    volumes:
+      - ./callback:/app:ro
+      - deliveries:/deliveries
+    ports:
+      # Published on 9100 because 9000 is commonly taken by something else on a developer machine; the
+      # receiver reaches it on the compose network by name and port either way.
+      - "9100:9000"
+
+  sender:
+    image: otp-sender-sender
+    ports:
+      - "8080:80"
+    environment:
+      OTP_SENDER_DATABASE_URL: postgres://otp:otp@sender-postgres:5432/otp_sender?sslmode=disable
+      OTP_SENDER_ACK_SECRET: demo-acknowledgement-secret-not-for-production
+      OTP_SENDER_JWT_SECRET: demo-jwt-secret-at-least-32-bytes-long-here
+      OTP_SENDER_STORAGE_ROOT: /var/lib/otp/sender
+      OTP_SENDER_DISPLAY_DIR: /var/lib/otp/shared/frames
+      OTP_SENDER_ACK_DIR: /var/lib/otp/shared
+      OTP_SENDER_ENCODER: color8
+      OTP_SENDER_COMPRESSION: zstd
+      OTP_SENDER_FEC_CODEC: reed-solomon
+      OTP_SENDER_FEC_DATA_SHARDS: "16"
+      OTP_SENDER_FEC_PARITY_SHARDS: "4"
+      OTP_SENDER_GRID_WIDTH: "96"
+      OTP_SENDER_GRID_HEIGHT: "96"
+      OTP_SENDER_CELL_PIXELS: "6"
+      # Faster than a real installation so a demonstration finishes while somebody is watching. A deployment
+      # driving an actual monitor runs at ten or so, limited by the camera rather than by this.
+      OTP_SENDER_DISPLAY_FPS: "30"
+      OTP_SENDER_ACK_TIMEOUT: 3s
+      OTP_SENDER_MANIFEST_INTERVAL: "16"
+      OTP_SENDER_LOG_LEVEL: info
+    volumes:
+      - sender-storage:/var/lib/otp/sender
+      - shared:/var/lib/otp/shared
+    depends_on:
+      sender-postgres: {condition: service_healthy}
+
+  receiver:
+    image: otp-receiver-receiver
+    ports:
+      - "8081:80"
+    environment:
+      OTP_RECEIVER_DATABASE_URL: postgres://otp:otp@receiver-postgres:5432/otp_receiver?sslmode=disable
+      OTP_RECEIVER_ACK_SECRET: demo-acknowledgement-secret-not-for-production
+      OTP_RECEIVER_JWT_SECRET: demo-jwt-secret-at-least-32-bytes-long-here
+      OTP_RECEIVER_STORAGE_ROOT: /var/lib/otp/receiver
+      OTP_RECEIVER_CAPTURE_DIR: /var/lib/otp/shared/frames
+      OTP_RECEIVER_ACK_DIR: /var/lib/otp/shared
+      # The callback endpoint's host, named explicitly. The URL itself arrives over the optical channel, so
+      # without this the receiver would refuse to deliver anywhere — which is the safe default.
+      # A simulated camera in front of the file source: blur, sensor noise, an off-axis view, vignetting, and
+      # the compression a camera applies on the way out. Without it a file-to-file demonstration would show
+      # only that the decoder can read the encoder's own output, which is the easiest case there is.
+      OTP_RECEIVER_CAPTURE_SIMULATE: typical
+      OTP_RECEIVER_CAPTURE_RETAIN_FRAMES: "true"
+      OTP_RECEIVER_CALLBACK_ALLOWED_HOSTS: callback
+      OTP_RECEIVER_LOG_LEVEL: info
+    volumes:
+      - receiver-storage:/var/lib/otp/receiver
+      - shared:/var/lib/otp/shared
+    depends_on:
+      receiver-postgres: {condition: service_healthy}
+
+volumes:
+  sender-storage:
+  receiver-storage:
+  deliveries:
+  # The channel. In a real installation this is an NFS or SAN mount that both machines can see and nothing
+  # else about them is shared.
+  shared:
