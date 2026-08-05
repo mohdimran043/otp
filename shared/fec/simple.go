@@ -29,8 +29,17 @@ func (*noneCodec) Description() string {
 // describe.
 func (*noneCodec) MaxDataShards() int { return 65535 }
 
+// Validate accepts a shard count of zero, which the other codecs do not.
+//
+// It is how a configuration says "no error correction" without also having to name a block
+// size that means nothing: with no parity there is no block, so the source count is not a
+// property of anything. Requiring one would make `codec: none` fail on a field the operator
+// had no reason to set — and the obvious workaround, skipping the check when the codec is
+// none, would let a nonsensical count through unremarked.
+//
+// Decoding still requires a real count; see Decode.
 func (*noneCodec) Validate(dataShards, parityShards int) error {
-	if dataShards < 1 || dataShards > 65535 {
+	if dataShards < 0 || dataShards > 65535 {
 		return fmt.Errorf("%w: %d data shards", ErrShardGeometry, dataShards)
 	}
 	if parityShards != 0 {
@@ -53,6 +62,11 @@ func (c *noneCodec) Encode(source [][]byte, parityShards int) ([][]byte, error) 
 func (c *noneCodec) Decode(received []Shard, dataShards, parityShards int) ([][]byte, error) {
 	if err := c.Validate(dataShards, parityShards); err != nil {
 		return nil, err
+	}
+	// Validate tolerates zero because a configuration may legitimately leave the block size
+	// unset; a decode cannot, since it has to say how many shards it is returning.
+	if dataShards < 1 {
+		return nil, fmt.Errorf("%w: decoding needs a positive shard count", ErrShardGeometry)
 	}
 	byESI, size, err := collect(received, dataShards)
 	if err != nil {

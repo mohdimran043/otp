@@ -488,3 +488,158 @@ func TestRaptorQPaddingIsInvisible(t *testing.T) {
 		})
 	}
 }
+
+// TestNoneCodecAcceptsAnUnsetBlockSize covers how a configuration turns error correction off.
+// Requiring a block size for a codec that has no blocks would make "none" fail on a field the
+// operator had no reason to set.
+func TestNoneCodecAcceptsAnUnsetBlockSize(t *testing.T) {
+	require.NoError(t, fec.None.Validate(0, 0), "a zero block size means no error correction")
+	require.Error(t, fec.None.Validate(0, 4), "the none codec cannot produce parity")
+
+	// Decoding is the other case: it has to say how many shards it is returning, so a zero
+	// count there is a caller mistake rather than a configuration choice.
+	_, err := fec.None.Decode([]fec.Shard{{ESI: 0, Data: []byte("x")}}, 0, 0)
+	require.ErrorIs(t, err, fec.ErrShardGeometry)
+
+	// And the other codecs still require a real block size, since for them it describes the
+	// code itself.
+	for _, c := range fec.All() {
+		if c.ID() == fec.IDNone {
+			continue
+		}
+		require.Error(t, c.Validate(0, 4), "%s needs a block size", c.Name())
+	}
+}
+
+// TestBlockingTranslatesBothWays covers the arithmetic a sender and a receiver have to agree on
+// without being able to see each other's data: which block a transmission-wide chunk number
+// belongs to, and what its number is inside that block.
+//
+// Two implementations of this would eventually disagree, and the symptom would not be an error —
+// it would be a block that reconstructs into the wrong bytes.
+func TestBlockingTranslatesBothWays(t *testing.T) {
+	// Twenty-six source chunks in blocks of eight: three full blocks and a final block of two.
+	b := fec.NewBlocking(26, 8, 4)
+
+	require.True(t, b.Enabled())
+	require.Equal(t, 4, b.Blocks())
+	require.Equal(t, 8, b.BlockSize(0))
+	require.Equal(t, 8, b.BlockSize(2))
+	require.Equal(t, 2, b.BlockSize(3), "the last block holds the remainder")
+	require.Zero(t, b.BlockSize(4), "there is no fifth block")
+
+	for _, c := range []struct{ chunk, block, inBlock int }{
+		{0, 0, 0}, {7, 0, 7}, {8, 1, 0}, {23, 2, 7}, {24, 3, 0}, {25, 3, 1},
+	} {
+		block, inBlock, err := b.SourceShard(c.chunk)
+		require.NoError(t, err)
+		require.Equal(t, c.block, block, "chunk %d", c.chunk)
+		require.Equal(t, c.inBlock, inBlock, "chunk %d", c.chunk)
+
+		back, err := b.SourceChunk(block, inBlock)
+		require.NoError(t, err)
+		require.Equal(t, c.chunk, back, "the translation must reverse")
+	}
+
+	// Parity chunks come after every source chunk, block by block, and their number inside a
+	// block starts at that block's source count — which for the short final block is not
+	// DataShards.
+	for _, c := range []struct{ chunk, block, inBlock int }{
+		{26, 0, 8}, {29, 0, 11}, {30, 1, 8}, {38, 3, 2}, {41, 3, 5},
+	} {
+		block, inBlock, err := b.ParityShard(c.chunk)
+		require.NoError(t, err)
+		require.Equal(t, c.block, block, "parity chunk %d", c.chunk)
+		require.Equal(t, c.inBlock, inBlock, "parity chunk %d", c.chunk)
+	}
+
+	first, err := b.ParityChunk(0, 0)
+	require.NoError(t, err)
+	require.Equal(t, 26, first)
+	last, err := b.ParityChunk(3, 3)
+	require.NoError(t, err)
+	require.Equal(t, 41, last)
+
+	// Out of range in either direction is an error rather than a plausible-looking answer.
+	_, _, err = b.SourceShard(26)
+	require.ErrorIs(t, err, fec.ErrBadESI)
+	_, _, err = b.SourceShard(-1)
+	require.ErrorIs(t, err, fec.ErrBadESI)
+	_, _, err = b.ParityShard(25)
+	require.ErrorIs(t, err, fec.ErrBadESI)
+	_, _, err = b.ParityShard(42)
+	require.ErrorIs(t, err, fec.ErrBadESI)
+	_, err = b.ParityChunk(4, 0)
+	require.ErrorIs(t, err, fec.ErrBadESI)
+
+	// And a transmission with no error correction reports so rather than dividing by zero.
+	off := fec.NewBlocking(26, 0, 0)
+	require.False(t, off.Enabled())
+	require.Zero(t, off.Blocks())
+	_, _, err = off.SourceShard(0)
+	require.ErrorIs(t, err, fec.ErrShardGeometry)
+}
+
+// TestBlockingRoundTripsThroughACodec puts the arithmetic to work: shards are labelled by
+// transmission-wide chunk number, translated into block coordinates, and decoded — which is
+// exactly the path a receiver takes.
+func TestBlockingRoundTripsThroughACodec(t *testing.T) {
+	const sourceCount, dataShards, parityShards = 26, 8, 4
+	b := fec.NewBlocking(sourceCount, dataShards, parityShards)
+
+	source := makeBlock(t, sourceCount, 31)
+	parityByChunk := map[int][]byte{}
+
+	for block := 0; block < b.Blocks(); block++ {
+		size := b.BlockSize(block)
+		shards := make([][]byte, size)
+		for i := 0; i < size; i++ {
+			chunk, err := b.SourceChunk(block, i)
+			require.NoError(t, err)
+			shards[i] = source[chunk]
+		}
+
+		repair, err := fec.ReedSolomon.Encode(shards, parityShards)
+		require.NoError(t, err)
+		for i, shard := range repair {
+			chunk, err := b.ParityChunk(block, i)
+			require.NoError(t, err)
+			parityByChunk[chunk] = shard
+		}
+	}
+
+	// Lose two source chunks from the first block and two from the short final one, then rebuild
+	// each block from whatever is left plus its own parity.
+	lost := map[int]bool{1: true, 4: true, 24: true, 25: true}
+
+	for block := 0; block < b.Blocks(); block++ {
+		size := b.BlockSize(block)
+
+		var received []fec.Shard
+		for i := 0; i < size; i++ {
+			chunk, err := b.SourceChunk(block, i)
+			require.NoError(t, err)
+			if lost[chunk] {
+				continue
+			}
+			received = append(received, fec.Shard{ESI: uint32(i), Data: source[chunk]})
+		}
+		for i := 0; i < parityShards; i++ {
+			chunk, err := b.ParityChunk(block, i)
+			require.NoError(t, err)
+			_, inBlock, err := b.ParityShard(chunk)
+			require.NoError(t, err)
+			received = append(received, fec.Shard{ESI: uint32(inBlock), Data: parityByChunk[chunk]})
+		}
+
+		rebuilt, err := fec.ReedSolomon.Decode(received, size, parityShards)
+		require.NoError(t, err, "block %d of %d shards should rebuild", block, size)
+
+		for i := 0; i < size; i++ {
+			chunk, err := b.SourceChunk(block, i)
+			require.NoError(t, err)
+			require.Equal(t, source[chunk], rebuilt[i],
+				"block %d shard %d (chunk %d)", block, i, chunk)
+		}
+	}
+}

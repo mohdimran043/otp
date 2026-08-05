@@ -1,0 +1,636 @@
+// Package store is the sender's data access layer: one type per table, with the queries the
+// pipeline and the API need and nothing else.
+//
+// It is hand-written SQL rather than generated or reflected, and the reason is that the
+// interesting queries here are not row-at-a-time CRUD. Claiming work, finding the next
+// unacknowledged chunk in priority order, counting a transmission's progress — those are the
+// ones that matter, and they are clearer written out than assembled by a builder.
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/opticaltransport/otp/sender/internal/db"
+)
+
+// ErrNotFound means no row matched.
+var ErrNotFound = errors.New("store: not found")
+
+// Store holds every repository, so a caller takes one dependency rather than eight.
+type Store struct {
+	pool *db.Pool
+
+	Files         *Files
+	Transmissions *Transmissions
+	Chunks        *Chunks
+	Frames        *Frames
+	Stats         *Stats
+}
+
+// New returns a store over a connection pool.
+func New(pool *db.Pool) *Store {
+	return &Store{
+		pool:          pool,
+		Files:         &Files{pool: pool},
+		Transmissions: &Transmissions{pool: pool},
+		Chunks:        &Chunks{pool: pool},
+		Frames:        &Frames{pool: pool},
+		Stats:         &Stats{pool: pool},
+	}
+}
+
+// Pool exposes the underlying pool for the health check and for packages that own their own
+// tables, like the job engine.
+func (s *Store) Pool() *db.Pool { return s.pool }
+
+// File is an uploaded file.
+type File struct {
+	ID          uuid.UUID  `json:"id"`
+	Filename    string     `json:"filename"`
+	StoredPath  string     `json:"stored_path"`
+	SizeBytes   int64      `json:"size_bytes"`
+	SHA256      []byte     `json:"sha256"`
+	ContentType string     `json:"content_type"`
+	UploadedBy  *uuid.UUID `json:"uploaded_by,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// Files is the uploaded-file repository.
+type Files struct{ pool *db.Pool }
+
+const fileColumns = `id, filename, stored_path, size_bytes, sha256, content_type,
+	uploaded_by, created_at, updated_at`
+
+func scanFile(row pgx.Row) (File, error) {
+	var f File
+	err := row.Scan(&f.ID, &f.Filename, &f.StoredPath, &f.SizeBytes, &f.SHA256,
+		&f.ContentType, &f.UploadedBy, &f.CreatedAt, &f.UpdatedAt)
+	return f, err
+}
+
+// Create records an uploaded file.
+func (r *Files) Create(ctx context.Context, f File) (File, error) {
+	if f.ID == uuid.Nil {
+		f.ID = uuid.New()
+	}
+	return scanFile(r.pool.QueryRow(ctx, `
+		INSERT INTO files (id, filename, stored_path, size_bytes, sha256, content_type, uploaded_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING `+fileColumns,
+		f.ID, f.Filename, f.StoredPath, f.SizeBytes, f.SHA256, f.ContentType, f.UploadedBy))
+}
+
+// Get returns one file.
+func (r *Files) Get(ctx context.Context, id uuid.UUID) (File, error) {
+	f, err := scanFile(r.pool.QueryRow(ctx, `SELECT `+fileColumns+` FROM files WHERE id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return File{}, fmt.Errorf("%w: file %s", ErrNotFound, id)
+	}
+	return f, err
+}
+
+// List returns files, newest first.
+func (r *Files) List(ctx context.Context, limit, offset int) ([]File, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+fileColumns+` FROM files ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+		page(limit), max(offset, 0))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []File
+	for rows.Next() {
+		f, err := scanFile(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// Delete removes a file and, by the cascade, everything derived from it.
+func (r *Files) Delete(ctx context.Context, id uuid.UUID) error {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM files WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: file %s", ErrNotFound, id)
+	}
+	return nil
+}
+
+// TransmissionStatus is where a transmission is in its life.
+type TransmissionStatus string
+
+// Transmission statuses.
+const (
+	TxPending      TransmissionStatus = "pending"
+	TxPreparing    TransmissionStatus = "preparing"
+	TxReady        TransmissionStatus = "ready"
+	TxTransmitting TransmissionStatus = "transmitting"
+	TxPaused       TransmissionStatus = "paused"
+	TxCompleted    TransmissionStatus = "completed"
+	TxFailed       TransmissionStatus = "failed"
+	TxCancelled    TransmissionStatus = "cancelled"
+)
+
+// Transmission is one file being sent, with the profile it is being sent under.
+//
+// The profile fields are copied onto the row rather than only referenced, because a
+// transmission must stay self-describing. Profiles are edited and deleted while
+// transmissions from them are still running or still in the history, and a record that
+// said only "encoding profile 4" would become unreadable the moment profile 4 changed.
+type Transmission struct {
+	ID     uuid.UUID          `json:"id"`
+	FileID uuid.UUID          `json:"file_id"`
+	Status TransmissionStatus `json:"status"`
+
+	Priority string `json:"priority"`
+
+	CompressionProfile *uuid.UUID `json:"compression_profile,omitempty"`
+	EncodingProfile    *uuid.UUID `json:"encoding_profile,omitempty"`
+
+	Encoder          string `json:"encoder"`
+	BitDepth         int    `json:"bit_depth"`
+	Compression      string `json:"compression"`
+	CompressionLevel int    `json:"compression_level"`
+	FECCodec         string `json:"fec_codec"`
+	FECDataShards    int    `json:"fec_data_shards"`
+	FECParityShards  int    `json:"fec_parity_shards"`
+	GridWidth        int    `json:"grid_width"`
+	GridHeight       int    `json:"grid_height"`
+	CellPixels       int    `json:"cell_pixels"`
+	QuietZone        int    `json:"quiet_zone"`
+	Encrypted        bool   `json:"encrypted"`
+
+	OriginalSize   int64 `json:"original_size"`
+	CompressedSize int64 `json:"compressed_size"`
+	ChunkSize      int   `json:"chunk_size"`
+	ChunkCount     int   `json:"chunk_count"`
+	FrameCount     int   `json:"frame_count"`
+
+	AckedChunks   int `json:"acked_chunks"`
+	Retransmits   int `json:"retransmits"`
+	DroppedFrames int `json:"dropped_frames"`
+
+	Error       string     `json:"error,omitempty"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+// Progress is the fraction of chunks acknowledged, in 0..1.
+func (t Transmission) Progress() float64 {
+	if t.ChunkCount == 0 {
+		return 0
+	}
+	return float64(t.AckedChunks) / float64(t.ChunkCount)
+}
+
+// Transmissions is the transmission repository.
+type Transmissions struct{ pool *db.Pool }
+
+const txColumns = `id, file_id, status, priority, compression_profile, encoding_profile,
+	encoder, bit_depth, compression, compression_level, fec_codec, fec_data_shards,
+	fec_parity_shards, grid_width, grid_height, cell_pixels, quiet_zone, encrypted,
+	original_size, compressed_size, chunk_size, chunk_count, frame_count,
+	acked_chunks, retransmits, dropped_frames, error, started_at, completed_at,
+	created_at, updated_at`
+
+func scanTransmission(row pgx.Row) (Transmission, error) {
+	var t Transmission
+	err := row.Scan(&t.ID, &t.FileID, &t.Status, &t.Priority, &t.CompressionProfile,
+		&t.EncodingProfile, &t.Encoder, &t.BitDepth, &t.Compression, &t.CompressionLevel,
+		&t.FECCodec, &t.FECDataShards, &t.FECParityShards, &t.GridWidth, &t.GridHeight,
+		&t.CellPixels, &t.QuietZone, &t.Encrypted, &t.OriginalSize, &t.CompressedSize,
+		&t.ChunkSize, &t.ChunkCount, &t.FrameCount, &t.AckedChunks, &t.Retransmits,
+		&t.DroppedFrames, &t.Error, &t.StartedAt, &t.CompletedAt, &t.CreatedAt, &t.UpdatedAt)
+	return t, err
+}
+
+// Create records a transmission.
+func (r *Transmissions) Create(ctx context.Context, t Transmission) (Transmission, error) {
+	if t.ID == uuid.Nil {
+		t.ID = uuid.New()
+	}
+	if t.Status == "" {
+		t.Status = TxPending
+	}
+	if t.Priority == "" {
+		t.Priority = "normal"
+	}
+	return scanTransmission(r.pool.QueryRow(ctx, `
+		INSERT INTO transmissions (id, file_id, status, priority, compression_profile,
+			encoding_profile, encoder, bit_depth, compression, compression_level, fec_codec,
+			fec_data_shards, fec_parity_shards, grid_width, grid_height, cell_pixels,
+			quiet_zone, encrypted, original_size)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+		RETURNING `+txColumns,
+		t.ID, t.FileID, t.Status, t.Priority, t.CompressionProfile, t.EncodingProfile,
+		t.Encoder, t.BitDepth, t.Compression, t.CompressionLevel, t.FECCodec,
+		t.FECDataShards, t.FECParityShards, t.GridWidth, t.GridHeight, t.CellPixels,
+		t.QuietZone, t.Encrypted, t.OriginalSize))
+}
+
+// Get returns one transmission.
+func (r *Transmissions) Get(ctx context.Context, id uuid.UUID) (Transmission, error) {
+	t, err := scanTransmission(r.pool.QueryRow(ctx,
+		`SELECT `+txColumns+` FROM transmissions WHERE id = $1`, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Transmission{}, fmt.Errorf("%w: transmission %s", ErrNotFound, id)
+	}
+	return t, err
+}
+
+// List returns transmissions, newest first, optionally filtered by status.
+func (r *Transmissions) List(ctx context.Context, statuses []TransmissionStatus, limit, offset int) ([]Transmission, error) {
+	query := `SELECT ` + txColumns + ` FROM transmissions`
+	args := []any{}
+	if len(statuses) > 0 {
+		values := make([]string, len(statuses))
+		for i, s := range statuses {
+			values[i] = string(s)
+		}
+		args = append(args, values)
+		query += ` WHERE status = ANY ($1)`
+	}
+	args = append(args, page(limit), max(offset, 0))
+	query += fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Transmission
+	for rows.Next() {
+		t, err := scanTransmission(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// SetStatus moves a transmission to a new status, recording the timestamps that go with it.
+func (r *Transmissions) SetStatus(ctx context.Context, id uuid.UUID, status TransmissionStatus, reason string) error {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE transmissions SET
+			status = $2,
+			error = $3,
+			started_at = CASE WHEN $2 = 'transmitting' AND started_at IS NULL THEN now() ELSE started_at END,
+			completed_at = CASE WHEN $2 IN ('completed', 'failed', 'cancelled') THEN now() ELSE completed_at END,
+			updated_at = now()
+		WHERE id = $1`, id, status, reason)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: transmission %s", ErrNotFound, id)
+	}
+	return nil
+}
+
+// SetSizes records what compression and chunking produced.
+func (r *Transmissions) SetSizes(ctx context.Context, id uuid.UUID, compressed int64, chunkSize, chunkCount int) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE transmissions SET compressed_size = $2, chunk_size = $3, chunk_count = $4,
+		                         updated_at = now()
+		WHERE id = $1`, id, compressed, chunkSize, chunkCount)
+	return err
+}
+
+// SetFrameCount records how many frames were rendered.
+func (r *Transmissions) SetFrameCount(ctx context.Context, id uuid.UUID, frames int) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE transmissions SET frame_count = $2, updated_at = now() WHERE id = $1`, id, frames)
+	return err
+}
+
+// RecountAcked recomputes the acknowledged-chunk total from the chunks themselves.
+//
+// Deriving it rather than incrementing a counter is what makes it correct under
+// retransmission. Acknowledgements arrive more than once for the same chunk — an
+// acknowledgement and a retransmission cross in flight routinely — and a counter incremented
+// per acknowledgement would climb past the chunk count and report a transmission as more than
+// finished.
+func (r *Transmissions) RecountAcked(ctx context.Context, id uuid.UUID) (int, error) {
+	var acked int
+	err := r.pool.QueryRow(ctx, `
+		UPDATE transmissions SET
+			acked_chunks = (SELECT count(*) FROM chunks WHERE transmission_id = $1 AND acked),
+			updated_at = now()
+		WHERE id = $1
+		RETURNING acked_chunks`, id).Scan(&acked)
+	return acked, err
+}
+
+// AddCounters increments the running totals the operator UI displays.
+func (r *Transmissions) AddCounters(ctx context.Context, id uuid.UUID, retransmits, dropped int) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE transmissions SET retransmits = retransmits + $2, dropped_frames = dropped_frames + $3,
+		                         updated_at = now()
+		WHERE id = $1`, id, retransmits, dropped)
+	return err
+}
+
+// Chunk is one unit of the compressed stream, as it will be carried by one frame.
+type Chunk struct {
+	ID             uuid.UUID  `json:"id"`
+	TransmissionID uuid.UUID  `json:"transmission_id"`
+	ESI            int        `json:"esi"`
+	BlockIndex     int        `json:"block_index"`
+	IsParity       bool       `json:"is_parity"`
+	SizeBytes      int        `json:"size_bytes"`
+	CRC32          int64      `json:"crc32"`
+	SHA256         []byte     `json:"sha256"`
+	StoredPath     string     `json:"stored_path"`
+	Acked          bool       `json:"acked"`
+	AckedAt        *time.Time `json:"acked_at,omitempty"`
+	RetryCount     int        `json:"retry_count"`
+	CreatedAt      time.Time  `json:"created_at"`
+}
+
+// Chunks is the chunk repository.
+type Chunks struct{ pool *db.Pool }
+
+const chunkColumns = `id, transmission_id, esi, block_index, is_parity, size_bytes,
+	crc32, sha256, stored_path, acked, acked_at, retry_count, created_at`
+
+func scanChunk(row pgx.Row) (Chunk, error) {
+	var c Chunk
+	err := row.Scan(&c.ID, &c.TransmissionID, &c.ESI, &c.BlockIndex, &c.IsParity,
+		&c.SizeBytes, &c.CRC32, &c.SHA256, &c.StoredPath, &c.Acked, &c.AckedAt,
+		&c.RetryCount, &c.CreatedAt)
+	return c, err
+}
+
+// InsertMany writes a batch of chunks in one round trip.
+//
+// A transmission has thousands of chunks, and inserting them one at a time would spend most
+// of the chunking stage waiting on network latency rather than doing work. CopyFrom is the
+// bulk path pgx offers over the Postgres copy protocol.
+func (r *Chunks) InsertMany(ctx context.Context, chunks []Chunk) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+	rows := make([][]any, len(chunks))
+	for i, c := range chunks {
+		if c.ID == uuid.Nil {
+			c.ID = uuid.New()
+		}
+		rows[i] = []any{c.ID, c.TransmissionID, c.ESI, c.BlockIndex, c.IsParity,
+			c.SizeBytes, c.CRC32, c.SHA256, c.StoredPath}
+	}
+	_, err := r.pool.CopyFrom(ctx,
+		pgx.Identifier{"chunks"},
+		[]string{"id", "transmission_id", "esi", "block_index", "is_parity", "size_bytes",
+			"crc32", "sha256", "stored_path"},
+		pgx.CopyFromRows(rows))
+	return err
+}
+
+// List returns a transmission's chunks in identifier order.
+func (r *Chunks) List(ctx context.Context, transmissionID uuid.UUID) ([]Chunk, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+chunkColumns+` FROM chunks WHERE transmission_id = $1 ORDER BY esi`, transmissionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Chunk
+	for rows.Next() {
+		c, err := scanChunk(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// Pending returns the unacknowledged chunks of a transmission, oldest first, up to limit.
+// It is the scheduler's window query.
+func (r *Chunks) Pending(ctx context.Context, transmissionID uuid.UUID, limit int) ([]Chunk, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT `+chunkColumns+` FROM chunks
+		WHERE transmission_id = $1 AND NOT acked
+		ORDER BY esi LIMIT $2`, transmissionID, page(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Chunk
+	for rows.Next() {
+		c, err := scanChunk(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// DeleteFor removes every chunk of a transmission.
+//
+// It exists so the chunking stage can be re-run. A job is retried on any transient failure and
+// reclaimed if its worker dies, so every stage has to be safe to run twice — and a stage that
+// inserts rows is only safe to run twice if it first removes what its previous attempt wrote.
+// The alternative, an upsert, would leave behind chunks from a longer previous run whenever the
+// stream got shorter.
+func (r *Chunks) DeleteFor(ctx context.Context, transmissionID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM chunks WHERE transmission_id = $1`, transmissionID)
+	return err
+}
+
+// DeleteParityFor removes only the parity shards, which is what the error-coding stage replaces.
+func (r *Chunks) DeleteParityFor(ctx context.Context, transmissionID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx,
+		`DELETE FROM chunks WHERE transmission_id = $1 AND is_parity`, transmissionID)
+	return err
+}
+
+// MarkAcked records that a chunk arrived. It is idempotent, because an acknowledgement for a
+// chunk already acknowledged is routine rather than exceptional.
+func (r *Chunks) MarkAcked(ctx context.Context, transmissionID uuid.UUID, esi int) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE chunks SET acked = true, acked_at = coalesce(acked_at, now())
+		WHERE transmission_id = $1 AND esi = $2`, transmissionID, esi)
+	return err
+}
+
+// AddRetry counts another attempt at a chunk.
+func (r *Chunks) AddRetry(ctx context.Context, transmissionID uuid.UUID, esi int) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE chunks SET retry_count = retry_count + 1
+		WHERE transmission_id = $1 AND esi = $2`, transmissionID, esi)
+	return err
+}
+
+// Frame is one rendered image.
+type Frame struct {
+	ID             uuid.UUID  `json:"id"`
+	TransmissionID uuid.UUID  `json:"transmission_id"`
+	ChunkID        *uuid.UUID `json:"chunk_id,omitempty"`
+	FrameNumber    int        `json:"frame_number"`
+	IsManifest     bool       `json:"is_manifest"`
+	Flags          int        `json:"flags"`
+	WidthPx        int        `json:"width_px"`
+	HeightPx       int        `json:"height_px"`
+	PayloadBytes   int        `json:"payload_bytes"`
+	StoredPath     string     `json:"stored_path"`
+	SHA256         []byte     `json:"sha256"`
+	DisplayedCount int        `json:"displayed_count"`
+	LastDisplayed  *time.Time `json:"last_displayed,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+}
+
+// Frames is the rendered-frame repository.
+type Frames struct{ pool *db.Pool }
+
+const frameColumns = `id, transmission_id, chunk_id, frame_number, is_manifest, flags,
+	width_px, height_px, payload_bytes, stored_path, sha256, displayed_count,
+	last_displayed, created_at`
+
+func scanFrame(row pgx.Row) (Frame, error) {
+	var f Frame
+	err := row.Scan(&f.ID, &f.TransmissionID, &f.ChunkID, &f.FrameNumber, &f.IsManifest,
+		&f.Flags, &f.WidthPx, &f.HeightPx, &f.PayloadBytes, &f.StoredPath, &f.SHA256,
+		&f.DisplayedCount, &f.LastDisplayed, &f.CreatedAt)
+	return f, err
+}
+
+// InsertMany writes a batch of frames.
+func (r *Frames) InsertMany(ctx context.Context, frames []Frame) error {
+	if len(frames) == 0 {
+		return nil
+	}
+	rows := make([][]any, len(frames))
+	for i, f := range frames {
+		if f.ID == uuid.Nil {
+			f.ID = uuid.New()
+		}
+		rows[i] = []any{f.ID, f.TransmissionID, f.ChunkID, f.FrameNumber, f.IsManifest,
+			f.Flags, f.WidthPx, f.HeightPx, f.PayloadBytes, f.StoredPath, f.SHA256}
+	}
+	_, err := r.pool.CopyFrom(ctx,
+		pgx.Identifier{"encoded_frames"},
+		[]string{"id", "transmission_id", "chunk_id", "frame_number", "is_manifest", "flags",
+			"width_px", "height_px", "payload_bytes", "stored_path", "sha256"},
+		pgx.CopyFromRows(rows))
+	return err
+}
+
+// DeleteFor removes every frame of a transmission, so the rendering stage can be re-run.
+func (r *Frames) DeleteFor(ctx context.Context, transmissionID uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM encoded_frames WHERE transmission_id = $1`, transmissionID)
+	return err
+}
+
+// List returns a transmission's frames in display order.
+func (r *Frames) List(ctx context.Context, transmissionID uuid.UUID) ([]Frame, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+frameColumns+` FROM encoded_frames WHERE transmission_id = $1 ORDER BY frame_number`,
+		transmissionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Frame
+	for rows.Next() {
+		f, err := scanFrame(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// ForChunk returns the frame carrying a chunk, which is what a retransmission needs.
+func (r *Frames) ForChunk(ctx context.Context, chunkID uuid.UUID) (Frame, error) {
+	f, err := scanFrame(r.pool.QueryRow(ctx,
+		`SELECT `+frameColumns+` FROM encoded_frames WHERE chunk_id = $1 ORDER BY frame_number LIMIT 1`,
+		chunkID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Frame{}, fmt.Errorf("%w: no frame carries chunk %s", ErrNotFound, chunkID)
+	}
+	return f, err
+}
+
+// MarkDisplayed counts a frame as shown.
+func (r *Frames) MarkDisplayed(ctx context.Context, id uuid.UUID) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE encoded_frames SET displayed_count = displayed_count + 1, last_displayed = now()
+		WHERE id = $1`, id)
+	return err
+}
+
+// Stats records measurements over time.
+type Stats struct{ pool *db.Pool }
+
+// Sample is one recorded measurement.
+type Sample struct {
+	Metric         string     `json:"metric"`
+	Value          float64    `json:"value"`
+	TransmissionID *uuid.UUID `json:"transmission_id,omitempty"`
+	RecordedAt     time.Time  `json:"recorded_at"`
+}
+
+// Record appends a measurement.
+//
+// Samples are appended rather than a counter being updated, so a chart can show how a figure
+// moved rather than only where it ended up — which for throughput and acknowledgement latency
+// is the entire question an operator is asking.
+func (r *Stats) Record(ctx context.Context, metric string, value float64, transmissionID *uuid.UUID) error {
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO statistics (transmission_id, metric, value) VALUES ($1, $2, $3)`,
+		transmissionID, metric, value)
+	return err
+}
+
+// Series returns a metric's samples, oldest first.
+func (r *Stats) Series(ctx context.Context, metric string, transmissionID *uuid.UUID, limit int) ([]Sample, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT metric, value, transmission_id, recorded_at FROM statistics
+		WHERE metric = $1 AND ($2::uuid IS NULL OR transmission_id = $2)
+		ORDER BY recorded_at LIMIT $3`, metric, transmissionID, page(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Sample
+	for rows.Next() {
+		var s Sample
+		if err := rows.Scan(&s.Metric, &s.Value, &s.TransmissionID, &s.RecordedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// page bounds a limit, so a caller cannot ask for the whole table by accident.
+func page(limit int) int {
+	if limit <= 0 || limit > 1000 {
+		return 100
+	}
+	return limit
+}

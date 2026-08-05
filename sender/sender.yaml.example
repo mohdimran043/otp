@@ -1,0 +1,86 @@
+# Sender configuration.
+#
+# Everything here has a default except the two secrets, which have none on purpose. Values may
+# also be set by environment variable, and the environment wins.
+#
+# Only part of this file can be reloaded while the process runs: the log level, job concurrency,
+# and the display's frame rate, brightness, gamma, and window size. Everything else takes effect
+# at startup, because a running transmission depends on it — the grid geometry in particular is
+# written into every frame header, and the chunk size was derived from it.
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  max_upload_bytes: 34359738368   # 32 GiB
+  cors_origins:
+    - http://localhost:5173
+
+database:
+  url: postgres://otp:otp@localhost:5432/otp_sender?sslmode=disable
+  max_conns: 16
+  migrate_on_start: true
+
+storage:
+  backend: filesystem             # or minio
+  root: /var/lib/otp/sender
+
+broker:
+  backend: internal               # or rabbitmq
+
+jobs:
+  concurrency: 4                  # reloadable
+  max_attempts: 5
+  backoff_base: 2s
+  backoff_max: 5m
+  retention_days: 30
+
+optical:
+  encoder: color8                 # binary, grayscale, color8, color16, rolling
+  bit_depth: 0                    # 0 means whichever depth the encoder prefers
+  compression: zstd               # none, gzip, lz4, zstd, brotli
+  level: 6
+  fec:
+    codec: reed-solomon           # none, reed-solomon, raptorq, ldpc
+    data_shards: 32
+    parity_shards: 8
+  grid_width: 128
+  grid_height: 128
+  cell_pixels: 8
+  quiet_zone: 2
+  manifest_interval: 64           # re-emit the manifest this often, so a late receiver can join
+  # encryption_key_hex: 64 hex characters enables AES-256-GCM on every payload
+
+display:
+  sink: file                      # or opengl
+  dir: /var/lib/otp/shared/frames
+  fps: 10                         # reloadable
+  brightness: 0                   # reloadable
+  gamma: 1.0                      # reloadable
+  window_size: 64                 # reloadable
+  keep_alive: true
+
+ack:
+  dir: /var/lib/otp/shared
+  secret: ""                      # required, no default
+  poll_interval: 2s
+  timeout: 30s
+  max_retries: 10
+
+auth:
+  jwt_secret: ""                  # required, no default, at least 32 bytes
+  token_ttl: 12h
+  bootstrap_admin: admin
+
+log:
+  level: info                     # reloadable
+  format: json
+
+metrics:
+  enabled: true
+  path: /metrics
+
+tracing:
+  enabled: false
+  endpoint: ""
+  service_name: otp-sender
+  sample_ratio: 0.1
