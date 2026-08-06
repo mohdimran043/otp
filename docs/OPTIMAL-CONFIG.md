@@ -6,13 +6,24 @@ Every number here is measured by a test in this repository, not estimated. Repro
 make bench
 ```
 
-**The short answer.** 1 MB/s needs `color16` on a **256×256 grid at 8 px cells**, displayed at
-**35 frames a second**, on a 4K panel, and a receiver with **at least nine cores free for decoding**.
+**The short answer — measured end to end, not calculated.** 1.459 MB/s, with 8 MB of incompressible
+payload crossing the channel in 5.48 seconds, 120 of 120 chunks, zero retransmissions, verified against the
+sender's hash and delivered to a callback that recomputed it independently.
 
-That last requirement is the one that is easy to miss and impossible to configure around. Decoding costs
-85–115 KB/s per core, measured, so the receiver's core count sets a hard ceiling that no display setting
-improves. Frames are now decoded concurrently — one worker per core less one by default — so the cores are
-used; what they cannot be is more numerous than they are.
+The configuration that did it:
+
+| Setting | Value |
+|---|---|
+| Grid | **384×384 cells at 5 px** — a 1 940 px frame, fits a 4K panel |
+| Encoding | `color16` — 70 288 bytes a frame |
+| Frame rate | **25 fps** — offering 1.676 MB/s |
+| Receiver | 19 decode workers on 20 cores |
+
+**Prefer fewer, larger frames over more, smaller ones.** That is the single most useful thing on this page.
+The same hardware measured **730 KiB/s** at 256×256 and 40 fps, and **1 494 KiB/s** at 384×384 and 25 fps —
+twice the throughput at *less* than two thirds the frame rate. The receiver's limit turns out to be frames
+per second rather than bytes per second, because each frame costs a directory scan, a file read, a PNG
+decode, a database row and an acknowledgement whatever its size. Making frames bigger amortises all of that.
 
 ---
 
@@ -115,6 +126,23 @@ At 256×256 `color16` — 30 226 bytes a frame:
 | **9** | **1.0 MB/s** | **35 fps** |
 | 19 | 2.2 MB/s | 72 fps |
 
+**Measured against that table**, on 20 cores with 19 workers:
+
+| Geometry | Frame | Offered | Measured | Frames/s |
+|---|---|---|---|---|
+| 256×256 @8px `color16` | 30 226 B | 1.153 MB/s at 40 fps | 730 KiB/s | 30 |
+| **384×384 @5px `color16`** | **70 288 B** | 1.676 MB/s at 25 fps | **1 494 KiB/s** | 124 |
+
+Both runs decoded every frame they captured — zero failures, zero retransmissions. The difference is
+entirely per-frame overhead.
+
+**One trap specific to testing.** The demonstration stack runs the receiver with
+`OTP_RECEIVER_CAPTURE_SIMULATE=typical`, which models a lens and sensor over every pixel before decoding.
+That is invaluable for proving the optical tolerances and ruinous for measuring throughput: at a 2 080 px
+frame it costs seconds per frame and pins the CPU that should be decoding. The same transfer that runs at
+730 KiB/s without it managed **121 KB/s with it**. A real camera does that degradation in the lens, for
+free — so leave `SIMULATE` empty when measuring speed, and set it when testing whether the optics hold up.
+
 **Setting the frame rate above that line does not transfer more bytes.** Frames queue on the channel
 instead, and the display prunes its own backlog once it is deep enough — so the surplus costs a render and
 a write and delivers nothing. The receiver reports the deepest queue it has seen as **Settings → Deepest
@@ -132,9 +160,9 @@ optical:
   encoder: color16        # 4 bits per cell, the densest available
   compression: zstd
   level: 9
-  grid_width: 256
-  grid_height: 256
-  cell_pixels: 8          # 2080 px square — needs a 4K panel
+  grid_width: 384         # measured fastest: fewer, larger frames beat more, smaller ones
+  grid_height: 384
+  cell_pixels: 5          # 1940 px square — needs a 4K panel
   quiet_zone: 2
   fec:
     codec: reed-solomon
@@ -143,7 +171,7 @@ optical:
 
 display:
   sink: file              # or opengl on a machine with a panel
-  fps: 35                 # see the ceiling above before raising this
+  fps: 25                 # 1.68 MB/s offered; measured 1.46 MB/s delivered
   window_size: 64
 ```
 
@@ -153,10 +181,10 @@ Or as environment variables:
 OTP_SENDER_OPTICAL_ENCODER=color16
 OTP_SENDER_OPTICAL_COMPRESSION=zstd
 OTP_SENDER_OPTICAL_LEVEL=9
-OTP_SENDER_OPTICAL_GRID_WIDTH=256
-OTP_SENDER_OPTICAL_GRID_HEIGHT=256
-OTP_SENDER_OPTICAL_CELL_PIXELS=8
-OTP_SENDER_DISPLAY_FPS=35
+OTP_SENDER_OPTICAL_GRID_WIDTH=384
+OTP_SENDER_OPTICAL_GRID_HEIGHT=384
+OTP_SENDER_OPTICAL_CELL_PIXELS=5
+OTP_SENDER_DISPLAY_FPS=25
 ```
 
 The frame rate can also be changed at any moment from **Settings** in the sender UI, including
@@ -180,13 +208,13 @@ lowest-numbered device that actually declares video capture, in its largest mode
 
 | | Requirement | Why |
 |---|---|---|
-| Panel | 4K, ≥ 2 160 px vertical | The frame is 2 080 px square |
-| Panel refresh | ≥ 40 Hz | 35 fps with margin; 144 Hz is ample |
+| Panel | 4K, ≥ 2 160 px vertical | The frame is 1 940 px square at the measured setting |
+| Panel refresh | ≥ 30 Hz | 25 fps with margin; 144 Hz is ample |
 | Camera resolution | ≥ 2× the frame's pixels on the sensor | A cell must land on several sensor pixels to be sampled reliably |
 | Camera frame rate | ≥ 2× the display rate | Frames must not be missed between exposures; the sender re-shows an unacknowledged frame, so this costs throughput rather than correctness |
 | Camera format | MJPG rather than raw | The same size is often 30 fps compressed and 5 fps uncompressed — the bus cannot carry raw frames faster |
 | Receiver CPU | ~9 cores for 1 MB/s | 115 KB/s per core, measured; frames decode concurrently, so cores are what set the rate |
-| Optics | Blur under a fifth of a cell | 8 px cells allow about 1.6 px of blur; 4 px cells allow 0.8 px |
+| Optics | Blur under a fifth of a cell | 8 px cells allow about 1.6 px of blur, 5 px allow 1.0, 4 px allow 0.8. This is the one argument for smaller grids: a 256×256 grid at 8 px cells is more tolerant of a marginal lens than 384×384 at 5 px, and slower. |
 
 ## Why not just turn everything up
 

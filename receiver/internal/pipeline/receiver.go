@@ -130,43 +130,61 @@ func (r *Receiver) Run(ctx context.Context) error {
 		}()
 	}
 
-	// The reader closes work when the context ends; the decoders then drain and exit, and closing results
-	// ends the applier. Shutting down in that order means no goroutine is left writing to a closed channel.
+	// Several readers, not one.
+	//
+	// Reading a frame is not free: it is a directory listing, a file read, a PNG decode, and — on the
+	// simulated channel — a lens and sensor model over every pixel. Only the first of those needs to be
+	// serialised, and the source releases its lock as soon as it has claimed a frame, so the rest overlaps.
+	// With one reader it did not, and the whole receiver waited behind it however many decode workers were
+	// idle.
+	//
+	// The readers close work when they have all finished; the decoders then drain and exit, and closing
+	// results ends the applier. Shutting down in that order means no goroutine is left writing to a closed
+	// channel.
+	var readers sync.WaitGroup
+	for range workers {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			idle := r.cfg.Current().Capture.IdleInterval
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+
+				capture, err := r.source.Next(ctx)
+				switch {
+				case errors.Is(err, ErrNoFrame):
+					// Nothing on the channel. An idle channel is the normal state between transmissions, so
+					// this waits rather than reporting anything.
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(idle):
+					}
+					continue
+				case err != nil:
+					r.log.Warn("capture failed", zap.Error(err))
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(idle):
+					}
+					continue
+				}
+
+				select {
+				case work <- capture:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
 	go func() {
-		defer close(work)
-		idle := r.cfg.Current().Capture.IdleInterval
-		for {
-			if ctx.Err() != nil {
-				return
-			}
-
-			capture, err := r.source.Next(ctx)
-			switch {
-			case errors.Is(err, ErrNoFrame):
-				// Nothing on the channel. An idle channel is the normal state between transmissions, so
-				// this waits rather than reporting anything.
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(idle):
-				}
-				continue
-			case err != nil:
-				r.log.Warn("capture failed", zap.Error(err))
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(idle):
-				}
-				continue
-			}
-
-			select {
-			case work <- capture:
-			case <-ctx.Done():
-				return
-			}
-		}
+		readers.Wait()
+		close(work)
 	}()
 
 	go func() {

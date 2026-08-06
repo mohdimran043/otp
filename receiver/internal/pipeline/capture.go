@@ -156,11 +156,22 @@ func (s *FileSource) Behind() int64 {
 }
 
 func (s *FileSource) Next(ctx context.Context) (Capture, error) {
+	// The lock covers picking a frame and taking it off the channel, and nothing else.
+	//
+	// It used to cover the whole function, including the PNG decode and the simulated optics, and that made
+	// this the serial stage the entire receiver waited behind. At a 2080-pixel frame the degradation alone —
+	// blur, tilt, vignette, sensor noise, a JPEG round trip over 4.3 megapixels — took seconds, so a
+	// receiver with nineteen idle decode workers was reading 0.17 frames a second. The decoders were never
+	// the constraint; the reader was.
+	//
+	// Only the directory bookkeeping needs mutual exclusion: two readers must not claim the same frame.
+	// Everything after it is per-frame work on bytes this call already owns, so it runs unlocked and
+	// several readers run at once.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
+		s.mu.Unlock()
 		return Capture{}, fmt.Errorf("pipeline: %w", err)
 	}
 
@@ -188,6 +199,7 @@ func (s *FileSource) Next(ctx context.Context) (Capture, error) {
 		names = append(names, e.Name())
 	}
 	if len(names) == 0 {
+		s.mu.Unlock()
 		return Capture{}, ErrNoFrame
 	}
 	// Sorted, and the oldest unread frame is taken.
@@ -226,11 +238,17 @@ func (s *FileSource) Next(ctx context.Context) (Capture, error) {
 		// would have the receiver retry an image the display has already replaced.
 		_ = os.Remove(path)
 	}
+	drop := s.drop
+	degrade := s.degrade
+
+	// The frame is now this call's own. Everything below is CPU on bytes nobody else can see.
+	s.mu.Unlock()
+
 	if err != nil {
 		return Capture{}, fmt.Errorf("pipeline: %w", err)
 	}
 
-	if s.drop != nil && s.drop(sequence) {
+	if drop != nil && drop(sequence) {
 		// The frame was displayed and the camera missed it. Reported as no frame rather than as an
 		// error, because that is exactly what it is from the receiver's point of view.
 		return Capture{}, ErrNoFrame
@@ -242,8 +260,8 @@ func (s *FileSource) Next(ctx context.Context) (Capture, error) {
 	}
 
 	captured := Capture{Sequence: sequence, Image: img, Raw: raw, CapturedAt: time.Now()}
-	if s.degrade != (simulate.Profile{}) {
-		degraded := s.degrade.Apply(img)
+	if degrade != (simulate.Profile{}) {
+		degraded := degrade.Apply(img)
 		captured.Image = degraded
 
 		// The stored bytes are what was captured, so a replay sees the degraded image the decoder
