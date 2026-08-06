@@ -143,6 +143,28 @@ the display prunes its own backlog once it is deep enough, so the surplus costs 
 delivers nothing. **Receiver → Settings** reports the deepest queue it has seen: one means it kept up, and
 a large number is the direct answer to "is my frame rate too high".
 
+### Using the browser's camera — the path that asks permission
+
+**Receiver → Settings → Use this browser's camera.** Press Start and the browser asks *"Allow this site to use
+your camera?"*, the operating system shows its own indicator, and the page holds the camera for as long as it is
+open — which is also what makes the light stay on rather than flicker.
+
+The frames are posted to `POST /api/v1/capture/frames` and enter the same pipeline as everything else: persist,
+decode, acknowledge, merge, verify, deliver. Nothing downstream knows which source produced an image, which is
+the point of the `Source` interface.
+
+Why this exists alongside the direct camera source: **a server process cannot ask.** Opening `/dev/video0`
+produces no dialog and no operating-system indicator, because the permission was granted once, by whoever passed
+the device into the container. A browser can ask, and can do it from any machine that reaches the receiver rather
+than only the one the receiver runs on — no device passthrough, no compose overlay.
+
+What it trades away is throughput: encoding each frame in a canvas and posting it will not keep up with reading
+V4L2 buffers directly. So this is the path for setting a camera up and watching it work, and the direct source is
+the path for moving fifty megabytes. Neither pretends to be the other.
+
+Verified end to end by posting real rendered frames the way the page does: every one accepted, decoded, and
+recorded with its chunk number and a fiducial match of 1.00.
+
 ### Starting and stopping the camera
 
 **Start camera** and **Stop camera**, on the receiver's Settings page, rather than a Save button.

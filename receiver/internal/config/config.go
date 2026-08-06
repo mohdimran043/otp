@@ -356,6 +356,9 @@ func (c Config) Validate() error {
 		if c.Capture.Dir == "" {
 			add("capture.dir is required for the file source")
 		}
+	case "browser":
+		// Frames posted by a browser holding the camera. Nothing to validate: it needs no device, because the
+		// page owns the camera and the operating system asked its own permission.
 	case "camera":
 		// A real camera through Video4Linux. The device may be empty: the receiver then picks the
 		// lowest-numbered one that actually declares video capture, in its largest mode, so a machine with a
@@ -363,7 +366,7 @@ func (c Config) Validate() error {
 	case "gocv":
 		// Availability is a build-tag matter, reported by the source itself at startup.
 	default:
-		add("capture.source %q is not one of file, camera, gocv", c.Capture.Source)
+		add("capture.source %q is not one of file, browser, camera, gocv", c.Capture.Source)
 	}
 	if c.Capture.IdleInterval <= 0 {
 		add("capture.idle_interval must be positive")

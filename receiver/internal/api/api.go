@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"image"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -45,6 +46,10 @@ type Server struct {
 	// switchSource replaces the running capture source. Injected rather than called directly for the same
 	// reason: the API's job is to decide whether a request is allowed, not to own the capture loop.
 	switchSource func(config.Capture) error
+
+	// pushFrame hands a frame captured by a browser to the running source. Nil when this build or deployment
+	// cannot take them, which the handler reports rather than accepting frames into nothing.
+	pushFrame func(image.Image, []byte) (bool, error)
 }
 
 // Options configure a server.
@@ -56,6 +61,7 @@ type Options struct {
 	Session func() uuid.UUID
 	Behind  func() int64
 	Switch  func(config.Capture) error
+	Push    func(image.Image, []byte) (bool, error)
 }
 
 // New returns a server.
@@ -68,6 +74,7 @@ func New(opts Options) *Server {
 		session:      opts.Session,
 		capture:      opts.Behind,
 		switchSource: opts.Switch,
+		pushFrame:    opts.Push,
 	}
 }
 
@@ -87,6 +94,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/frames/failed", s.listFailedFrames)
 	// The newest captures, decoded or not: what a live page needs to show frames arriving.
 	mux.HandleFunc("GET /api/v1/frames/recent", s.listRecentFrames)
+	// Frames posted by a browser holding the camera — the path that can actually ask permission.
+	mux.HandleFunc("POST /api/v1/capture/frames", s.postFrame)
 	mux.HandleFunc("GET /api/v1/frames/{id}/image", s.frameImage)
 	mux.HandleFunc("GET /api/v1/config", s.getConfig)
 

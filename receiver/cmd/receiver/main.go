@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"image"
 	"net/http"
 	"os"
 	"os/signal"
@@ -223,6 +224,17 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 			},
 			// Replaces the running source. The new one is opened before the old is closed, so a camera that
 			// will not open leaves the receiver capturing from whatever it had.
+			// Frames from a browser go to the running source, when the running source is the one that takes
+			// them. Resolved at call time rather than captured once, because the source can be swapped.
+			Push: func(img image.Image, raw []byte) (bool, error) {
+				browser, ok := channel.Current().(*pipeline.BrowserSource)
+				if !ok {
+					return false, fmt.Errorf(
+						"the capture source is %q, so posted frames have nowhere to go; switch it to \"browser\"",
+						channel.Name())
+				}
+				return browser.Push(img, raw)
+			},
 			Switch: func(next config.Capture) error {
 				if err := channel.Swap(next); err != nil {
 					return err

@@ -285,7 +285,8 @@ func (s *FileSource) Close() error { return nil }
 // behind a build tag, so a binary built without it must not offer it. Offering it anyway is how a saved
 // preference came to stop the receiver starting at all.
 func AvailableSources() []string {
-	sources := []string{"file"}
+	// browser is always available: it needs nothing of the host, because the camera is held by the page.
+	sources := []string{"file", "browser"}
 	if cameraAvailable {
 		sources = append(sources, "camera")
 	}
@@ -305,6 +306,8 @@ func OpenSource(cfg config.Capture) (Source, error) {
 		})
 	case "camera":
 		return openCameraSource(cfg)
+	case "browser":
+		return NewBrowserSource(), nil
 	default:
 		return nil, fmt.Errorf("pipeline: %q is not a known capture source", cfg.Source)
 	}

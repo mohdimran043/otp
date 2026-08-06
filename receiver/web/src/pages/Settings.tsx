@@ -1,7 +1,8 @@
 import { Alert, Paper, Stack, Table, TableBody, TableCell, TableRow, Typography } from '@mui/material'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, formatPercent } from '../api/client'
+import { BrowserCamera } from '../components/BrowserCamera'
 import { CameraPicker } from '../components/CameraPicker'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { Grid } from '../components/Grid'
@@ -15,13 +16,32 @@ import { useUi } from '../store/ui'
 // and watching what happens.
 export function Settings() {
   const { refreshMs, setRefreshMs } = useUi()
+  const client = useQueryClient()
   const config = useQuery({ queryKey: ['config'], queryFn: api.config })
+  const cameras = useQuery({ queryKey: ['cameras'], queryFn: api.cameras })
   const data = config.data
 
   return (
     <Stack spacing={3}>
       <Typography variant="h5">Capture</Typography>
       <ErrorNotice error={config.error} />
+
+      {/* The browser's camera first, because it is the one that can ask permission and the one that works without
+          a device passed into the container. The receiver's own camera is below it, for a deployment where the
+          camera is attached to the machine the receiver runs on. */}
+      <BrowserCamera
+        taking={cameras.data?.source === 'browser'}
+        onStart={async () => {
+          await api.selectCamera({ device: '', source: 'browser' })
+          await client.invalidateQueries({ queryKey: ['cameras'] })
+          await client.invalidateQueries({ queryKey: ['config'] })
+        }}
+        onStop={async () => {
+          await api.selectCamera({ device: '', source: 'file' })
+          await client.invalidateQueries({ queryKey: ['cameras'] })
+          await client.invalidateQueries({ queryKey: ['config'] })
+        }}
+      />
 
       <CameraPicker />
 
