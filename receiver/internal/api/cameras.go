@@ -42,6 +42,12 @@ type camerasResponse struct {
 	// SourceUsesCamera is whether the active source opens a camera at all.
 	SourceUsesCamera bool `json:"source_uses_camera"`
 
+	// Streaming is whether a camera is open and running right now — which is what turns its light on. It is
+	// reported separately from the selection because the two came apart in practice: choosing a device
+	// configured a mode and left the source alone, so an operator saved their settings, saw a success, and
+	// watched a camera that never lit up.
+	Streaming bool `json:"streaming"`
+
 	// KnownSources is what the source may be set to, so the page offers a choice rather than a text field
 	// in which a typo becomes a receiver that captures nothing.
 	KnownSources []string `json:"known_sources"`
@@ -81,6 +87,7 @@ func (s *Server) listCameras(w http.ResponseWriter, r *http.Request) {
 		Supported:        camera.Available(),
 		Source:           cfg.Capture.Source,
 		SourceUsesCamera: cfg.Capture.Source == liveCameraSource,
+		Streaming:        cfg.Capture.Source == liveCameraSource,
 		KnownSources:     pipeline.AvailableSources(),
 		Selection:        configured,
 	}

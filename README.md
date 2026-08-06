@@ -143,6 +143,23 @@ the display prunes its own backlog once it is deep enough, so the surplus costs 
 delivers nothing. **Receiver → Settings** reports the deepest queue it has seen: one means it kept up, and
 a large number is the direct answer to "is my frame rate too high".
 
+### Starting and stopping the camera
+
+**Start camera** and **Stop camera**, on the receiver's Settings page, rather than a Save button.
+
+That was a real fault and not a cosmetic one. "Save capture settings" did two unrelated things depending on
+what you had touched: choosing a device configured its *mode* and left the source alone, so an operator saved,
+saw a success, and watched a camera that never lit up. Starting a camera and changing its mode are different
+acts and now have different buttons.
+
+The page reports what is happening rather than what was asked for: **The camera is running — its light is on**,
+or **No camera is running — frames are being read from `file`**. Verified against the kernel: after Start the
+container holds one file descriptor on `/dev/video0`; after Stop it holds none. The device is genuinely opened
+and genuinely released, which is what the light follows.
+
+Stopping switches back to reading frames from a directory, so the file-backed path is always there to fall
+back to — no camera needed to develop against.
+
 ### Selecting a camera starts it
 
 The capture source is swapped while the receiver runs, so choosing a camera means the camera opens — not that a

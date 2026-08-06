@@ -123,6 +123,10 @@ export interface CamerasView {
   supported: boolean
   source: string
   source_uses_camera: boolean
+  // Whether a camera is open and running right now — which is what turns its light on. Reported separately
+  // from the selection because the two came apart: choosing a device configured a mode and left the source
+  // alone, so a saved setting reported success over a camera that never lit up.
+  streaming: boolean
   // What the source may be set to, so the page offers a choice rather than a text field in which a typo
   // becomes a receiver that captures nothing.
   known_sources: string[]

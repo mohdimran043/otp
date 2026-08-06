@@ -17,6 +17,8 @@ import {
   ToggleButtonGroup,
   Typography,
 } from '@mui/material'
+import VideocamIcon from '@mui/icons-material/Videocam'
+import VideocamOffIcon from '@mui/icons-material/VideocamOff'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, type CameraDevice, type CameraMode } from '../api/client'
@@ -76,6 +78,11 @@ export function CameraPicker() {
 
   const devices = cameras.data?.devices ?? []
   const enumerated = devices.length > 0
+  const streaming = cameras.data?.streaming ?? false
+
+  // The source that opens a camera, as the server names it — not hardcoded, since a build without it does not
+  // offer it and this page must not pretend otherwise.
+  const liveSource = (cameras.data?.known_sources ?? []).find((s) => s !== 'file') ?? 'camera' 
 
   // The form follows the server until the operator touches it. Seeding from `effective` rather than
   // `selection` matters: with nothing configured, `selection` is empty and `effective` is what the receiver
@@ -102,7 +109,12 @@ export function CameraPicker() {
   const modes = useMemo(() => flatten(selectedDevice), [selectedDevice])
 
   const apply = useMutation({
-    mutationFn: async (override?: { device: string; auto: boolean }) => {
+    mutationFn: async (override?: { device?: string; auto?: boolean; source?: string }) => {
+      // Stopping is a source change with no camera in it: the device is left out entirely so nothing tries to
+      // reopen what is being released.
+      if (override?.source && override.source !== liveSource) {
+        return api.selectCamera({ device: '', source: override.source })
+      }
       const chosen = override?.auto ? undefined : modes.find((entry) => entry.key === mode)
       const target = override?.device ?? devicePath.trim()
       // Sending a device with no mode is a request to be configured: the server fills in the largest frame
@@ -110,11 +122,11 @@ export function CameraPicker() {
       // rather than two — picking it is the whole of the intent, and the mode is something the receiver can
       // determine better than a person choosing from eighteen of them.
       if (override?.auto) {
-        return api.selectCamera({ device: target, source: source || undefined })
+        return api.selectCamera({ device: target, source: override.source ?? source ?? undefined })
       }
       return api.selectCamera({
         device: target,
-        source: source || undefined,
+        source: override?.source ?? source ?? undefined,
         format: chosen?.mode.format ?? (format.trim() || undefined),
         width: chosen?.mode.width ?? (Number(width) || undefined),
         height: chosen?.mode.height ?? (Number(height) || undefined),
@@ -146,6 +158,28 @@ export function CameraPicker() {
       <ErrorNotice error={cameras.error} />
 
       <Stack spacing={2}>
+        {cameras.data && (
+          <Alert
+            severity={streaming ? 'success' : 'info'}
+            variant="outlined"
+            icon={streaming ? <VideocamIcon fontSize="small" /> : <VideocamOffIcon fontSize="small" />}
+          >
+            {streaming ? (
+              <>
+                <strong>The camera is running.</strong> Its light is on and it is capturing continuously. Frames
+                appear under <strong>Live capture</strong> the moment the sender displays something; nothing is
+                recorded while there is nothing to see.
+              </>
+            ) : (
+              <>
+                <strong>No camera is running.</strong> Frames are being read from{' '}
+                <code>{cameras.data.source}</code> — the directory the sender's display writes into, which is how
+                to work without a camera at all.
+              </>
+            )}
+          </Alert>
+        )}
+
         {/* Where frames come from. The first choice, and the one that decides whether the rest matters. */}
         <Box>
           <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
@@ -235,7 +269,10 @@ export function CameraPicker() {
                   </Typography>
                 </Box>
                 {device.default && <Chip size="small" label="default" />}
-                {device.selected && <Chip size="small" color="success" label="in use" />}
+                {/* Only when a camera is actually running. The chip used to follow the selection, so a stopped
+                    camera still read "in use" — which is the same mistake the Save button made, in a smaller
+                    place: reporting what was chosen as though it were what was happening. */}
+                {device.selected && streaming && <Chip size="small" color="success" label="in use" />}
               </Box>
             ))}
           </Stack>
@@ -332,20 +369,39 @@ export function CameraPicker() {
         )}
 
         <Box>
-          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-            <Button
-              variant="contained"
-              disabled={apply.isPending || (!devicePath.trim() && source === cameras.data?.source)}
-              onClick={() => apply.mutate(undefined)}
-            >
-              {apply.isPending ? 'Saving…' : 'Save capture settings'}
-            </Button>
-            {devicePath.trim() && (
+          {/* Start and stop, rather than "save".
+              "Save capture settings" was ambiguous in the way that matters: choosing a device configured a mode
+              and left the source alone, so an operator saved, saw a success, and watched a camera that never lit
+              up. Starting a camera and changing its mode are different acts and now have different buttons. */}
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+            {!streaming ? (
               <Button
-                disabled={apply.isPending}
-                onClick={() => apply.mutate({ device: devicePath.trim(), auto: true })}
+                variant="contained"
+                color="success"
+                startIcon={<VideocamIcon />}
+                disabled={apply.isPending || !devicePath.trim()}
+                onClick={() => apply.mutate({ device: devicePath.trim(), auto: true, source: liveSource })}
               >
-                Configure it for me
+                {apply.isPending ? 'Starting…' : 'Start camera'}
+              </Button>
+            ) : (
+              <Button
+                variant="contained"
+                color="error"
+                startIcon={<VideocamOffIcon />}
+                disabled={apply.isPending}
+                onClick={() => apply.mutate({ source: 'file' })}
+              >
+                {apply.isPending ? 'Stopping…' : 'Stop camera'}
+              </Button>
+            )}
+
+            {streaming && (
+              <Button
+                disabled={apply.isPending || !devicePath.trim()}
+                onClick={() => apply.mutate(undefined)}
+              >
+                Apply this mode
               </Button>
             )}
           </Stack>
