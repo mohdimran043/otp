@@ -143,6 +143,35 @@ the display prunes its own backlog once it is deep enough, so the surplus costs 
 delivers nothing. **Receiver → Settings** reports the deepest queue it has seen: one means it kept up, and
 a large number is the direct answer to "is my frame rate too high".
 
+### Capturing from a real camera
+
+`OTP_RECEIVER_CAPTURE_SOURCE=camera` opens one and streams from it, through Video4Linux's memory-mapped
+buffer interface — **no OpenCV and no cgo**, for the same reason the decoder is written directly. MJPEG
+frames decode with the standard library; YUYV is converted in full colour rather than to grey, because
+these encodings put information in hue and reducing to luma would throw away three of the four bits a
+`color16` cell carries.
+
+Measured on the machine this was written on: `/dev/video0` opened at **1920×1080 MJPG**, five frames
+captured in half a second, and the mode read back from the driver rather than assumed — a driver handed a
+format it cannot provide substitutes one and reports what it actually set, and a receiver that believed
+otherwise would fail to resolve the grid and blame the lens.
+
+**A camera that is waiting stays quiet.** This is the difference between a camera and a directory: the file
+channel goes quiet between transmissions and says so, whereas a camera pointed at a dark screen keeps
+producing images of a dark screen thirty times a second. Every one of those would otherwise be stored and
+recorded as an unreadable capture — thousands of rows saying nothing but "not started yet", burying the
+failures that mean something.
+
+So a frame with nothing in it is reported as *no frame*, which is what it honestly is. The test is a
+property every frame this protocol renders has and almost nothing else does: **a lot of pure black and a lot
+of pure white at once**, guaranteed by the quiet zone, the four fiducials and the always-binary header and
+footer bands. A dark room has the black and none of the white; a blank white screen the reverse; a
+photograph of a desk has neither. It is a gate rather than a decision — anything that passes still goes
+through the real decoder, which rejects it on its checksums if it was a false positive.
+
+Observed on the deployed stack with the camera open and nothing displayed: 53 seconds, zero frames
+captured, zero failures recorded. Start a transfer and it begins.
+
 ### Choosing a camera
 
 The receiver enumerates capture devices through Video4Linux directly — `VIDIOC_QUERYCAP`,

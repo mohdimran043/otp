@@ -356,10 +356,14 @@ func (c Config) Validate() error {
 		if c.Capture.Dir == "" {
 			add("capture.dir is required for the file source")
 		}
+	case "camera":
+		// A real camera through Video4Linux. The device may be empty: the receiver then picks the
+		// lowest-numbered one that actually declares video capture, in its largest mode, so a machine with a
+		// camera attached needs no configuration at all.
 	case "gocv":
 		// Availability is a build-tag matter, reported by the source itself at startup.
 	default:
-		add("capture.source %q is not one of file, gocv", c.Capture.Source)
+		add("capture.source %q is not one of file, camera, gocv", c.Capture.Source)
 	}
 	if c.Capture.IdleInterval <= 0 {
 		add("capture.idle_interval must be positive")

@@ -286,6 +286,9 @@ func (s *FileSource) Close() error { return nil }
 // preference came to stop the receiver starting at all.
 func AvailableSources() []string {
 	sources := []string{"file"}
+	if cameraAvailable {
+		sources = append(sources, "camera")
+	}
 	if gocvAvailable {
 		sources = append(sources, "gocv")
 	}
@@ -300,6 +303,8 @@ func OpenSource(cfg config.Capture) (Source, error) {
 			Consume: cfg.Consume,
 			Degrade: simulatedOptics(cfg.Simulate),
 		})
+	case "camera":
+		return openCameraSource(cfg)
 	default:
 		return nil, fmt.Errorf("pipeline: %q is not a known capture source", cfg.Source)
 	}

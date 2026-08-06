@@ -126,8 +126,19 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 			log.Warn("could not read the saved camera selection", zap.Error(err))
 		} else if !saved.Zero() {
 			// The source comes from the saved choice too, so an operator who switched to a camera in the UI
-			// gets a camera at the next start rather than having to edit configuration as well.
-			if saved.Source != "" && saved.Source != cfg.Capture.Source {
+			// gets one at the next start rather than having to edit configuration as well.
+			//
+			// Only when configuration did not ask for something else, though. Precedence is the same as for the
+			// device: what an operator wrote down deliberately outranks what they clicked, because a deployment
+			// has to be reproducible from its configuration. Getting this backwards meant an explicit
+			// OTP_RECEIVER_CAPTURE_SOURCE=camera was quietly overridden by a stale saved preference — the
+			// receiver announced "capture: camera" at startup and then opened the file source.
+			//
+			// "Default" is the test rather than "unset", because the two are indistinguishable by the time this
+			// runs and it does not matter: an operator who explicitly configures the default gets the default
+			// either way.
+			explicit := cfg.Capture.Source != config.Default().Capture.Source
+			if saved.Source != "" && saved.Source != cfg.Capture.Source && !explicit {
 				log.Info("using the saved capture source",
 					zap.String("source", saved.Source), zap.String("was", cfg.Capture.Source))
 				cfg.Capture.Source = saved.Source
