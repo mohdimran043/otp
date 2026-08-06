@@ -102,11 +102,18 @@ export function CameraPicker() {
   const modes = useMemo(() => flatten(selectedDevice), [selectedDevice])
 
   const apply = useMutation({
-    mutationFn: async () => {
-      const chosen = modes.find((entry) => entry.key === mode)
-      // From the enumerated mode when there is one, from the typed fields when there is not.
+    mutationFn: async (override?: { device: string; auto: boolean }) => {
+      const chosen = override?.auto ? undefined : modes.find((entry) => entry.key === mode)
+      const target = override?.device ?? devicePath.trim()
+      // Sending a device with no mode is a request to be configured: the server fills in the largest frame
+      // that camera offers, and the fastest at that size. That is what makes selecting a camera one act
+      // rather than two — picking it is the whole of the intent, and the mode is something the receiver can
+      // determine better than a person choosing from eighteen of them.
+      if (override?.auto) {
+        return api.selectCamera({ device: target, source: source || undefined })
+      }
       return api.selectCamera({
-        device: devicePath.trim(),
+        device: target,
         source: source || undefined,
         format: chosen?.mode.format ?? (format.trim() || undefined),
         width: chosen?.mode.width ?? (Number(width) || undefined),
@@ -115,7 +122,16 @@ export function CameraPicker() {
       })
     },
     onSuccess: (result) => {
-      setNote(result.note ?? result.warning ?? 'Saved.')
+      setNote(result.configured ?? result.note ?? result.warning ?? 'Saved.')
+      // The form follows the server again, so an auto-configured mode is reflected rather than leaving stale
+      // numbers in the fields.
+      if (result.selection.width && result.selection.height) {
+        setMode(`${result.selection.format ?? ''}|${result.selection.width}x${result.selection.height}|${result.selection.fps ?? 0}`)
+        setWidth(String(result.selection.width))
+        setHeight(String(result.selection.height))
+      }
+      if (result.selection.fps) setFps(String(result.selection.fps))
+      if (result.selection.format) setFormat(result.selection.format)
       void client.invalidateQueries({ queryKey: ['cameras'] })
       void client.invalidateQueries({ queryKey: ['config'] })
     },
@@ -180,7 +196,8 @@ export function CameraPicker() {
         {enumerated ? (
           <Stack spacing={1}>
             <Typography variant="caption" color="text.secondary">
-              Devices Video4Linux reports as able to capture video
+              Devices Video4Linux reports as able to capture video — click one and it is configured at its
+              best mode straight away
             </Typography>
             {devices.map((device) => (
               <Box
@@ -188,6 +205,9 @@ export function CameraPicker() {
                 onClick={() => {
                   setDevicePath(device.path)
                   setMode('')
+                  // Configured on the spot rather than waiting for a Save. Choosing a camera is the whole
+                  // decision; the mode follows from it.
+                  apply.mutate({ device: device.path, auto: true })
                 }}
                 sx={{
                   display: 'flex',
@@ -308,13 +328,23 @@ export function CameraPicker() {
         )}
 
         <Box>
-          <Button
-            variant="contained"
-            disabled={apply.isPending || (!devicePath.trim() && source === cameras.data?.source)}
-            onClick={() => apply.mutate()}
-          >
-            {apply.isPending ? 'Saving…' : 'Save capture settings'}
-          </Button>
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+            <Button
+              variant="contained"
+              disabled={apply.isPending || (!devicePath.trim() && source === cameras.data?.source)}
+              onClick={() => apply.mutate(undefined)}
+            >
+              {apply.isPending ? 'Saving…' : 'Save capture settings'}
+            </Button>
+            {devicePath.trim() && (
+              <Button
+                disabled={apply.isPending}
+                onClick={() => apply.mutate({ device: devicePath.trim(), auto: true })}
+              >
+                Configure it for me
+              </Button>
+            )}
+          </Stack>
         </Box>
       </Stack>
     </Paper>

@@ -154,6 +154,22 @@ machine this was written on, `/dev/video0` and `/dev/video1` both report "Integr
 first can capture. A settings page that offered both would produce a receiver that captures nothing and
 reports it as an optical fault.
 
+**It configures itself.** At startup the receiver takes the lowest-numbered device that actually declares
+video capture, in its largest mode — verified against real hardware, where it found the built-in camera and
+chose 1920×1080 at 30 fps in MJPG without being asked. It keeps looking, too, because a camera is not a fixed
+part of a machine: the one an operator wants is usually plugged in after boot, and needing a restart to notice
+a USB device reads as broken.
+
+What it will not do is override a working choice. An operator who selected the second camera keeps it when a
+third appears, because their decision is better evidence than the order the kernel enumerated the devices in.
+If the chosen camera is *unplugged*, another is substituted and the receiver says so loudly — capturing from a
+camera nobody chose is exactly the surprise that must not be sprung quietly.
+
+**Clicking a device configures it.** Choosing a camera is the whole of the intent; picking between eighteen
+modes afterwards is answering a question the receiver can answer better. So naming a device with no mode is
+treated as a request to be configured rather than an incomplete request, and the server fills in the largest
+frame that camera offers.
+
 **The controls are there whether or not a camera is.** That was not true at first: the panel rendered a
 device list, so with an empty list it rendered an explanation and nothing to act on — useless in development,
 which is exactly where it is needed. A device path can now be typed and the server takes it on trust when it

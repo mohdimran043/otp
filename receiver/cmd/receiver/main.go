@@ -41,6 +41,18 @@ func main() {
 	}
 }
 
+// currentCamera is the selection in force, as the watcher needs to see it.
+func currentCamera(w *config.Watcher) camera.Selection {
+	cfg := w.Current()
+	return camera.Selection{
+		Device: cfg.Capture.Device,
+		Format: cfg.Capture.Format,
+		Width:  cfg.Capture.Width,
+		Height: cfg.Capture.Height,
+		FPS:    cfg.Capture.FPS,
+	}
+}
+
 func run(configPath string, migrateOnly, checkOnly bool) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -128,30 +140,51 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 			log.Info("using the saved camera selection", zap.String("camera", saved.String()))
 		}
 	}
-	if cfg.Capture.Source == "gocv" && cfg.Capture.Device == "" {
-		if devices, err := camera.List(); err == nil {
+	// Auto-configuration at startup: the default camera in its best mode, when one is attached and nothing has
+	// been chosen. Done whatever the capture source is, so that an operator who later switches the source to
+	// gocv finds a camera already configured rather than a blank form.
+	if cfg.Capture.Device == "" {
+		if devices, err := camera.List(); err == nil && len(devices) > 0 {
 			if preferred, ok := camera.Preferred(devices); ok {
 				cfg.Capture.Device = preferred.Device
 				cfg.Capture.Format = preferred.Format
 				cfg.Capture.Width = preferred.Width
 				cfg.Capture.Height = preferred.Height
 				cfg.Capture.FPS = preferred.FPS
-				log.Info("no camera configured; using the default at its best mode",
+				log.Info("camera detected and configured automatically",
 					zap.String("camera", preferred.String()))
-			} else {
-				log.Warn("no capture device is attached")
 			}
-		} else {
-			log.Warn("could not enumerate capture devices", zap.Error(err))
+		} else if err != nil {
+			log.Debug("could not enumerate capture devices", zap.Error(err))
 		}
 	}
 
 	source, err := pipeline.OpenSource(cfg.Capture)
 	if err != nil {
-		return err
+		// A configured source this build cannot open must not stop the receiver.
+		//
+		// It stopped it once. A capture source chosen in the settings page was persisted, the binary had no
+		// such source compiled in, and the next start exited with a one-line error — so a preference expressed
+		// through the interface had taken the service down. A receiver that starts on a channel it can read and
+		// says loudly what it could not honour is far better than one that will not start at all, because the
+		// second leaves an operator with no interface in which to undo the choice.
+		fallback := cfg.Capture
+		fallback.Source = "file"
+		fallbackSource, fallbackErr := pipeline.OpenSource(fallback)
+		if fallbackErr != nil {
+			return err
+		}
+		log.Error("the configured capture source could not be opened; reading frames instead",
+			zap.String("configured", cfg.Capture.Source),
+			zap.Strings("available", pipeline.AvailableSources()),
+			zap.Error(err))
+		cfg.Capture.Source = fallback.Source
+		source = fallbackSource
 	}
 	defer source.Close()
 
+	// The watcher is built after the source is opened, so cfg already carries any substitution — which means
+	// the settings page reports the source actually in use rather than the one that was asked for and failed.
 	watcher := config.NewWatcher(configPath, cfg)
 	st := store.New(pool)
 	receiver := pipeline.New(st, objects, acks, source, watcher, log.Logger)
@@ -178,6 +211,31 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,
 	}
+
+	// A camera is not a fixed part of a machine. A laptop's built-in one is there at boot, but the camera an
+	// operator actually wants is usually plugged in afterwards — and a receiver that settled on "none attached"
+	// at startup would believe it for as long as it ran. Requiring a restart to notice a USB device reads as
+	// broken.
+	//
+	// It configures a camera only when the receiver has none it can use, and never overrides a working choice:
+	// an operator who picked the second camera keeps it when a third appears, because their decision is better
+	// evidence than the order the kernel enumerated the devices in.
+	go camera.Watcher{
+		List:    camera.List,
+		Current: func() camera.Selection { return currentCamera(watcher) },
+		Apply: func(selection camera.Selection, reason string) error {
+			applied := watcher.SetCamera(selection.Device, selection.Format,
+				selection.Width, selection.Height, selection.FPS)
+			log.Info("camera configured automatically",
+				zap.String("camera", selection.String()), zap.String("reason", reason))
+			// Persisted so the choice survives a restart, exactly as an operator's would. A failure here
+			// leaves the camera in use and only costs its persistence, which is the lesser problem.
+			if err := camera.SaveSelection(applied.Storage.Root, selection); err != nil {
+				log.Warn("could not persist the automatic camera selection", zap.Error(err))
+			}
+			return nil
+		},
+	}.Run(ctx)
 
 	errs := make(chan error, 2)
 	go func() {

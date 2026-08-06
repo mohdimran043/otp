@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/opticaltransport/otp/receiver/internal/camera"
+	"github.com/opticaltransport/otp/receiver/internal/pipeline"
 )
 
 // The camera surface: which capture devices this machine has, which one is in use, and how to change it.
@@ -80,7 +81,7 @@ func (s *Server) listCameras(w http.ResponseWriter, r *http.Request) {
 		Supported:        camera.Available(),
 		Source:           cfg.Capture.Source,
 		SourceUsesCamera: cfg.Capture.Source == cameraSource,
-		KnownSources:     camera.KnownSources,
+		KnownSources:     pipeline.AvailableSources(),
 		Selection:        configured,
 	}
 
@@ -150,11 +151,35 @@ func (s *Server) setCamera(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Checked against what this binary can open, not against what the protocol knows about. A source that
+	// cannot be opened must be refused here, because it would be persisted and the next start could not
+	// honour it — which is how a settings page came to be able to stop the receiver.
+	if err := camera.CheckSource(selection.Source, pipeline.AvailableSources()); err != nil {
+		s.fail(w, http.StatusUnprocessableEntity, err.Error(), err)
+		return
+	}
+
 	devices, err := camera.List()
 	if err != nil {
 		s.fail(w, http.StatusServiceUnavailable, "the capture devices on this machine could not be listed", err)
 		return
 	}
+
+	// Naming a device without a mode is a request to be configured, not an incomplete request.
+	//
+	// An operator picking a camera has expressed the whole of their intent — use that one — and the best mode
+	// for it is something the receiver can determine better than they can: the largest frame, and among equal
+	// frames the fastest. So it is filled in here rather than demanded from them. Anyone who wants a
+	// different mode says so and this leaves it alone.
+	var autoConfigured bool
+	if selection.Width == 0 && selection.Height == 0 && selection.FPS == 0 && selection.Format == "" {
+		if best, ok := camera.PreferredFor(devices, selection.Device); ok && best.Width > 0 {
+			best.Source = selection.Source
+			selection = best
+			autoConfigured = true
+		}
+	}
+
 	if err := selection.Validate(devices); err != nil {
 		// A 422 rather than a 400: the request was well formed and the mode was refused on its merits.
 		s.fail(w, http.StatusUnprocessableEntity, err.Error(), err)
@@ -186,9 +211,14 @@ func (s *Server) setCamera(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := map[string]any{
-		"selection": selection,
-		"source":    cfg.Capture.Source,
-		"applied":   true,
+		"selection":       selection,
+		"source":          cfg.Capture.Source,
+		"applied":         true,
+		"auto_configured": autoConfigured,
+	}
+	if autoConfigured {
+		response["configured"] = "Configured automatically at " + selection.String() +
+			" — the largest frame this camera offers, and the fastest at that size."
 	}
 	if warning != "" {
 		response["warning"] = warning

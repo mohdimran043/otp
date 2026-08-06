@@ -278,6 +278,20 @@ func (s *FileSource) Next(ctx context.Context) (Capture, error) {
 func (s *FileSource) Close() error { return nil }
 
 // OpenSource returns the source a configuration selects.
+// AvailableSources is what this build can actually open.
+//
+// Derived from the same switch OpenSource uses, so the two cannot drift. It matters because "known to the
+// protocol" and "compiled into this binary" are different sets: the camera source needs OpenCV and lives
+// behind a build tag, so a binary built without it must not offer it. Offering it anyway is how a saved
+// preference came to stop the receiver starting at all.
+func AvailableSources() []string {
+	sources := []string{"file"}
+	if gocvAvailable {
+		sources = append(sources, "gocv")
+	}
+	return sources
+}
+
 func OpenSource(cfg config.Capture) (Source, error) {
 	switch cfg.Source {
 	case "file":

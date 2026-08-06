@@ -197,7 +197,15 @@ export const api = {
   // The selection is a PUT rather than a POST: choosing a camera replaces the choice rather than adding
   // to a collection, and sending it twice must mean the same thing as sending it once.
   selectCamera: (selection: CameraSelection) =>
-    request<{ selection: CameraSelection; source: string; warning?: string; note?: string }>(
+    request<{
+      selection: CameraSelection
+      source: string
+      warning?: string
+      note?: string
+      // Set when the server chose the mode itself, with a sentence saying what it chose and why.
+      auto_configured?: boolean
+      configured?: string
+    }>(
       '/api/v1/cameras/selection',
       {
         method: 'PUT',

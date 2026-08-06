@@ -37,24 +37,24 @@ type Selection struct {
 	Source string `json:"source,omitempty"`
 }
 
-// KnownSources are the capture sources that exist.
+// CheckSource refuses a source that is not in the given list.
 //
-// Listed rather than free-form so that a typo is refused rather than becoming a receiver that captures
-// nothing: "gocv" opens a camera, "file" reads the directory a display writes into.
-var KnownSources = []string{"file", "gocv"}
-
-// CheckSource refuses a source this build does not have.
-func CheckSource(source string) error {
+// The list is passed in rather than declared here, and that is the whole point: what the protocol knows about
+// and what a particular binary can open are different sets. The camera source needs OpenCV and lives behind a
+// build tag, so a build without it must refuse "gocv" rather than accept it and fail later. Accepting it was
+// how a settings page came to be able to stop the receiver from starting — the choice was persisted, and the
+// next start could not honour it.
+func CheckSource(source string, available []string) error {
 	if source == "" {
 		return nil
 	}
-	for _, known := range KnownSources {
+	for _, known := range available {
 		if source == known {
 			return nil
 		}
 	}
-	return fmt.Errorf("camera: %q is not a capture source; known sources are %s",
-		source, strings.Join(KnownSources, ", "))
+	return fmt.Errorf("camera: %q is not a capture source this build can open; it offers %s",
+		source, strings.Join(available, ", "))
 }
 
 // Zero reports whether nothing has been chosen.
@@ -93,9 +93,7 @@ func (s Selection) Validate(devices []Device) error {
 	if s.Zero() {
 		return nil
 	}
-	if err := CheckSource(s.Source); err != nil {
-		return err
-	}
+
 	// A source chosen on its own is a complete selection: switching to "file" is a decision that needs no
 	// camera at all, and requiring one would make it impossible to switch back.
 	if s.Device == "" && s.Format == "" && s.Width == 0 && s.Height == 0 && s.FPS == 0 {
@@ -221,12 +219,28 @@ func find(devices []Device, path string) (Device, bool) {
 // to something conservative would mean shipping a system that runs at a fraction of the speed the
 // hardware in front of it can manage, which an operator would have no reason to suspect.
 func Preferred(devices []Device) (Selection, bool) {
-	device, _, ok := Selected(devices, "")
+	return PreferredFor(devices, "")
+}
+
+// PreferredFor returns the best mode for one named device.
+//
+// It is what makes selecting a camera a single act rather than two. An operator picking a device from a list
+// has expressed the whole of their intent — "use that camera" — and asking them to then choose between
+// eighteen modes is asking them to answer a question the receiver can answer better: the largest frame, and
+// among equal frames the fastest. Anyone who wants a different mode can still say so, but nobody should have
+// to in order to get a working camera.
+//
+// An empty path means the default camera, so this is also the rule applied at startup when nothing has been
+// configured at all.
+func PreferredFor(devices []Device, path string) (Selection, bool) {
+	device, ok := find(devices, path)
 	if !ok {
 		return Selection{}, false
 	}
 	mode, ok := Best(device.Modes)
 	if !ok {
+		// A device that reports no modes is still usable: the driver has a preference of its own, and naming
+		// the device without a mode is how to ask for it.
 		return Selection{Device: device.Path}, true
 	}
 	selection := Selection{
