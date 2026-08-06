@@ -1,0 +1,36 @@
+# Pass a real camera through to the receiver.
+#
+# A separate overlay rather than part of the demonstration compose, because attaching a camera to a container
+# is a decision an operator should make deliberately: it is a webcam on somebody's machine, and it should be
+# switched on by choosing to rather than by running the default.
+#
+# Use it alongside the main file:
+#
+#   docker compose -f demo/docker-compose.yml -f demo/docker-compose.camera.yml up -d
+#
+# The receiver's Settings page then lists whatever Video4Linux reports, with the real modes each device
+# offers, and defaults to the lowest-numbered device that actually declares video capture. Only devices that
+# declare it appear — most webcams also register a metadata node that produces no images, and offering that
+# would produce a receiver that captures nothing and reports it as an optical fault.
+#
+# Choosing a camera is recorded whatever the capture source is, but frames are only photographed when the
+# source is "gocv", which needs a build that includes it:
+#
+#   OTP_RECEIVER_CAPTURE_SOURCE=gocv
+#
+# Check what the container can see with:
+#
+#   docker compose -f demo/docker-compose.yml exec receiver ls -l /dev/video*
+#   curl -s localhost:8081/api/v1/cameras | python3 -m json.tool
+
+services:
+  receiver:
+    devices:
+      # Add a line per device. The metadata node of the same camera is usually the next number up and is
+      # filtered out by the capability check, so passing both through is harmless.
+      - "/dev/video0:/dev/video0"
+      - "/dev/video1:/dev/video1"
+    # Some distributions put camera nodes in a group the container user is not in. This grants the video
+    # group rather than running as root, which would be a large privilege for a small need.
+    group_add:
+      - video

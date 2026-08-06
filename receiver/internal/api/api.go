@@ -75,6 +75,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/transmissions/{id}/chunks", s.listChunks)
 	mux.HandleFunc("GET /api/v1/transmissions/{id}/missing", s.listMissing)
 	mux.HandleFunc("GET /api/v1/transmissions/{id}/file", s.downloadMerged)
+	// Where the file was sent and whether it got there. The receiver is the only side that knows: the URL
+	// crossed the optical channel in the manifest, and the delivery was made from here.
+	mux.HandleFunc("GET /api/v1/transmissions/{id}/deliveries", s.listDeliveries)
 	mux.HandleFunc("GET /api/v1/frames/failed", s.listFailedFrames)
 	mux.HandleFunc("GET /api/v1/frames/{id}/image", s.frameImage)
 	mux.HandleFunc("GET /api/v1/config", s.getConfig)
@@ -193,14 +196,14 @@ type MergedView struct {
 }
 
 func (s *Server) listTransmissions(w http.ResponseWriter, r *http.Request) {
-	ids, err := s.store.Manifests.Pending(r.Context())
+	// Every transmission, not only the incomplete ones. Listing from Pending was a bug that made a file
+	// disappear from the interface at the moment it arrived successfully, because Pending excludes anything
+	// already merged and verified — which is precisely what an operator is looking for.
+	ids, err := s.store.Manifests.All(r.Context(), 100)
 	if err != nil {
 		s.fail(w, http.StatusInternalServerError, "could not list transmissions", err)
 		return
 	}
-
-	// Pending returns the incomplete ones; the merged table holds the finished ones. Both are wanted
-	// here, because an operator's history is the interesting part after the fact.
 	views := make([]TransmissionView, 0, len(ids))
 	for _, id := range ids {
 		view, err := s.view(r, id)
@@ -442,6 +445,44 @@ func (s *Server) frameImage(w http.ResponseWriter, r *http.Request) {
 
 // getConfig reports the decoder settings in force, including the ones that can be changed while
 // running.
+// DeliveryView is one attempt to hand a merged file to its callback URL.
+type DeliveryView struct {
+	URL         string     `json:"url"`
+	Status      string     `json:"status"`
+	Attempts    int        `json:"attempts"`
+	MaxAttempts int        `json:"max_attempts"`
+	HTTPStatus  *int       `json:"http_status,omitempty"`
+	LastError   string     `json:"last_error,omitempty"`
+	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
+}
+
+func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.fail(w, http.StatusBadRequest, "the transmission id is not a UUID", err)
+		return
+	}
+	list, err := s.store.Callbacks.ForTransmission(r.Context(), id)
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, "could not read the deliveries", err)
+		return
+	}
+
+	views := make([]DeliveryView, 0, len(list))
+	for _, c := range list {
+		views = append(views, DeliveryView{
+			URL:         c.URL,
+			Status:      c.Status,
+			Attempts:    c.Attempts,
+			MaxAttempts: c.MaxAttempts,
+			HTTPStatus:  c.LastStatus,
+			LastError:   c.LastError,
+			DeliveredAt: c.DeliveredAt,
+		})
+	}
+	s.respond(w, http.StatusOK, map[string]any{"deliveries": views})
+}
+
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Current()
 	s.respond(w, http.StatusOK, map[string]any{
@@ -466,6 +507,11 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 		"callback": map[string]any{
 			"allowed_hosts":  cfg.Callback.AllowedHosts,
 			"allow_any_host": cfg.Callback.AllowAnyHost,
+		},
+		// Where an operator can see the sending side of the same transfer. For their browser, not for this
+		// process — the two applications still share only a protocol and a directory.
+		"peer": map[string]any{
+			"sender_ui_url": cfg.Peer.SenderUIURL,
 		},
 	})
 }

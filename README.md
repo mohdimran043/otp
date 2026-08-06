@@ -73,7 +73,7 @@ Three pages, all served from the same origin as the API on each side.
 | `http://<sender>/settings` | **Frame rate and geometry.** The panel's refresh rate is measured in the browser; the frame rate applies immediately, geometry only when nothing is in flight. |
 | `http://<sender>/transfers/<id>` | A transfer's chunk map, refreshing as acknowledgements arrive, **the file as it was sent**, **every frame it rendered as an image**, and **Pause / Stop**. |
 | `http://<receiver>/` | Live capture: frames captured, decoded, and unreadable, with the decode rate. |
-| `http://<receiver>/transmissions/<id>` | What has arrived, what is still missing, and **the file itself** — an image drawn, a video played, an archive offered as a download. |
+| `http://<receiver>/transmissions/<id>` | What has arrived, what is still missing, **the file itself** — an image drawn, a video played, an archive offered as a download — **both hashes side by side**, and **where it was delivered and whether it got there**. |
 | `http://<receiver>/settings` | The decoder's thresholds, and **which camera to capture from**. |
 
 Two things about the display page are not cosmetic, because getting either wrong breaks decoding rather
@@ -112,6 +112,23 @@ The two differ in what they keep. **Pause** stops the display and keeps every ac
 shows only what is still outstanding. **Stop** ends the transfer; the receiver is never told, because there
 is nothing to tell it — it simply stops seeing frames, which from its side is the same event as the sender
 being switched off.
+
+### Comparing the two ends by hand
+
+The hashes agreeing is the proof, and a better proof than any inspection by eye — a single flipped bit
+changes the whole digest, which nothing a person could notice would do. But a proof is not the same as being
+convinced, so the receiver puts both digests next to each other character for character, offers the received
+bytes for download so they can be diffed with whatever tool you trust, and links straight to the same
+transfer on the sender when its interface is reachable.
+
+That link is off by default. Set `OTP_RECEIVER_PEER_SENDER_UI_URL` to enable it — both sides address a
+transfer by the same transmission id, so the sender's page for it is at `/transfers/<id>`. On a genuinely
+air-gapped installation the sender's interface will not be reachable from the receiver, and a link that
+cannot work is worse than none.
+
+The receiver also shows **where the file went and whether it arrived**: the callback URL as it came across in
+the manifest, the HTTP status, the attempt count, and the error if there was one. It is the only side that
+can say — the URL crossed the optical channel, and the delivery was made from there.
 
 ### Keeping up: the receiver decodes concurrently
 

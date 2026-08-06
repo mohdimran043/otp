@@ -36,6 +36,11 @@ strictly serial — which is why it needed no new locks.
 **Done: stopping a transfer.** Pause, resume, and cancel, as a status change the display loop re-reads
 every frame.
 
+**The receiver showed nothing it had received.** Its transmission list was built from a query that excludes
+anything already merged and verified — so a file disappeared from the interface at the moment it arrived
+successfully. Three completed transfers displayed as none. Now listed from every manifest, newest first, with
+the callback URL, the delivery outcome, and both hashes side by side.
+
 **Two defects found on the way, both worth recording:**
 
 - `FileSink.keep` was declared, documented, and never referenced, so the display directory grew for as long

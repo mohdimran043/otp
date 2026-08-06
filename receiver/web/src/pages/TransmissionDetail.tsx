@@ -16,6 +16,8 @@ import { useParams } from 'react-router-dom'
 import { api, formatBytes, formatPercent } from '../api/client'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { Grid } from '../components/Grid'
+import { Compare } from '../components/Compare'
+import { Delivery } from '../components/Delivery'
 import { FilePreview } from '../components/FilePreview'
 import { Stat } from '../components/Stat'
 import { useUi } from '../store/ui'
@@ -145,14 +147,9 @@ export function TransmissionDetail() {
 
       {merged && <FilePreview transmissionId={id} merged={merged} />}
 
-      {data?.callback_url && (
-        <Paper variant="outlined" sx={{ p: 2 }}>
-          <Typography variant="subtitle2">Delivery</Typography>
-          <Typography variant="body2" color="text.secondary">
-            Once verified, the file is posted to {data.callback_url}
-          </Typography>
-        </Paper>
-      )}
+      {data && <Compare transmission={data} />}
+
+      {data && <Delivery transmission={data} />}
 
       <Paper variant="outlined" sx={{ p: 2 }}>
         <Stack direction="row" alignItems="baseline" spacing={2} sx={{ mb: 1 }}>

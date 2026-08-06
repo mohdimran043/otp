@@ -94,6 +94,11 @@ services:
       # simulating it costs the receiver CPU it should be spending on decoding. Set to "typical" to
       # demonstrate the optical tolerances; leave empty to measure throughput.
       OTP_RECEIVER_CAPTURE_SIMULATE: ${OTP_RECEIVER_CAPTURE_SIMULATE-typical}
+      # Where an operator can see the sending side of the same transfer, for their browser only — the two
+      # applications still share nothing but a protocol and a directory. Both address a transfer by the same
+      # transmission id, which is what makes a one-click comparison possible. On a real air-gapped
+      # installation this would usually be left unset.
+      OTP_RECEIVER_PEER_SENDER_UI_URL: http://localhost:8080
       OTP_RECEIVER_CAPTURE_RETAIN_FRAMES: "true"
       OTP_RECEIVER_CALLBACK_ALLOWED_HOSTS: callback
       OTP_RECEIVER_LOG_LEVEL: info

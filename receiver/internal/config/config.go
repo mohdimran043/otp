@@ -27,6 +27,7 @@ type Config struct {
 	Database Database `yaml:"database"`
 	Storage  Storage  `yaml:"storage"`
 	Capture  Capture  `yaml:"capture"`
+	Peer     Peer     `yaml:"peer"`
 	Decoder  Decoder  `yaml:"decoder"`
 	Ack      Ack      `yaml:"ack"`
 	Callback Callback `yaml:"callback"`
@@ -127,6 +128,20 @@ type Capture struct {
 	// possible case. Naming a profile makes the virtual channel behave like a real one, so a demonstration
 	// or a soak test exercises the tolerances a camera actually will.
 	Simulate string `yaml:"simulate"`
+}
+
+// Peer is where the other side of the gap can be reached by a human.
+//
+// Not by this process: the two applications share a protocol and a directory and nothing else, and that
+// separation is the point. This is a URL for an operator's browser, so that a received file can be put next
+// to the one that was sent. Both sides address a transfer by the same transmission id, which is what makes a
+// one-click comparison possible at all.
+//
+// Empty by default, because on a real air-gapped installation the sender's interface may not be reachable
+// from the receiver's network — and a link that cannot work is worse than no link.
+type Peer struct {
+	// SenderUIURL is the origin the sender's browser app is served from, such as http://sender.local:8080.
+	SenderUIURL string `yaml:"sender_ui_url"`
 }
 
 // Decoder configures how frames are read.
@@ -522,6 +537,7 @@ func applyEnv(c *Config) error {
 	dur("CAPTURE_IDLE_INTERVAL", &c.Capture.IdleInterval)
 	boolean("CAPTURE_RETAIN_FRAMES", &c.Capture.RetainFrames)
 	str("CAPTURE_SIMULATE", &c.Capture.Simulate)
+	str("PEER_SENDER_UI_URL", &c.Peer.SenderUIURL)
 	str("CAPTURE_DEVICE", &c.Capture.Device)
 	str("CAPTURE_FORMAT", &c.Capture.Format)
 	integer("CAPTURE_DECODE_WORKERS", &c.Capture.DecodeWorkers)

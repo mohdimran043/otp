@@ -264,6 +264,39 @@ func (r *Manifests) Get(ctx context.Context, transmissionID uuid.UUID) (Manifest
 }
 
 // Pending returns transmissions whose manifest has arrived but whose file has not been merged.
+// All returns every transmission this receiver knows about, newest first.
+//
+// Distinct from Pending, and the distinction was a real bug rather than a nicety: Pending excludes anything
+// already merged and verified, which is exactly the set an operator most wants to look at. The receiver's
+// list was built from Pending alone, so a file vanished from the interface at the moment it arrived
+// successfully — three completed transfers showed as none. A receiver that cannot show what it received is
+// not much use whatever it did with the bytes.
+//
+// Ordered by arrival, newest first, because the thing just received is the thing being looked for.
+func (r *Manifests) All(ctx context.Context, limit int) ([]uuid.UUID, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT transmission_id FROM manifests
+		ORDER BY received_at DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (r *Manifests) Pending(ctx context.Context) ([]uuid.UUID, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT m.transmission_id FROM manifests m
@@ -592,8 +625,15 @@ func (r *Callbacks) Due(ctx context.Context, limit int) ([]Callback, error) {
 
 // Delivered marks a callback as accepted.
 func (r *Callbacks) Delivered(ctx context.Context, id uuid.UUID, status int) error {
+	// The attempt is counted here as well as in Due.
+	//
+	// Due increments it when it claims a callback from the queue, which is the retrying path — but a merged
+	// file is delivered directly as soon as it verifies, without going through the queue at all. That path
+	// left the counter at zero, so a successful delivery displayed as "0 of 8 attempts", which reads as
+	// though nothing had been tried. GREATEST rather than +1 so the queued path is not double-counted.
 	_, err := r.pool.Exec(ctx, `
 		UPDATE callbacks SET status = 'delivered', last_status = $2, last_error = '',
+		                     attempts = GREATEST(attempts, 1),
 		                     delivered_at = now(), updated_at = now()
 		WHERE id = $1`, id, status)
 	return err
@@ -611,6 +651,36 @@ func (r *Callbacks) Retry(ctx context.Context, id uuid.UUID, status *int, reason
 }
 
 // Get returns one callback.
+// ForTransmission returns the delivery attempts for one transmission, newest first.
+//
+// An operator looking at a received file wants to know where it was sent and whether it got there, and the
+// receiver is the only side that knows: the URL crossed the optical channel in the manifest and the delivery
+// was made from here. Reporting the attempts rather than a boolean matters when it went wrong — a refused
+// host, a 500, a timeout and a delivery that simply has not been tried yet are four different problems.
+func (r *Callbacks) ForTransmission(ctx context.Context, transmission uuid.UUID) ([]Callback, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, transmission_id, url, event, status, attempts, max_attempts, last_status,
+		       last_error, payload, next_attempt_at, delivered_at
+		FROM callbacks WHERE transmission_id = $1
+		ORDER BY next_attempt_at DESC`, transmission)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Callback
+	for rows.Next() {
+		var c Callback
+		if err := rows.Scan(&c.ID, &c.TransmissionID, &c.URL, &c.Event, &c.Status, &c.Attempts,
+			&c.MaxAttempts, &c.LastStatus, &c.LastError, &c.Payload, &c.NextAttemptAt,
+			&c.DeliveredAt); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 func (r *Callbacks) Get(ctx context.Context, id uuid.UUID) (Callback, error) {
 	var c Callback
 	err := r.pool.QueryRow(ctx, `

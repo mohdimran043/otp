@@ -84,6 +84,9 @@ export interface DecoderConfig {
   }
   decoder: { min_finder_score: number; min_timing_score: number; encrypted: boolean }
   callback: { allowed_hosts: string[] | null; allow_any_host: boolean }
+  // Where an operator can see the sending side of the same transfer. For their browser, not for this
+  // process — the two applications still share only a protocol and a directory.
+  peer?: { sender_ui_url: string }
 }
 
 // A capture device attached to this machine, as V4L2 reports it.
@@ -122,6 +125,18 @@ export interface CamerasView {
   effective: CameraSelection
   substituted: boolean
   error?: string
+}
+
+// One attempt to hand a merged file to its callback URL. Attempts rather than a boolean, because a refused
+// host, a 500, a timeout and a delivery not yet tried are four different problems.
+export interface DeliveryView {
+  url: string
+  status: string
+  attempts: number
+  max_attempts: number
+  http_status?: number
+  last_error?: string
+  delivered_at?: string
 }
 
 export class ApiError extends Error {
@@ -164,6 +179,11 @@ export const api = {
     request<{ frames: CapturedFrame[] | null }>(`/api/v1/frames/failed?limit=${limit}`).then(
       (r) => r.frames ?? [],
     ),
+  deliveries: (id: string) =>
+    request<{ deliveries: DeliveryView[] | null }>(`/api/v1/transmissions/${id}/deliveries`).then(
+      (r) => r.deliveries ?? [],
+    ),
+
   config: () => request<DecoderConfig>('/api/v1/config'),
 
   cameras: () => request<CamerasView>('/api/v1/cameras'),
