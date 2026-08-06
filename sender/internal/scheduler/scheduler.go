@@ -132,6 +132,21 @@ func (s Stats) Throughput() float64 {
 // ever looking busy.
 var ErrStalled = errors.New("scheduler: a chunk was not acknowledged within its retry limit")
 
+// ErrCancelled and ErrPaused mean an operator stopped the transfer.
+//
+// They are distinct from every other way a display run can end, and from each other, because what happens
+// next differs. A cancelled transmission is over: its frames will not be shown again and the receiver will
+// never be told, because there is nothing to tell it — the sender simply stops, and a receiver holding a
+// partial file times out on a transmission that no longer exists. A paused one is resumable: its chunks
+// keep their acknowledgements, so resuming shows only what is still outstanding.
+//
+// Neither is a failure, and reporting them as one would put a transfer an operator deliberately stopped
+// into the same bucket as a camera that came unplugged.
+var (
+	ErrCancelled = errors.New("scheduler: the transfer was cancelled")
+	ErrPaused    = errors.New("scheduler: the transfer was paused")
+)
+
 // New returns a scheduler.
 func New(st *store.Store, objects objectstore.Store, sink optical.Sink, cfg *config.Watcher, log *zap.Logger) *Scheduler {
 	return &Scheduler{
@@ -222,6 +237,29 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 		// they have when the receiver reports it is falling behind.
 		cfg = s.cfg.Current()
 		ticker.Reset(cfg.FrameInterval())
+
+		// And so is the status, because that is how an operator stops a transfer. A stop is a row
+		// update rather than a signal to this goroutine, which means the API handler and this loop need
+		// know nothing about each other and a stop outlives whichever of them restarts first. One
+		// indexed single-column read per frame is a price worth paying for a stop that actually stops.
+		switch status, err := s.store.Transmissions.Status(ctx, transmissionID); {
+		case err != nil:
+			return stats, err
+		case status == store.TxCancelled:
+			stats.Duration = time.Since(started)
+			stats.ChunksAcked, _ = s.store.Transmissions.RecountAcked(ctx, transmissionID)
+			s.closeSession(ctx, session.ID, "cancelled")
+			s.log.Info("display cancelled", zap.String("transmission", transmissionID.String()),
+				zap.Int64("frames_shown", stats.FramesShown))
+			return stats, ErrCancelled
+		case status == store.TxPaused:
+			stats.Duration = time.Since(started)
+			stats.ChunksAcked, _ = s.store.Transmissions.RecountAcked(ctx, transmissionID)
+			s.closeSession(ctx, session.ID, "paused")
+			s.log.Info("display paused", zap.String("transmission", transmissionID.String()),
+				zap.Int64("frames_shown", stats.FramesShown))
+			return stats, ErrPaused
+		}
 
 		pending, err := s.store.Chunks.Pending(ctx, transmissionID, cfg.Display.WindowSize)
 		if err != nil {
@@ -379,13 +417,9 @@ func (s *Scheduler) show(ctx context.Context, frame store.Frame, priority Priori
 		return err
 	}
 
-	s.mu.Lock()
-	s.sequence++
-	sequence := s.sequence
-	s.mu.Unlock()
-
+	// No sequence is passed: the display assigns it. A scheduler runs per transmission and two of them
+	// counting separately is how concurrent transfers came to overwrite each other's frames.
 	if err := s.sink.Show(ctx, optical.Frame{
-		Sequence:     sequence,
 		Number:       frame.FrameNumber,
 		Transmission: frame.TransmissionID,
 		Manifest:     frame.IsManifest,
@@ -401,10 +435,17 @@ func (s *Scheduler) show(ctx context.Context, frame store.Frame, priority Priori
 	}
 
 	s.log.Debug("frame displayed",
-		zap.Int64("sequence", sequence),
 		zap.Int("frame", frame.FrameNumber),
 		zap.String("priority", priority.String()))
 	return nil
+}
+
+// closeSession records why a display run ended.
+func (s *Scheduler) closeSession(ctx context.Context, session uuid.UUID, reason string) {
+	// Written with a context that is not the cancelled one, so the closing write actually lands.
+	if err := s.store.Sessions.Close(context.WithoutCancel(ctx), session, reason, ""); err != nil {
+		s.log.Warn("could not close the display session", zap.Error(err))
+	}
 }
 
 // noteSent records that a chunk's frame has just been displayed.

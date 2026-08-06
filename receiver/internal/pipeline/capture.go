@@ -92,8 +92,16 @@ type FileSource struct {
 	consume bool
 
 	mu       sync.Mutex
-	seen     map[string]bool
 	sequence int64
+
+	// highWater is the newest frame name read so far. Names are zero-padded display sequences, so a string
+	// comparison is a chronological one.
+	highWater string
+
+	// behind is the deepest backlog seen on the channel: how many displayed frames were waiting at once. It
+	// is the receiver's own measure of the display running ahead of it, and the number to look at when
+	// deciding whether the frame rate is set too high.
+	behind int64
 }
 
 // FileSourceOptions configure a file-backed source.
@@ -129,7 +137,6 @@ func NewFileSource(opts FileSourceOptions) (*FileSource, error) {
 		degrade: opts.Degrade,
 		drop:    opts.Drop,
 		consume: opts.Consume,
-		seen:    map[string]bool{},
 	}, nil
 }
 
@@ -137,6 +144,17 @@ func NewFileSource(opts FileSourceOptions) (*FileSource, error) {
 func (s *FileSource) Name() string { return "file" }
 
 // Next returns the next unread frame in the directory.
+// Behind is the deepest backlog of unread frames this reader has seen.
+//
+// One means it kept up: each frame was read before the next arrived. A large number means the display is
+// producing frames faster than this receiver can decode them and they are queueing, at which point the
+// frame rate is above what is usable here and turning it down costs nothing.
+func (s *FileSource) Behind() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.behind
+}
+
 func (s *FileSource) Next(ctx context.Context) (Capture, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -157,7 +175,14 @@ func (s *FileSource) Next(ctx context.Context) (Capture, error) {
 		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		if !s.consume && s.seen[e.Name()] {
+		// Older than something already read.
+		//
+		// A high-water mark rather than a set of names seen, and it replaced one: the set grew by an entry
+		// per captured frame and was never emptied, which over a long transfer is a leak nobody would
+		// notice until it mattered. The mark is sufficient because names are zero-padded display sequences
+		// and the channel only moves forwards.
+		//
+		if e.Name() <= s.highWater {
 			continue
 		}
 		names = append(names, e.Name())
@@ -165,13 +190,33 @@ func (s *FileSource) Next(ctx context.Context) (Capture, error) {
 	if len(names) == 0 {
 		return Capture{}, ErrNoFrame
 	}
-	// Sorted, so frames are captured in the order they were displayed. A camera has no choice
-	// about this; a directory does, and taking them out of order would be a fiction.
+	// Sorted, and the oldest unread frame is taken.
+	//
+	// The oldest, in display order — and it was briefly the newest, which was a mistake worth recording
+	// because the reasoning for it sounded better than it was. The argument ran: this directory stands in
+	// for a screen, a camera cannot photograph a frame that was on screen a minute ago, so a reader slower
+	// than the display should skip to the present rather than fall further into the past.
+	//
+	// What that overlooks is the manifest. Frame zero carries the filename, the sizes, the chunk geometry
+	// and the original hash, and without it a receiver can decode and acknowledge every chunk of a file and
+	// still not be able to assemble one — it holds the bytes and knows nothing about what they are. The
+	// manifest is written first, so a reader that jumps to the newest frame and discards the rest destroys
+	// it before reading it. The observed result was a transfer where the sender saw every chunk
+	// acknowledged and stopped, while the receiver sat on a complete set of chunks it could not merge.
+	//
+	// So this is a bounded queue rather than a screen, and the bound belongs at the writing end, where the
+	// display already prunes what it has superseded. Read in order, and nothing displayed is discarded
+	// unread.
 	sort.Strings(names)
+
+	// The deepest backlog seen, which is the honest measure of a display running ahead of this reader.
+	if depth := int64(len(names)); depth > s.behind {
+		s.behind = depth
+	}
 
 	name := names[0]
 	path := filepath.Join(s.dir, name)
-	s.seen[name] = true
+	s.highWater = name
 	s.sequence++
 	sequence := s.sequence
 

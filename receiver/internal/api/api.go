@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/opticaltransport/otp/shared/mediatype"
 	"github.com/opticaltransport/otp/shared/protocol"
 
 	"github.com/opticaltransport/otp/receiver/internal/config"
@@ -35,6 +37,10 @@ type Server struct {
 	// session reports the capture session currently running, so the dashboard can show live figures
 	// without being told which session to look at.
 	session func() uuid.UUID
+
+	// capture reports the deepest backlog of unread frames. Injected because only the source can know it,
+	// and the API must not reach into the pipeline to ask.
+	capture func() int64
 }
 
 // Options configure a server.
@@ -44,6 +50,7 @@ type Options struct {
 	Config  *config.Watcher
 	Log     *zap.Logger
 	Session func() uuid.UUID
+	Behind  func() int64
 }
 
 // New returns a server.
@@ -54,6 +61,7 @@ func New(opts Options) *Server {
 		cfg:     opts.Config,
 		log:     opts.Log.Named("api"),
 		session: opts.Session,
+		capture: opts.Behind,
 	}
 }
 
@@ -81,6 +89,23 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /health/ready", s.ready)
 
 	return s.withCORS(s.withLogging(mux))
+}
+
+// decodeWorkers reports how many frames are decoded at once, resolving the zero default the same way the
+// pipeline does so a settings page shows the number actually in force rather than the word "default".
+func (s *Server) decodeWorkers() int {
+	if configured := s.cfg.Current().Capture.DecodeWorkers; configured > 0 {
+		return configured
+	}
+	return max(1, runtime.NumCPU()-1)
+}
+
+// behind reports the deepest backlog of unread frames, when the source can say.
+func (s *Server) behind() int64 {
+	if s.capture == nil {
+		return 0
+	}
+	return s.capture()
 }
 
 // SessionView is the live state of the capture.
@@ -315,13 +340,51 @@ func (s *Server) downloadMerged(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+merged.Filename+"\"")
-	w.Header().Set("X-OTP-SHA256", hex.EncodeToString(merged.SHA256))
-	w.Header().Set("Content-Length", strconv.FormatInt(merged.SizeBytes, 10))
-	if _, err := w.Write(body); err != nil {
-		s.log.Warn("could not write the merged file", zap.Error(err))
+	serveFile(w, body, merged.Filename, hex.EncodeToString(merged.SHA256),
+		r.URL.Query().Get("inline") == "1", s.log)
+}
+
+// serveFile writes a transferred file, either as a download or for showing in place.
+//
+// Two modes rather than one, because they answer different needs and only one of them is safe by default.
+// The download is an opaque byte stream with an attachment disposition: no browser will interpret it,
+// which is the right treatment for a file that arrived from outside. Inline is opt-in per request and
+// bounded by the allowlist in shared/mediatype — a file that may not be rendered is served as a download
+// whatever the query string asked for, so a caller that forgets to check cannot serve script from this
+// origin.
+//
+// nosniff matters as much as the type. Without it a browser may disregard a declared type it disagrees
+// with and guess from the bytes, which is precisely the decision this is trying to take away from it.
+func serveFile(w http.ResponseWriter, body []byte, filename, sha256Hex string, inline bool, log *zap.Logger) {
+	contentType := "application/octet-stream"
+	disposition := "attachment"
+	if inline && mediatype.Inline(filename) {
+		_, contentType = mediatype.Of(filename)
+		disposition = "inline"
 	}
+
+	h := w.Header()
+	h.Set("Content-Type", contentType)
+	h.Set("X-Content-Type-Options", "nosniff")
+	// The filename is quoted and its quotes and backslashes escaped. It is validated as a bare name on the
+	// way in, so this is belt and braces — but a header built by concatenation is worth escaping anyway,
+	// because the validation and this line are far apart and only one of them is obviously load-bearing.
+	h.Set("Content-Disposition", disposition+`; filename="`+escapeHeaderFilename(filename)+`"`)
+	h.Set("X-OTP-SHA256", sha256Hex)
+	h.Set("Content-Length", strconv.Itoa(len(body)))
+	if _, err := w.Write(body); err != nil {
+		log.Warn("could not write the file", zap.Error(err))
+	}
+}
+
+// escapeHeaderFilename makes a filename safe inside a quoted header parameter.
+func escapeHeaderFilename(name string) string {
+	name = strings.ReplaceAll(name, `\`, `\\`)
+	name = strings.ReplaceAll(name, `"`, `\"`)
+	// A newline in a header would split it. The name cannot contain one by the time it gets here, and this
+	// costs nothing.
+	name = strings.ReplaceAll(name, "\r", "")
+	return strings.ReplaceAll(name, "\n", "")
 }
 
 // listFailedFrames returns the frames that could not be read.
@@ -387,6 +450,13 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 			"source":        cfg.Capture.Source,
 			"dir":           cfg.Capture.Dir,
 			"idle_interval": cfg.Capture.IdleInterval.String(),
+			// The number that decides whether the receiver can keep up with the display. Decoding is what
+			// it spends its time on, and it scales with cores almost exactly.
+			"decode_workers":     cfg.Capture.DecodeWorkers,
+			"decode_workers_now": s.decodeWorkers(),
+			// The deepest backlog of unread frames: one means the receiver kept up, a large number means the
+			// display is producing faster than it can decode.
+			"frames_behind": s.behind(),
 		},
 		"decoder": map[string]any{
 			"min_finder_score": cfg.Decoder.MinFinderScore,

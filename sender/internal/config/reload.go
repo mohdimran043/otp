@@ -98,6 +98,42 @@ func (w *Watcher) OnChange(fn func(Config)) {
 // OnIgnored registers a function called when a reload found changes it could not apply.
 func (w *Watcher) OnIgnored(fn func(fields []string)) { w.onIgnored = fn }
 
+// Apply installs a whole configuration and notifies subscribers.
+//
+// It is how a change made through the API takes effect, and it deliberately accepts more than Reload does.
+// Reload applies only the subset that is safe to change while the file is being edited underneath a running
+// process; Apply is called by a handler that has already established the stronger precondition — nothing is
+// in flight — and can therefore change the frame geometry, which Reload must never do.
+//
+// The configuration is validated here as well as by the caller. A watcher that could be made to hold an
+// invalid configuration would fail somewhere far away from the call that broke it, and the second check
+// costs one function call.
+//
+// It does not write the file. The configuration file is the operator's document, with their comments and
+// their formatting in it, and a service that rewrote it to record a change made through a form would be
+// destroying something it does not own. So a change made here lasts until the process restarts or the file
+// is reloaded, and the handler says so.
+func (w *Watcher) Apply(next Config) (Config, error) {
+	if err := next.Validate(); err != nil {
+		return Config{}, err
+	}
+
+	old := w.Current()
+	if reflect.DeepEqual(next, old) {
+		return old, nil
+	}
+	w.current.Store(&next)
+
+	w.mu.Lock()
+	subscribers := make([]func(Config), len(w.subscribers))
+	copy(subscribers, w.subscribers)
+	w.mu.Unlock()
+	for _, fn := range subscribers {
+		fn(next)
+	}
+	return next, nil
+}
+
 // OnError registers a function called when a reload failed.
 func (w *Watcher) OnError(fn func(error)) { w.onError = fn }
 

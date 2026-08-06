@@ -22,8 +22,10 @@ import { api, eta, formatBytes, formatDuration, formatRate } from '../api/client
 import { ErrorNotice } from '../components/ErrorNotice'
 import { FrameAudit } from '../components/FrameAudit'
 import { Grid } from '../components/Grid'
+import { SentFile } from '../components/SentFile'
 import { Stat } from '../components/Stat'
 import { StatusChip } from '../components/StatusChip'
+import { TransferControls } from '../components/TransferControls'
 import { useUi } from '../store/ui'
 
 export function TransferDetail() {
@@ -77,12 +79,20 @@ export function TransferDetail() {
 
   return (
     <Stack spacing={3}>
-      <Stack direction="row" alignItems="center" spacing={2}>
+      <Stack direction="row" alignItems="center" spacing={2} flexWrap="wrap" useFlexGap>
         <Typography variant="h5">{status?.filename ?? 'Transfer'}</Typography>
         {status && <StatusChip status={status.status} />}
-        <Typography variant="caption" color="text.secondary">
+        <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1 }}>
           {id}
         </Typography>
+        {id && status && (
+          <TransferControls
+            transmissionId={id}
+            status={status.status}
+            ackedChunks={status.acked_chunks}
+            chunkCount={status.chunk_count}
+          />
+        )}
       </Stack>
 
       <ErrorNotice error={transfer.error} />
@@ -262,6 +272,15 @@ export function TransferDetail() {
           </Typography>
         )}
       </Paper>
+
+      {id && transfer.data && (
+        <SentFile
+          transmissionId={id}
+          filename={transfer.data.filename}
+          sizeBytes={transfer.data.original_size}
+          sha256={transfer.data.sha256}
+        />
+      )}
 
       <Paper variant="outlined" sx={{ p: 2 }}>
         <Typography variant="subtitle1" sx={{ mb: 1 }}>

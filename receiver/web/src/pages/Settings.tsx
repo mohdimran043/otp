@@ -37,6 +37,24 @@ export function Settings() {
           </Grid>
           <Grid size={{ xs: 12, sm: 6, md: 3 }}>
             <Stat
+              label="Decoding at once"
+              value={`${data.capture.decode_workers_now} frames`}
+              hint={
+                data.capture.decode_workers > 0
+                  ? 'configured'
+                  : 'one per core, less one — set OTP_RECEIVER_CAPTURE_DECODE_WORKERS to override'
+              }
+            />
+          </Grid>
+          <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+            <Stat
+              label="Deepest backlog"
+              value={`${data.capture.frames_behind.toLocaleString()} frames`}
+              hint="1 means it kept up; a large number means the display is ahead of the decoder"
+            />
+          </Grid>
+          <Grid size={{ xs: 12, sm: 6, md: 3 }}>
+            <Stat
               label="Fiducial floor"
               value={formatPercent(data.decoder.min_finder_score)}
               hint="frames below this are discarded unread"

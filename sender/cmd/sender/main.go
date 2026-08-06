@@ -132,15 +132,13 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 	line.Register(engine)
 	acks := ackwatch.New(st, watcher, log.Logger)
 
-	channel, err := optical.Open(cfg.Display)
+	// Open returns the channel already wrapped, so "what is on the screen right now" has one answer rather
+	// than one per scheduler, and the display sequence is assigned in one place. Wrapping it again here
+	// would assign the sequence twice and publish a number that did not match the frame on the channel.
+	sink, err := optical.Open(cfg.Display)
 	if err != nil {
 		return err
 	}
-
-	// Everything that displays goes through Live, so "what is on the screen right now" has one answer
-	// rather than one per scheduler. It is what the camera-facing page reads, and what a receiver pulling
-	// frames over HTTP will follow — neither of which should have to know which channel is underneath.
-	sink := optical.NewLive(channel)
 	defer sink.Close()
 
 	// One display loop per transmission, tracked so shutdown can wait for them.
@@ -179,7 +177,13 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 
 			sched := scheduler.New(st, objects, sink, watcher, log.Logger)
 			stats, err := sched.Run(ctx, id)
-			if err != nil && ctx.Err() == nil {
+			switch {
+			case errors.Is(err, scheduler.ErrCancelled), errors.Is(err, scheduler.ErrPaused):
+				// An operator stopped it. The scheduler has already recorded why and logged it, and this
+				// is emphatically not an error: reporting it as one would put a deliberate stop in the
+				// same bucket as a camera that came unplugged.
+				return
+			case err != nil && ctx.Err() == nil:
 				log.Error("display stopped", zap.String("transmission", id.String()), zap.Error(err))
 				return
 			}

@@ -580,6 +580,37 @@ func (r *Frames) List(ctx context.Context, transmissionID uuid.UUID) ([]Frame, e
 	return out, rows.Err()
 }
 
+// Status returns just a transmission's status.
+//
+// A single column rather than the whole row, because the display loop reads this on every frame: it is how
+// an operator's decision to stop a transfer reaches a goroutine that is otherwise only listening to its
+// own ticker. Making it a database fact rather than an in-process signal is deliberate — the API handler
+// and the display loop need not know about each other, and a stop survives whichever of them restarts.
+func (r *Transmissions) Status(ctx context.Context, id uuid.UUID) (TransmissionStatus, error) {
+	var status TransmissionStatus
+	err := r.pool.QueryRow(ctx, `SELECT status FROM transmissions WHERE id = $1`, id).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("%w: transmission %s", ErrNotFound, id)
+	}
+	return status, err
+}
+
+// CountActive is how many transmissions are being prepared or displayed right now.
+//
+// It exists to answer one question: may the frame geometry change? The grid and cell size are written into
+// every frame header and the chunk size is derived from them, so a transfer that is mid-preparation or
+// mid-display has already committed to a shape. Paused counts as active — a paused transfer is one that
+// will resume against the geometry its manifest declared.
+func (r *Transmissions) CountActive(ctx context.Context) (int, error) {
+	var count int
+	err := r.pool.QueryRow(ctx, `
+		SELECT count(*) FROM transmissions
+		WHERE status = ANY($1)`,
+		[]string{string(TxPending), string(TxPreparing), string(TxReady),
+			string(TxTransmitting), string(TxPaused)}).Scan(&count)
+	return count, err
+}
+
 // GetByNumber returns one frame of a transmission, addressed the way an auditor thinks of it.
 //
 // By frame number rather than by row id, because that is the number written into the frame's own header

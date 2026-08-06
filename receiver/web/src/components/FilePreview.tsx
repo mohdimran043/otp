@@ -1,6 +1,7 @@
-import { Box, Paper, Stack, Typography } from '@mui/material'
+import { Box, Button, Chip, Paper, Stack, Typography } from '@mui/material'
+import DownloadIcon from '@mui/icons-material/Download'
 
-import { api, type MergedView } from '../api/client'
+import { api, formatBytes, type MergedView } from '../api/client'
 
 // What arrived, shown rather than described.
 //
@@ -12,18 +13,30 @@ import { api, type MergedView } from '../api/client'
 // The type is inferred from the filename rather than carried in the manifest. The protocol deliberately does
 // not transport a content type: it moves bytes, and a receiver that acted on a sender-supplied MIME type
 // would be letting the far side decide how its browser renders something.
-function kindOf(filename: string): 'image' | 'audio' | 'video' | 'text' | 'other' {
+//
+// What may be rendered at all is the server's decision, not this component's. It asks for `?inline=1` and
+// gets a real content type only for the types the shared allowlist permits. SVG is the case that matters:
+// it looks like an image and is an XML document that may contain <script>, so rendering one from this origin
+// would be script running on the page an operator uses to run the receiver. It downloads instead.
+function kindOf(filename: string): 'image' | 'audio' | 'video' | 'download' {
   const extension = filename.toLowerCase().split('.').pop() ?? ''
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'].includes(extension)) return 'image'
-  if (['wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac'].includes(extension)) return 'audio'
-  if (['mp4', 'webm', 'mov'].includes(extension)) return 'video'
-  if (['txt', 'json', 'csv', 'log', 'md', 'yaml', 'yml'].includes(extension)) return 'text'
-  return 'other'
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif', 'ico'].includes(extension)) return 'image'
+  if (['wav', 'mp3', 'm4a', 'aac', 'flac', 'oga', 'opus'].includes(extension)) return 'audio'
+  if (['mp4', 'm4v', 'webm', 'ogv', 'mov'].includes(extension)) return 'video'
+  return 'download'
+}
+
+function isArchive(filename: string): boolean {
+  const name = filename.toLowerCase()
+  return [
+    '.zip', '.tar', '.tgz', '.tar.gz', '.tar.bz2', '.tar.xz', '.tar.zst',
+    '.7z', '.rar', '.gz', '.bz2', '.xz', '.zst', '.iso', '.dmg',
+  ].some((suffix) => name.endsWith(suffix))
 }
 
 export function FilePreview({ transmissionId, merged }: { transmissionId: string; merged: MergedView }) {
-  // Nothing unverified is ever rendered. The receiver refuses to serve a file that failed its hash check,
-  // and showing one here would be presenting corrupt data as the thing that was sent.
+  // Nothing unverified is ever rendered or offered. The receiver refuses to serve a file that failed its hash
+  // check, and showing one here would be presenting corrupt data as the thing that was sent.
   if (!merged.verified) {
     return (
       <Paper variant="outlined" sx={{ p: 2, borderColor: 'error.main' }}>
@@ -37,18 +50,32 @@ export function FilePreview({ transmissionId, merged }: { transmissionId: string
     )
   }
 
-  const url = api.downloadUrl(transmissionId)
+  const inline = api.inlineUrl(transmissionId)
+  const download = api.downloadUrl(transmissionId)
   const kind = kindOf(merged.filename)
+  const archive = isArchive(merged.filename)
 
   return (
     <Paper variant="outlined" sx={{ p: 2 }}>
-      <Stack spacing={1}>
-        <Typography variant="subtitle2">Received file</Typography>
+      <Stack spacing={1.5}>
+        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+          <Typography variant="subtitle1" sx={{ flexGrow: 1 }}>
+            The file that arrived
+          </Typography>
+          <Chip size="small" color="success" label="verified" />
+          <Chip size="small" label={formatBytes(merged.size_bytes)} />
+          {archive && <Chip size="small" label="archive" />}
+          {/* The download is prominent rather than tucked away, because for an archive it is the only thing
+              an operator can do with the file — and an archive is what a large transfer usually is. */}
+          <Button size="small" variant="outlined" startIcon={<DownloadIcon />} href={download}>
+            Download
+          </Button>
+        </Stack>
 
         {kind === 'image' && (
           <Box
             component="img"
-            src={url}
+            src={inline}
             alt={merged.filename}
             sx={{
               maxWidth: '100%',
@@ -65,19 +92,45 @@ export function FilePreview({ transmissionId, merged }: { transmissionId: string
           />
         )}
 
-        {kind === 'audio' && (
-          <Box component="audio" src={url} controls sx={{ width: '100%' }} />
-        )}
+        {kind === 'audio' && <Box component="audio" src={inline} controls sx={{ width: '100%' }} />}
 
         {kind === 'video' && (
-          <Box component="video" src={url} controls sx={{ maxWidth: '100%', maxHeight: 480 }} />
+          <Box
+            component="video"
+            src={inline}
+            controls
+            preload="metadata"
+            sx={{ maxWidth: '100%', maxHeight: 480, borderRadius: 1, bgcolor: '#000' }}
+          />
         )}
 
-        {(kind === 'text' || kind === 'other') && (
-          <Typography variant="body2" color="text.secondary">
-            {merged.filename} — no inline preview for this type. It can be downloaded above.
-          </Typography>
+        {kind === 'download' && (
+          <Box
+            sx={{
+              p: 3,
+              borderRadius: 1,
+              border: '1px dashed',
+              borderColor: 'divider',
+              textAlign: 'center',
+            }}
+          >
+            <Typography variant="body2">{merged.filename}</Typography>
+            <Typography variant="caption" color="text.secondary">
+              {archive
+                ? 'An archive — download it to open it. Its contents crossed the gap as bytes; nothing here has looked inside.'
+                : 'This type is not shown in place. Download it to open it.'}
+            </Typography>
+          </Box>
         )}
+
+        <Box>
+          <Typography variant="caption" color="text.secondary" display="block">
+            SHA-256 computed over the reassembled file — it matched what the sender declared
+          </Typography>
+          <Typography variant="body2" sx={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
+            {merged.sha256}
+          </Typography>
+        </Box>
       </Stack>
     </Paper>
   )

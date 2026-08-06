@@ -19,6 +19,32 @@ all, and doing 3 before them would make the result worse rather than better.
   lowest-numbered device that actually declares capture, and its best mode is preferred — largest frame
   first, fastest breaking the tie. A mode is validated against the device before it is applied.
 
+Also since: **frame rate and geometry are configurable from the sender UI** (the rate applies at once,
+geometry only when nothing is in flight, and the panel's refresh rate is measured in the browser); **the
+transferred file is shown on both ends** — image, video, or an archive offered as a download, gated by one
+shared allowlist that excludes SVG; and **[docs/OPTIMAL-CONFIG.md](OPTIMAL-CONFIG.md)** records the
+measured settings for 1 MB/s.
+
+One defect fixed along the way, found by sending two files at once: the display sequence counter lived in
+the scheduler, which runs per transmission, so two concurrent transfers both wrote `000000000001.png` and
+one overwrote the other. It now lives in the display.
+
+**Done: concurrent decode.** Decoding costs 85–115 KB/s per core, so 1 MB/s needed about nine decoders
+running at once. Frames now decode on one worker per core less one, with everything after the decode still
+strictly serial — which is why it needed no new locks.
+
+**Done: stopping a transfer.** Pause, resume, and cancel, as a status change the display loop re-reads
+every frame.
+
+**Two defects found on the way, both worth recording:**
+
+- `FileSink.keep` was declared, documented, and never referenced, so the display directory grew for as long
+  as the display ran. It went unnoticed because the per-transmission sequence reset meant each transfer
+  overwrote the last one's leavings. Now bounded to a backlog.
+- The receiver read the **oldest** frame on the channel, so a reader slower than the display fell
+  progressively further into the past — a camera pointed at a recording rather than a screen. It now reads
+  the newest and discards what it skipped, which is what a camera does.
+
 What remains below is unchanged, and step 1 is still the thing that matters most.
 
 ## 1 · Fix the acknowledgement path — before anything else

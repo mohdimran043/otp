@@ -3,6 +3,7 @@ package optical
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,6 +29,18 @@ type Live struct {
 	// waiter at once, which is what a display needs: one frame goes to every camera, browser tab, and
 	// receiver watching, and none of them should be able to starve another by arriving first.
 	changed chan struct{}
+
+	// next assigns display sequence numbers, and it lives here because there is exactly one display.
+	//
+	// This was a per-scheduler counter, and that was a real bug rather than an untidiness. A scheduler
+	// runs per transmission, so two concurrent transfers each began at one — and since the file sink
+	// names frames by sequence, both wrote 000000000001.png and one silently overwrote the other. The
+	// symptom was a transfer that stalled with every frame decoded and no chunk acknowledged, because
+	// its manifest had been replaced on disk before the receiver read it.
+	//
+	// One counter per display is the only arrangement that can be right: the sequence describes the
+	// channel, not the file crossing it, and the channel is shared.
+	next atomic.Int64
 }
 
 // NewLive returns a sink that records what it displays.
@@ -42,8 +55,13 @@ func (l *Live) Name() string { return l.inner.Name() }
 // Inner returns the wrapped sink, for callers that need the concrete channel.
 func (l *Live) Inner() Sink { return l.inner }
 
-// Show displays a frame and publishes it as the current one.
+// Show assigns the frame its display sequence, displays it, and publishes it as the current one.
+//
+// The sequence is assigned here rather than taken from the caller, so that a caller cannot get it wrong
+// and two callers cannot collide. Whatever a scheduler put in the field is overwritten.
 func (l *Live) Show(ctx context.Context, frame Frame) error {
+	frame.Sequence = l.next.Add(1)
+
 	if err := l.inner.Show(ctx, frame); err != nil {
 		return err
 	}

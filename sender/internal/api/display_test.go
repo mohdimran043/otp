@@ -78,7 +78,6 @@ func TestDisplayReportsTheFrameOnScreen(t *testing.T) {
 
 	transmission := uuid.New()
 	require.NoError(t, live.Show(context.Background(), optical.Frame{
-		Sequence:     7,
 		Number:       3,
 		Transmission: transmission,
 		WidthPx:      600,
@@ -104,12 +103,12 @@ func TestDisplayReportsTheFrameOnScreen(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
 	require.True(t, body.Live)
-	require.Equal(t, int64(7), body.Frame.Sequence)
+	require.Equal(t, int64(1), body.Frame.Sequence, "the display assigns the sequence")
 	require.Equal(t, 3, body.Frame.FrameNumber)
 	require.Equal(t, transmission.String(), body.Frame.TransmissionID)
 	require.Equal(t, 600, body.Frame.WidthPx)
 	require.Equal(t, len("not really a png"), body.Frame.Bytes)
-	require.Contains(t, body.Frame.ImageURL, "sequence=7",
+	require.Contains(t, body.Frame.ImageURL, "sequence=1",
 		"each frame needs a distinct URL, or a browser serves the previous one from cache")
 	require.Empty(t, body.Frame.ImagePNG, "the image is only inlined when it was asked for")
 
@@ -118,7 +117,7 @@ func TestDisplayReportsTheFrameOnScreen(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/display/frame.png", nil))
 	require.Equal(t, http.StatusOK, response.Code)
 	require.Equal(t, "image/png", response.Header().Get("Content-Type"))
-	require.Equal(t, "7", response.Header().Get("X-OTP-Sequence"))
+	require.Equal(t, "1", response.Header().Get("X-OTP-Sequence"))
 	require.Equal(t, "3", response.Header().Get("X-OTP-Frame-Number"))
 	require.Equal(t, "no-store", response.Header().Get("Cache-Control"),
 		"the live frame is the opposite of cacheable: the whole point is that it changes")
@@ -130,7 +129,7 @@ func TestDisplayReportsTheFrameOnScreen(t *testing.T) {
 func TestDisplayInlinesTheImageOnRequest(t *testing.T) {
 	live := optical.NewLive(&discard{})
 	handler := newDisplayServer(t, live)
-	require.NoError(t, live.Show(context.Background(), optical.Frame{Sequence: 1, PNG: []byte("pixels")}))
+	require.NoError(t, live.Show(context.Background(), optical.Frame{PNG: []byte("pixels")}))
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/display/next?after=0&include=image", nil))
@@ -154,11 +153,11 @@ func TestDisplayInlinesTheImageOnRequest(t *testing.T) {
 func TestDisplayNextAnswers204WhenNothingIsNew(t *testing.T) {
 	live := optical.NewLive(&discard{})
 	handler := newDisplayServer(t, live)
-	require.NoError(t, live.Show(context.Background(), optical.Frame{Sequence: 4, PNG: []byte("four")}))
+	require.NoError(t, live.Show(context.Background(), optical.Frame{PNG: []byte("one")}))
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response,
-		httptest.NewRequest(http.MethodGet, "/api/v1/display/next?after=4&timeout=1s", nil))
+		httptest.NewRequest(http.MethodGet, "/api/v1/display/next?after=1&timeout=1s", nil))
 	require.Equal(t, http.StatusNoContent, response.Code)
 	require.Empty(t, response.Body.String())
 }
@@ -168,7 +167,7 @@ func TestDisplayNextAnswers204WhenNothingIsNew(t *testing.T) {
 func TestDisplayNextReturnsImmediatelyWhenBehind(t *testing.T) {
 	live := optical.NewLive(&discard{})
 	handler := newDisplayServer(t, live)
-	require.NoError(t, live.Show(context.Background(), optical.Frame{Sequence: 99, PNG: []byte("ninety-nine")}))
+	require.NoError(t, live.Show(context.Background(), optical.Frame{PNG: []byte("a frame")}))
 
 	started := time.Now()
 	response := httptest.NewRecorder()

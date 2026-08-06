@@ -70,9 +70,10 @@ Three pages, all served from the same origin as the API on each side.
 |---|---|
 | `http://<sender>/display` | **The frames, live.** What a camera is looking at, one frame at a time, as the display advances. |
 | `http://<sender>/display?camera=1` | The same page with nothing else on it: full screen, black surround, no toolbar. **This is what the camera should be pointed at.** |
-| `http://<sender>/transfers/<id>` | A transfer's chunk map, refreshing as acknowledgements arrive, and **every frame it rendered as an image** — the audit view. |
+| `http://<sender>/settings` | **Frame rate and geometry.** The panel's refresh rate is measured in the browser; the frame rate applies immediately, geometry only when nothing is in flight. |
+| `http://<sender>/transfers/<id>` | A transfer's chunk map, refreshing as acknowledgements arrive, **the file as it was sent**, **every frame it rendered as an image**, and **Pause / Stop**. |
 | `http://<receiver>/` | Live capture: frames captured, decoded, and unreadable, with the decode rate. |
-| `http://<receiver>/transmissions/<id>` | What has arrived, what is still missing, and the merged file once it verifies. |
+| `http://<receiver>/transmissions/<id>` | What has arrived, what is still missing, and **the file itself** — an image drawn, a video played, an archive offered as a download. |
 | `http://<receiver>/settings` | The decoder's thresholds, and **which camera to capture from**. |
 
 Two things about the display page are not cosmetic, because getting either wrong breaks decoding rather
@@ -96,6 +97,34 @@ own header band. That is the number the receiver reports when a decode fails, so
 It settles a question that no counter can. A chunk that took four attempts to get through was either
 rendered wrongly or rendered correctly and photographed badly, and those have different fixes. The
 stored image is the same bytes that went to the channel, not a re-render that might differ.
+
+### Stopping a transfer
+
+**Pause** and **Stop** live on a transfer's own page. Until they existed the only way to stop a
+transmission was to restart the sender, which is a poor answer for a system built around transfers that
+take hours.
+
+A stop is a status change on the row, not a signal to a goroutine: the display loop re-reads the status on
+every frame, so it takes effect within one frame interval, and neither the API handler nor the display loop
+has to know the other exists. It also survives a restart of either.
+
+The two differ in what they keep. **Pause** stops the display and keeps every acknowledgement, so resuming
+shows only what is still outstanding. **Stop** ends the transfer; the receiver is never told, because there
+is nothing to tell it — it simply stops seeing frames, which from its side is the same event as the sender
+being switched off.
+
+### Keeping up: the receiver decodes concurrently
+
+Decoding is what the receiver spends its time on — 236 ms for a frame on a 256×256 grid — and it is
+per-frame work that shares nothing, so it runs on **one worker per core less one** by default
+(`OTP_RECEIVER_CAPTURE_DECODE_WORKERS` to override). Everything *after* the decode stays strictly serial:
+chunk rows, acknowledgements, and the merge that fires when the last chunk lands are shared state, and
+keeping the applier single-threaded means none of it needed a lock.
+
+**A display faster than the receiver transfers no more bytes.** Frames queue on the channel instead, and
+the display prunes its own backlog once it is deep enough, so the surplus costs a render and a write and
+delivers nothing. **Receiver → Settings** reports the deepest queue it has seen: one means it kept up, and
+a large number is the direct answer to "is my frame rate too high".
 
 ### Choosing a camera
 
@@ -135,12 +164,20 @@ Measured payload capacity per frame, from
 Those are payload bytes, before compression. A file that compresses two to one moves at twice the
 figure shown; one that is already compressed moves at the figure shown.
 
-A larger grid scales it linearly. `color16` on a 256×256 grid carries **30 226 bytes a frame at 4 px
-cells and 22 669 at 8 px** — roughly **860 KiB/s at 30 fps, or 1.7 MiB/s at 60**, at the denser of the
-two — which is where a 4K panel and an industrial camera would actually be run. Whether the receiver can decode at that density is an optical question, and
+A larger grid scales it linearly, and **capacity depends on the grid alone, not the cell size**:
+`color16` on a 256×256 grid carries **30 226 bytes a frame** whether the cells are 4 px or 8 px — 864
+KiB/s at 30 fps, 1.7 MiB/s at 60. Cell size buys the camera's ability to resolve a cell and costs screen
+area, nothing else. That geometry at 8 px cells is 2 080 px square, which is what a 4K panel is for.
+
+Whether the receiver can decode at that density is an optical question, and
 [`TestOpticalEnvelope`](shared/encoding/adversarial_test.go) maps where each encoding gives out:
 `color8` survives the worst channel tested, and the three-bit grey ramp needs a controlled
 installation.
+
+**[Which settings to use, and what 1 MB/s actually requires →](docs/OPTIMAL-CONFIG.md)** — measured
+capacity per geometry, compression ratios per codec, and the ceiling that no configuration gets around:
+decoding costs 85–115 KB/s per core, so 1 MB/s needs about nine cores decoding at once and the receiver
+currently decodes one frame at a time.
 
 **What was measured end to end**, both applications in Docker with a simulated camera in the path:
 
@@ -231,6 +268,8 @@ this exists to move.
 
 - [A transfer, end to end](docs/DEMONSTRATION.md) — screenshots of the whole path, including the
   frames themselves and what the camera sees
+- [Optimal configuration](docs/OPTIMAL-CONFIG.md) — which settings reach 1 MB/s, measured, and the
+  ceiling that no configuration gets around
 - [Design](docs/superpowers/specs/2026-08-04-optical-transport-platform-design.md) — the approved
   specification
 - [Prerequisites](PREREQUISITES.md) — what to install for native builds and real hardware
@@ -248,6 +287,12 @@ after it goes wrong.
   followed.
 - **Nothing unverified is delivered or served.** A merged file that fails its hash check is kept as
   evidence and refused.
+- **A transferred file is never served as something a browser will execute.** Both ends serve files back
+  to a browser, and both consult one allowlist ([`shared/mediatype`](shared/mediatype/mediatype.go)):
+  raster images, natively playable media, and plain text may be rendered in place, and everything else
+  is an opaque download with `nosniff`. **SVG is excluded deliberately** — it looks like an image and is
+  an XML document that may contain `<script>`, so rendering one would be script running on the origin
+  that also hosts the operator's controls.
 - **Payload encryption binds a chunk to its position.** With AES-256-GCM enabled, the transmission id
   and chunk numbering are authenticated, so a chunk cannot be replayed into a different slot — a
   corruption no per-frame checksum would catch.

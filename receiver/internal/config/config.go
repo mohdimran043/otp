@@ -110,6 +110,15 @@ type Capture struct {
 	Height int     `yaml:"height"`
 	FPS    float64 `yaml:"fps"`
 
+	// DecodeWorkers is how many captured frames are decoded at once. Zero means one per core, less one.
+	//
+	// It is the single most important setting for keeping up with a fast display. Decoding is what the
+	// receiver spends its time on — hundreds of milliseconds a frame at a dense geometry — and it is
+	// per-frame work that shares nothing, so it scales with cores almost exactly. A display running faster
+	// than the receiver can decode does not transfer more bytes; the surplus frames are photographed and
+	// thrown away, at the cost of a write each.
+	DecodeWorkers int `yaml:"decode_workers"`
+
 	// Simulate degrades every frame before it is decoded, as a lens and a sensor would: "clean", "typical",
 	// "harsh", or "rolling-shutter". Empty means frames are read exactly as they were written.
 	//
@@ -515,6 +524,7 @@ func applyEnv(c *Config) error {
 	str("CAPTURE_SIMULATE", &c.Capture.Simulate)
 	str("CAPTURE_DEVICE", &c.Capture.Device)
 	str("CAPTURE_FORMAT", &c.Capture.Format)
+	integer("CAPTURE_DECODE_WORKERS", &c.Capture.DecodeWorkers)
 	integer("CAPTURE_WIDTH", &c.Capture.Width)
 	integer("CAPTURE_HEIGHT", &c.Capture.Height)
 	float("CAPTURE_FPS", &c.Capture.FPS)

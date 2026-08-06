@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 
 	"github.com/google/uuid"
@@ -82,8 +83,32 @@ type FileSink struct {
 	// receiver would spend its time acknowledging duplicates instead of reading new chunks.
 	keep bool
 
+	// written is the names still on the channel, oldest first, and it is what bounds the directory.
+	//
+	// Without it the directory grows for as long as the display runs. That is not hypothetical: the
+	// display writes a frame per tick while the receiver reads several a second, so at any realistic
+	// frame rate the sender outruns the reader by two orders of magnitude. The growth went unnoticed for
+	// a long time because the display sequence used to restart at one for every transmission, so a later
+	// transfer's frames overwrote the previous one's leavings — accidental cleanup that stopped the
+	// moment the counter became global, which is what it had to become for concurrent transfers not to
+	// collide.
+	//
+	// A backlog rather than a single frame, because the file channel stands in for a screen that a
+	// slower reader is watching, and some slack is what lets it lose nothing. Bounded slack, though: a
+	// reader further behind than this was never going to catch up, and the acknowledgement rule will
+	// have the frame shown again anyway.
+	mu      sync.Mutex
+	written []string
+
 	shown atomic.Int64
 }
+
+// displayBacklog is how many displayed frames stay on the channel.
+//
+// Generous on purpose — a few tens of megabytes at the densest geometry — because the cost of being too
+// small is a frame the receiver never sees, and the cost of being too large is disk. What matters is that
+// it is a bound at all.
+const displayBacklog = 4096
 
 // NewFileSink returns a sink over a directory, creating it if necessary.
 func NewFileSink(dir string, keep bool) (*FileSink, error) {
@@ -136,7 +161,35 @@ func (s *FileSink) Show(ctx context.Context, frame Frame) error {
 	}
 
 	s.shown.Add(1)
+	s.prune(final)
 	return nil
+}
+
+// prune records a written frame and removes the ones that have fallen off the back of the channel.
+func (s *FileSink) prune(final string) {
+	if s.keep {
+		return
+	}
+
+	s.mu.Lock()
+	s.written = append(s.written, final)
+	var stale []string
+	if excess := len(s.written) - displayBacklog; excess > 0 {
+		stale = append(stale, s.written[:excess]...)
+		s.written = s.written[excess:]
+	}
+	s.mu.Unlock()
+
+	for _, path := range stale {
+		// The receiver deletes what it reads, so a frame is often already gone. That is the normal case
+		// rather than an error: both ends removing the same file is two halves of the same intention.
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			// Nothing to be done about it here, and it must not stop the display. A directory that
+			// cannot be pruned grows, which is a slow problem; a display that stopped would be an
+			// immediate one.
+			continue
+		}
+	}
 }
 
 // Shown is how many frames this sink has displayed.
@@ -145,8 +198,20 @@ func (s *FileSink) Shown() int64 { return s.shown.Load() }
 // Close releases nothing.
 func (s *FileSink) Close() error { return nil }
 
-// Open returns the sink a configuration selects.
-func Open(cfg config.Display) (Sink, error) {
+// Open returns the sink a configuration selects, wrapped so the display has one sequence and one answer
+// to what is on it.
+//
+// The wrapper is not optional, and that is the point of returning it from here: the display sequence is
+// assigned by Live, so a bare sink reaching a scheduler would mean every frame written to the same name.
+func Open(cfg config.Display) (*Live, error) {
+	inner, err := open(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return NewLive(inner), nil
+}
+
+func open(cfg config.Display) (Sink, error) {
 	switch cfg.Sink {
 	case "file":
 		return NewFileSink(cfg.Dir, cfg.RetainFrames)

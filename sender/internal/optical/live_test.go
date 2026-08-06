@@ -47,11 +47,11 @@ func TestLivePublishesWhatWasDisplayed(t *testing.T) {
 	_, _, have := live.Current()
 	require.False(t, have, "nothing has been displayed yet, so there is nothing to report")
 
-	require.NoError(t, live.Show(context.Background(), Frame{Sequence: 1, Number: 0, PNG: []byte("one")}))
+	require.NoError(t, live.Show(context.Background(), Frame{Number: 0, PNG: []byte("one")}))
 
 	frame, at, have := live.Current()
 	require.True(t, have)
-	require.Equal(t, int64(1), frame.Sequence)
+	require.Equal(t, int64(1), frame.Sequence, "the display assigns the sequence, starting at one")
 	require.Equal(t, []byte("one"), frame.PNG)
 	require.WithinDuration(t, time.Now(), at, time.Minute)
 
@@ -67,7 +67,7 @@ func TestLiveDoesNotPublishAFrameTheChannelRefused(t *testing.T) {
 	inner := &recorder{err: errors.New("the disk is full")}
 	live := NewLive(inner)
 
-	err := live.Show(context.Background(), Frame{Sequence: 1, PNG: []byte("one")})
+	err := live.Show(context.Background(), Frame{PNG: []byte("one")})
 	require.Error(t, err)
 
 	_, _, have := live.Current()
@@ -97,11 +97,11 @@ func TestLiveNextWakesEveryWaiter(t *testing.T) {
 
 	// Give the waiters a moment to block, so this exercises the wake-up rather than the fast path.
 	time.Sleep(50 * time.Millisecond)
-	require.NoError(t, live.Show(ctx, Frame{Sequence: 7, PNG: []byte("seven")}))
+	require.NoError(t, live.Show(ctx, Frame{PNG: []byte("the frame")}))
 
 	wg.Wait()
 	for i := range viewers {
-		require.Equal(t, int64(7), got[i], "viewer %d missed the frame", i)
+		require.Equal(t, int64(1), got[i], "viewer %d missed the frame", i)
 	}
 }
 
@@ -112,28 +112,31 @@ func TestLiveNextReturnsImmediatelyWhenAlreadyAhead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	require.NoError(t, live.Show(ctx, Frame{Sequence: 42, PNG: []byte("forty-two")}))
+	// Shown three times, so the current sequence is three and a viewer can legitimately be behind.
+	for range 3 {
+		require.NoError(t, live.Show(ctx, Frame{PNG: []byte("a frame")}))
+	}
 
 	frame, _, ok := live.Next(ctx, 0)
 	require.True(t, ok)
-	require.Equal(t, int64(42), frame.Sequence)
+	require.Equal(t, int64(3), frame.Sequence)
 
-	frame, _, ok = live.Next(ctx, 41)
+	frame, _, ok = live.Next(ctx, 2)
 	require.True(t, ok)
-	require.Equal(t, int64(42), frame.Sequence)
+	require.Equal(t, int64(3), frame.Sequence)
 }
 
 // TestLiveNextTimesOutWithoutANewFrame is what tells a long-polling request to answer "nothing new"
 // rather than hold the connection forever.
 func TestLiveNextTimesOutWithoutANewFrame(t *testing.T) {
 	live := NewLive(&recorder{})
-	require.NoError(t, live.Show(context.Background(), Frame{Sequence: 3, PNG: []byte("three")}))
+	require.NoError(t, live.Show(context.Background(), Frame{PNG: []byte("one")}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	_, _, ok := live.Next(ctx, 3)
-	require.False(t, ok, "the display has not moved past sequence 3")
+	_, _, ok := live.Next(ctx, 1)
+	require.False(t, ok, "the display has not moved past sequence 1")
 }
 
 // TestLiveDropsTheDecodedImage keeps a fully expanded bitmap from being held alive for as long as a
@@ -141,11 +144,52 @@ func TestLiveNextTimesOutWithoutANewFrame(t *testing.T) {
 func TestLiveDropsTheDecodedImage(t *testing.T) {
 	live := NewLive(&recorder{})
 	require.NoError(t, live.Show(context.Background(), Frame{
-		Sequence: 1,
-		PNG:      []byte("one"),
-		Image:    image.NewGray(image.Rect(0, 0, 4, 4)),
+		PNG:   []byte("one"),
+		Image: image.NewGray(image.Rect(0, 0, 4, 4)),
 	}))
 
 	frame, _, _ := live.Current()
 	require.Nil(t, frame.Image)
+}
+
+// TestLiveAssignsEverySequenceExactlyOnce is the regression test for a real bug.
+//
+// The display counter used to live in the scheduler, and a scheduler runs per transmission — so two
+// concurrent transfers each began at one. The file sink names frames by sequence, so both wrote
+// 000000000001.png and one silently overwrote the other. The symptom was a transfer that stalled with
+// every frame decoded and no chunk acknowledged, because its manifest had been replaced on disk before
+// the receiver read it.
+//
+// A caller-supplied sequence is overwritten, deliberately: the number describes the channel, and the
+// channel is shared by everything displaying on it.
+func TestLiveAssignsEverySequenceExactlyOnce(t *testing.T) {
+	inner := &recorder{}
+	live := NewLive(inner)
+	ctx := context.Background()
+
+	// Two schedulers, as two concurrent transfers would be, both claiming sequence 1.
+	const perSender = 50
+	var wg sync.WaitGroup
+	for sender := range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range perSender {
+				require.NoError(t, live.Show(ctx, Frame{Sequence: 1, Number: sender, PNG: []byte("frame")}))
+			}
+		}()
+	}
+	wg.Wait()
+
+	inner.mu.Lock()
+	defer inner.mu.Unlock()
+	require.Len(t, inner.frames, 2*perSender)
+
+	seen := map[int64]bool{}
+	for _, frame := range inner.frames {
+		require.False(t, seen[frame.Sequence], "sequence %d was used twice", frame.Sequence)
+		require.NotZero(t, frame.Sequence, "a frame reached the channel with no sequence")
+		seen[frame.Sequence] = true
+	}
+	require.Len(t, seen, 2*perSender, "every frame needs its own name on the channel")
 }

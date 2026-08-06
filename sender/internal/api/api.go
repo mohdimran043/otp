@@ -100,14 +100,25 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/transfers/{id}/chunks", s.listChunks)
 	mux.HandleFunc("GET /api/v1/transfers/{id}/frames", s.listFrames)
 	mux.HandleFunc("GET /api/v1/transfers/{id}/frames/{number}/image", s.getFrameImage)
+	// The file as it was uploaded, so both ends of a transfer can be looked at side by side.
+	mux.HandleFunc("GET /api/v1/transfers/{id}/file", s.getOriginalFile)
 	mux.HandleFunc("GET /api/v1/transfers/{id}/jobs", s.listJobs)
 	mux.HandleFunc("GET /api/v1/transfers/{id}/result", s.getResult)
+
+	// Stopping one. A status change on the row, which the display loop re-reads every frame.
+	mux.HandleFunc("POST /api/v1/transfers/{id}/cancel", s.cancelTransfer)
+	mux.HandleFunc("POST /api/v1/transfers/{id}/pause", s.pauseTransfer)
+	mux.HandleFunc("POST /api/v1/transfers/{id}/resume", s.resumeTransfer)
 
 	// The channel, as opposed to the queue: what is on the display now, for a camera to watch and for a
 	// receiver to follow.
 	mux.HandleFunc("GET /api/v1/display", s.getDisplay)
 	mux.HandleFunc("GET /api/v1/display/next", s.nextDisplayFrame)
 	mux.HandleFunc("GET /api/v1/display/frame.png", s.getDisplayFrameImage)
+
+	// The display's own settings: frame rate now, geometry when nothing is in flight.
+	mux.HandleFunc("GET /api/v1/settings", s.getSettings)
+	mux.HandleFunc("PATCH /api/v1/settings", s.updateSettings)
 
 	mux.HandleFunc("GET /api/v1/profiles", s.listProfiles)
 	mux.HandleFunc("GET /health", s.health)
@@ -387,6 +398,11 @@ type TransferStatus struct {
 	Status         string    `json:"status"`
 	CallbackURL    string    `json:"callback_url,omitempty"`
 
+	// SHA256 is the hash the sender computed over the bytes it was given, and the one it declared in the
+	// manifest. It is here so a page can put it beside the receiver's computed hash: the two agreeing is the
+	// whole claim the platform makes, and it can only be checked if both are visible.
+	SHA256 string `json:"sha256"`
+
 	OriginalSize   int64 `json:"original_size"`
 	CompressedSize int64 `json:"compressed_size"`
 	ChunkCount     int   `json:"chunk_count"`
@@ -451,6 +467,7 @@ func (s *Server) getTransfer(w http.ResponseWriter, r *http.Request) {
 	status := TransferStatus{
 		TransmissionID: tx.ID,
 		Filename:       file.Filename,
+		SHA256:         hex.EncodeToString(file.SHA256),
 		Status:         string(tx.Status),
 		CallbackURL:    tx.CallbackURL,
 		OriginalSize:   tx.OriginalSize,

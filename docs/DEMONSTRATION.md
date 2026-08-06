@@ -25,8 +25,8 @@ after this happens without the caller.
 
 The encoding, compression, and error-correction lists come from the server rather than being
 hard-coded in the page, so a build that added an encoding offers it and one that did not cannot be
-asked for it. The note at the bottom is the frame geometry in force — it needs a restart to change,
-because it is written into every frame header.
+asked for it. The note at the bottom is the frame geometry in force. Both it and the frame rate are changeable from
+**Settings** — see section 11 — the rate at any time, the geometry only while nothing is in flight.
 
 The callback URL is worth reading carefully: **the receiver** posts the file there, once it has
 reassembled and verified it. The sender never does. The URL travels across the optical channel in
@@ -253,6 +253,95 @@ Enumeration was verified against real hardware on the host this was written on, 
 `/dev/video0` — "Integrated Camera", `uvcvideo`, `usb-0000:00:14.0-6` — with 18 modes, the best being
 1920×1080 at 30 fps in MJPG. It also correctly declined to offer `/dev/video1`, which reports the same
 card name and is a metadata node that produces no images.
+
+---
+
+## 11 · Frame rate and 4K geometry
+
+![The sender's display settings](screenshots/17-sender-display-settings.png)
+
+The four figures across the top are the whole speed question: frame rate, payload per frame, their
+product, and what that geometry comes to in pixels. They are computed from the encoder rather than
+estimated, so the channel rate shown is the one the next transfer will get.
+
+The two settings are deliberately not symmetrical. **The frame rate applies immediately**, including
+mid-transfer — which is exactly when it is wanted, because a receiver falling behind is the reason to
+turn it down. **The geometry does not**: it is written into every frame header and the chunk size is
+derived from it, so the server refuses a change while anything is in flight and the page says so before
+an operator tries. Verified against the running stack:
+
+```
+$ curl -X PATCH .../api/v1/settings -d '{"grid_width":256,...}'
+{"error":"the frame geometry cannot change while 1 transfer(s) are in flight: it is written into
+ every frame header and the chunk size is derived from it. The frame rate can be changed at any time."}
+```
+
+The panel's refresh rate is measured in the browser, because that is the only place it exists — the
+server runs in a container with no display attached. `requestAnimationFrame` fires once per composited
+frame, so the median interval is the refresh interval: 6.94 ms on a 144 Hz panel.
+
+**4K settings applied and measured on this stack:**
+
+| Setting | Value |
+|---|---|
+| Geometry | 256×256 cells at 8 px — a 2 080 px frame |
+| Encoding | `color16`, four bits per cell |
+| Payload per frame | 30 226 B |
+| At 35 fps | **1.009 MB/s** |
+| At 60 fps | 1.73 MB/s |
+
+That is the channel rate. What the receiver can decode is the lower ceiling, and
+[OPTIMAL-CONFIG.md](OPTIMAL-CONFIG.md) has the measurement: 85–115 KB/s per core, so 1 MB/s needs about
+nine cores decoding at once and the receiver currently decodes one frame at a time.
+
+---
+
+## 12 · The file, on both sides
+
+A video sent through the channel, played on the receiver:
+
+![The received video](screenshots/18-receiver-video-received.png)
+
+Both hashes are shown, received and expected, and they are the same string. The video element is a real
+one — the file was fetched from the receiver's own store, and `ffprobe` on that download reports valid
+h264, 160×120, 20 frames, byte-identical to what was uploaded.
+
+The same file is rendered on the **sender's** transfer page as well, so both ends can be compared rather
+than trusting a hash. An archive is not rendered on either side: it gets a download button and a note
+saying nothing has looked inside it.
+
+What may be rendered at all is a server decision, shared by both ends in `shared/mediatype`, and it is
+narrower than it looks. Measured on the running stack:
+
+```
+sender   /api/v1/transfers/{id}/file?inline=1   → video/mp4, inline, nosniff
+sender   /api/v1/transfers/{id}/file?inline=1   → application/octet-stream, attachment   (a .zip)
+receiver /api/v1/transmissions/{id}/file?inline=1 → video/mp4, inline
+receiver /api/v1/transmissions/{id}/file?inline=1 → application/octet-stream, attachment (a .zip)
+```
+
+`inline=1` is honoured only for an allowlist of raster images, natively playable media, and plain text.
+**SVG is deliberately excluded**, and it is the case that matters: it looks like an image and is an XML
+document that may contain `<script>`, so rendering one from the receiver's origin would be script running
+on the page an operator uses to run the receiver. It downloads instead, as do HTML, PDF, and anything
+else not on the list — whatever the query string asks for.
+
+---
+
+## A defect this round found
+
+**Two concurrent transfers overwrote each other's frames.** The display sequence counter lived in the
+scheduler, and a scheduler runs per transmission — so two transfers each started at one, and since the
+file sink names frames by sequence, both wrote `000000000001.png`. One silently replaced the other.
+
+The symptom was strange enough to be worth recording: a transfer stalled at zero chunks acknowledged
+while the receiver reported 226 frames captured, 226 decoded and **none failed**. Nothing had gone wrong
+optically. Its manifest frame had been overwritten on disk before the receiver read it, so the receiver
+had never heard of the transmission at all.
+
+The counter now lives in the display, which is the only place it can be right: the sequence describes the
+channel, and the channel is shared. `optical.Open` returns the wrapper that assigns it, so a bare sink
+cannot reach a scheduler.
 
 ---
 

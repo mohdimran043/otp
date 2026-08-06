@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"strconv"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+
+	"github.com/opticaltransport/otp/shared/mediatype"
 
 	"github.com/opticaltransport/otp/sender/internal/objectstore"
 	"github.com/opticaltransport/otp/sender/internal/optical"
@@ -267,6 +270,94 @@ func (s *Server) getFrameImage(w http.ResponseWriter, r *http.Request) {
 		"X-OTP-Frame-Number": strconv.Itoa(frame.FrameNumber),
 		"X-OTP-Displays":     strconv.Itoa(frame.DisplayedCount),
 	})
+}
+
+// getOriginalFile serves the file a caller uploaded, as the sender still holds it.
+//
+// It is here so that an operator can see both ends of a transfer and compare them: the receiver renders
+// what it reassembled, and this renders what was sent. A hash matching is the proof, but two pictures side
+// by side are what makes an operator believe the proof — and if they ever differ, the difference itself is
+// the diagnosis.
+//
+// `?inline=1` asks for it to be shown in place rather than downloaded, and is honoured only for the types
+// shared/mediatype allows. Everything else is an opaque download whatever the query string says.
+func (s *Server) getOriginalFile(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.fail(w, http.StatusBadRequest, "the transfer id is not a UUID", err)
+		return
+	}
+
+	transfer, err := s.store.Transmissions.Get(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.fail(w, http.StatusNotFound, "no such transfer", err)
+			return
+		}
+		s.fail(w, http.StatusInternalServerError, "could not read the transfer", err)
+		return
+	}
+
+	file, err := s.store.Files.Get(r.Context(), transfer.FileID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.fail(w, http.StatusNotFound, "the uploaded file is no longer held", err)
+			return
+		}
+		s.fail(w, http.StatusInternalServerError, "could not read the file", err)
+		return
+	}
+
+	// Bounded by the size recorded at upload rather than by a constant: the limit that matters is "this
+	// object is not what the row says it is", and a fixed ceiling would either refuse a legitimate large
+	// transfer or let a wrong one through.
+	body, err := objectstore.GetBytes(r.Context(), s.objects, file.StoredPath, file.SizeBytes+1)
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, "could not read the file contents", err)
+		return
+	}
+
+	serveFile(w, body, file.Filename, hex.EncodeToString(file.SHA256),
+		r.URL.Query().Get("inline") == "1", s.log)
+}
+
+// serveFile writes a file for a browser, either as a download or for showing in place.
+//
+// The two modes exist because they answer different needs and only one of them is safe by default. A
+// download is an opaque byte stream with an attachment disposition, which no browser will interpret — the
+// right treatment for a file that came from outside. Inline is opt-in per request and bounded by the
+// allowlist in shared/mediatype, so a caller that forgets to check the kind still cannot serve script from
+// this origin.
+//
+// nosniff matters as much as the declared type: without it a browser may disregard a type it disagrees
+// with and guess from the bytes, which is exactly the decision this takes away from it.
+func serveFile(w http.ResponseWriter, body []byte, filename, sha256Hex string, inline bool, log *zap.Logger) {
+	contentType := "application/octet-stream"
+	disposition := "attachment"
+	if inline && mediatype.Inline(filename) {
+		_, contentType = mediatype.Of(filename)
+		disposition = "inline"
+	}
+
+	h := w.Header()
+	h.Set("Content-Type", contentType)
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Disposition", disposition+`; filename="`+escapeHeaderFilename(filename)+`"`)
+	h.Set("X-OTP-SHA256", sha256Hex)
+	h.Set("Content-Length", strconv.Itoa(len(body)))
+	if _, err := w.Write(body); err != nil {
+		log.Warn("could not write the file", zap.Error(err))
+	}
+}
+
+// escapeHeaderFilename makes a filename safe inside a quoted header parameter. The name is validated as a
+// bare name on upload, so this is belt and braces — but a header built by concatenation is worth escaping
+// regardless, because the validation and this line are far apart and only one of them looks load-bearing.
+func escapeHeaderFilename(name string) string {
+	name = strings.ReplaceAll(name, `\`, `\\`)
+	name = strings.ReplaceAll(name, `"`, `\"`)
+	name = strings.ReplaceAll(name, "\r", "")
+	return strings.ReplaceAll(name, "\n", "")
 }
 
 // maxFrameImageBytes bounds a frame read. A frame is a few tens of kilobytes at the densest settings

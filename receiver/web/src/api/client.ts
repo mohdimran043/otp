@@ -70,7 +70,18 @@ export interface CapturedFrame {
 
 export interface DecoderConfig {
   protocol_version: number
-  capture: { source: string; dir: string; idle_interval: string }
+  capture: {
+    source: string
+    dir: string
+    idle_interval: string
+    // How many frames are decoded at once. decode_workers is what was configured (0 meaning "per core"),
+    // decode_workers_now is the number actually in force.
+    decode_workers: number
+    decode_workers_now: number
+    // The deepest backlog of unread frames. One means the receiver kept up; a large number means the
+    // display is producing frames faster than it can decode them.
+    frames_behind: number
+  }
   decoder: { min_finder_score: number; min_timing_score: number; encrypted: boolean }
   callback: { allowed_hosts: string[] | null; allow_any_host: boolean }
 }
@@ -175,6 +186,11 @@ export const api = {
   // it through JavaScript would be showing them something else.
   frameImageUrl: (id: string) => `/api/v1/frames/${id}/image`,
   downloadUrl: (id: string) => `/api/v1/transmissions/${id}/file`,
+
+  // inlineUrl asks for the file to be shown in place rather than downloaded. The server honours it only for
+  // the types its allowlist permits — an SVG or an HTML file arrives as an opaque download however this asks,
+  // because rendering one from this origin would be script running on the page that runs the receiver.
+  inlineUrl: (id: string) => `/api/v1/transmissions/${id}/file?inline=1`,
 }
 
 export function formatBytes(bytes: number): string {

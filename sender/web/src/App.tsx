@@ -24,6 +24,7 @@ import { NewTransfer } from './pages/NewTransfer'
 import { TransferDetail } from './pages/TransferDetail'
 import { Transfers } from './pages/Transfers'
 import { Profiles } from './pages/Profiles'
+import { Settings } from './pages/Settings'
 import { HealthBadge } from './components/HealthBadge'
 import { useUi } from './store/ui'
 
@@ -32,6 +33,7 @@ const tabs = [
   { path: '/send', label: 'Send a file' },
   { path: '/transfers', label: 'Transfers' },
   { path: '/display', label: 'Display' },
+  { path: '/settings', label: 'Settings' },
   { path: '/profiles', label: 'Profiles' },
 ]
 
@@ -105,6 +107,7 @@ export function App() {
             <Route path="/transfers" element={<Transfers />} />
             <Route path="/transfers/:id" element={<TransferDetail />} />
             <Route path="/display" element={<Display />} />
+            <Route path="/settings" element={<Settings />} />
             <Route path="/profiles" element={<Profiles />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

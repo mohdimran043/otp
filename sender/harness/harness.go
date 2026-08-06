@@ -88,7 +88,10 @@ type Sender struct {
 	objects objectstore.Store
 	engine  *jobs.Engine
 	line    *pipeline.Pipeline
-	sink    *optical.FileSink
+	// The display, wrapped as the real sender wraps it. Not a bare FileSink: the display sequence is
+	// assigned by Live, and a harness that skipped it would not exercise the arrangement a deployment uses —
+	// which is exactly where concurrent transfers once overwrote each other's frames.
+	sink    *optical.Live
 	acks    *ackwatch.Watcher
 	server  *httptest.Server
 	log     *zap.Logger
@@ -154,7 +157,7 @@ func Start(ctx context.Context, opts Options) (*Sender, error) {
 		pool.Close()
 		return nil, err
 	}
-	sink, err := optical.NewFileSink(cfg.Display.Dir, cfg.Display.RetainFrames)
+	channel, err := optical.NewFileSink(cfg.Display.Dir, cfg.Display.RetainFrames)
 	if err != nil {
 		pool.Close()
 		return nil, err
@@ -176,7 +179,7 @@ func Start(ctx context.Context, opts Options) (*Sender, error) {
 		objects: objects,
 		engine:  engine,
 		line:    line,
-		sink:    sink,
+		sink:    optical.NewLive(channel),
 		acks:    acks,
 		log:     opts.Log,
 		stats:   map[uuid.UUID]scheduler.Stats{},

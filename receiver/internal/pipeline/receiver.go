@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -91,47 +93,147 @@ func (r *Receiver) Run(ctx context.Context) error {
 		}
 	}()
 
-	idle := r.cfg.Current().Capture.IdleInterval
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil
-		}
+	workers := r.decodeWorkers()
+	r.log.Info("decoding concurrently", zap.Int("workers", workers))
 
-		capture, err := r.source.Next(ctx)
-		switch {
-		case errors.Is(err, ErrNoFrame):
-			// Nothing on the channel. An idle channel is the normal state between transmissions, so
-			// this waits rather than reporting anything.
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(idle):
-			}
-			continue
-		case err != nil:
-			r.log.Warn("capture failed", zap.Error(err))
-			select {
-			case <-ctx.Done():
-				return nil
-			case <-time.After(idle):
-			}
-			continue
-		}
+	// One reader, several decoders, one applier.
+	//
+	// Decoding is what the receiver spends its time on — hundreds of milliseconds a frame at a dense
+	// geometry — and it is embarrassingly parallel: a frame is decoded from its own pixels and nothing
+	// else. Serialising it meant a display running faster than one core could decode was simply wasted,
+	// with the surplus frames photographed and discarded.
+	//
+	// What is *not* parallel is everything after the decode. Chunk rows, acknowledgements, and the merge
+	// that fires when the last chunk lands are shared, and the maps tracking which transmissions have
+	// started and finished are plain maps. Keeping the applier single-threaded means none of that needed
+	// to change or acquire a lock: it is exactly as sequential as it was, and only the expensive middle
+	// fans out.
+	//
+	// The queues are small on purpose. A deep buffer would let the reader run far ahead of the applier and
+	// fill memory with decoded frames, and there is no value in it — a frame read long ago is off the
+	// display anyway.
+	work := make(chan Capture, workers)
+	results := make(chan prepared, workers)
 
-		if err := r.handle(ctx, capture); err != nil {
+	var decoders sync.WaitGroup
+	for range workers {
+		decoders.Add(1)
+		go func() {
+			defer decoders.Done()
+			for capture := range work {
+				select {
+				case results <- r.prepare(ctx, capture):
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// The reader closes work when the context ends; the decoders then drain and exit, and closing results
+	// ends the applier. Shutting down in that order means no goroutine is left writing to a closed channel.
+	go func() {
+		defer close(work)
+		idle := r.cfg.Current().Capture.IdleInterval
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+
+			capture, err := r.source.Next(ctx)
+			switch {
+			case errors.Is(err, ErrNoFrame):
+				// Nothing on the channel. An idle channel is the normal state between transmissions, so
+				// this waits rather than reporting anything.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(idle):
+				}
+				continue
+			case err != nil:
+				r.log.Warn("capture failed", zap.Error(err))
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(idle):
+				}
+				continue
+			}
+
+			select {
+			case work <- capture:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	go func() {
+		decoders.Wait()
+		close(results)
+	}()
+
+	for p := range results {
+		if err := r.apply(ctx, p); err != nil {
 			r.log.Error("could not process a captured frame",
-				zap.Int64("sequence", capture.Sequence), zap.Error(err))
+				zap.Int64("sequence", p.capture.Sequence), zap.Error(err))
 		}
 	}
+	return nil
 }
 
-// handle processes one captured frame.
-func (r *Receiver) handle(ctx context.Context, capture Capture) error {
+// decodeWorkers is how many frames are decoded at once.
+//
+// Configuration wins; otherwise one per core less one, so the reader, the applier, and Postgres are not
+// competing with a full set of decoders for the last core. At least one, obviously — a receiver that
+// decoded nothing would capture frames and throw them away.
+func (r *Receiver) decodeWorkers() int {
+	if configured := r.cfg.Current().Capture.DecodeWorkers; configured > 0 {
+		return configured
+	}
+	return max(1, runtime.NumCPU()-1)
+}
+
+// prepared is a captured frame that has been persisted and decoded, on its way to being applied.
+//
+// It exists because processing a frame has two halves with completely different properties. Persisting and
+// decoding are per-frame work that touches nothing shared — a distinct object key, a decode over one
+// image — and decoding is by far the most expensive thing the receiver does. Everything after it mutates
+// state that several frames contend for: chunk rows, acknowledgements, the merge that fires when the last
+// chunk lands.
+//
+// So the first half fans out across cores and the second half stays strictly serial. That split is what
+// makes the receiver keep up with a fast display, and it is also why it needs no new locks: every shared
+// map and every ordering assumption in the second half is exactly as single-threaded as it was before.
+type prepared struct {
+	capture Capture
+
+	// key and sum are where the capture was stored and its hash.
+	key string
+	sum []byte
+
+	frame    *protocol.Frame
+	geometry *protocol.Geometry
+
+	finder, timing, contrast float64
+
+	// decodeErr is why the frame could not be read, or nil. A frame that failed is still applied — it is
+	// recorded as an unreadable capture, which is the receiver's primary diagnostic.
+	decodeErr error
+
+	// err is a failure of the preparation itself, such as the capture not being storable. Distinct from
+	// decodeErr: one is the channel being bad, the other is this process being unable to do its job.
+	err error
+}
+
+// prepare persists and decodes one captured frame. It is safe to run on many frames at once.
+func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 	// Persisted before decoding, always. A frame that cannot be read is the primary evidence for
 	// why a capture is going badly, and it is also the only thing a replay can work from.
 	key, sum, err := r.storeCapture(ctx, r.session, capture)
 	if err != nil {
-		return err
+		return prepared{capture: capture, err: err}
 	}
 
 	cfg := r.cfg.Current()
@@ -155,6 +257,24 @@ func (r *Receiver) handle(ctx context.Context, capture Capture) error {
 			frame = nil
 		}
 	}
+
+	return prepared{
+		capture: capture, key: key, sum: sum,
+		frame: frame, geometry: geometry,
+		finder: finder, timing: timing, contrast: contrast,
+		decodeErr: decodeErr,
+	}
+}
+
+// apply records a prepared frame and acts on it. It must run one frame at a time.
+func (r *Receiver) apply(ctx context.Context, p prepared) error {
+	if p.err != nil {
+		return p.err
+	}
+	capture, key, sum := p.capture, p.key, p.sum
+	frame, geometry := p.frame, p.geometry
+	finder, timing, contrast := p.finder, p.timing, p.contrast
+	decodeErr := p.decodeErr
 
 	record := store.CapturedFrame{
 		SessionID:   r.session,
@@ -291,16 +411,28 @@ func (r *Receiver) handleChunk(ctx context.Context, frame *protocol.Frame, error
 		return err
 	}
 
-	// A chunk that had already arrived is acknowledged as a duplicate rather than as new. The
-	// distinction is what stops the sender resending something the receiver holds: an
-	// acknowledgement and a retransmission crossing in flight is routine, and reporting the second
-	// arrival as fresh would make the counters lie about how much was actually transferred.
-	status := protocol.AckOK
-	if !inserted {
-		status = protocol.AckDuplicate
-	}
-	if err := r.emitAck(ctx, frame, status, errorRate); err != nil {
-		return err
+	// A chunk that had already arrived is not acknowledged again.
+	//
+	// This is the single most expensive line in the system when it is wrong, and it was. Every
+	// acknowledgement is a file in a directory the sender re-lists and re-verifies on a poll, and a
+	// duplicate acknowledgement carries no information the sender does not already have: it acknowledged
+	// that chunk once, stopped displaying it, and cannot un-know it. Writing one anyway meant a transfer
+	// produced an acknowledgement per *captured frame* rather than per chunk — measured at 5972 files for
+	// 526 chunks, with the shared volume ending up thirty-five times the size of the file being sent.
+	//
+	// The cost is not the disk. It is that the sender's scan is O(files), so the acknowledgement channel
+	// got slower in proportion to how long the transfer had been running — which showed up as a transfer
+	// that started at 192 KB/s and was down to 24 KB/s by its fifth run.
+	//
+	// Duplicates still arrive and are still counted; they are simply not reported. The sender learns
+	// nothing from them, and the first acknowledgement already told it everything.
+	if inserted {
+		if err := r.emitAck(ctx, frame, protocol.AckOK, errorRate); err != nil {
+			return err
+		}
+	} else {
+		r.log.Debug("duplicate chunk, not acknowledged again",
+			zap.Uint32("chunk", frame.Header.ChunkNumber))
 	}
 
 	if inserted && !isParity {

@@ -34,6 +34,8 @@ export interface ResultView {
 export interface TransferStatus {
   transmission_id: string
   filename: string
+  // The hash the sender declared, for comparing against the receiver's computed one.
+  sha256: string
   status: string
   callback_url?: string
   original_size: number
@@ -124,6 +126,51 @@ export interface DisplayStatus {
   bit_depth: number
   frames_shown: number
   frame?: DisplayFrame
+}
+
+// The display's own settings: the two knobs that set the transfer rate.
+export interface DisplaySettings {
+  fps: number
+  brightness: number
+  gamma: number
+  window_size: number
+  keep_alive: boolean
+  sink: string
+  grid_width: number
+  grid_height: number
+  cell_pixels: number
+  quiet_zone: number
+  encoder: string
+  bit_depth: number
+  image_width_px: number
+  image_height_px: number
+  bytes_per_frame: number
+  bytes_per_second: number
+  transmitting: number
+}
+
+// Only the fields being changed are sent. A form that posted its whole state back would reset a field it
+// never showed — and with a frame rate, zero means "never display anything".
+export type DisplaySettingsPatch = Partial<{
+  fps: number
+  brightness: number
+  gamma: number
+  window_size: number
+  grid_width: number
+  grid_height: number
+  cell_pixels: number
+  quiet_zone: number
+  encoder: string
+  bit_depth: number
+}>
+
+export interface TransferControl {
+  transmission_id: string
+  status: string
+  acked_chunks: number
+  chunk_count: number
+  jobs_cancelled?: number
+  note?: string
 }
 
 export interface Job {
@@ -224,7 +271,28 @@ export const api = {
   frameImage: (id: string, frameNumber: number) =>
     `/api/v1/transfers/${id}/frames/${frameNumber}/image`,
 
+  // Stopping a transfer. A status change on the row, which the display loop reads every frame — so a stop
+  // takes effect within one frame interval rather than needing the process restarted.
+  cancel: (id: string) =>
+    request<TransferControl>(`/api/v1/transfers/${id}/cancel`, { method: 'POST' }),
+  pause: (id: string) => request<TransferControl>(`/api/v1/transfers/${id}/pause`, { method: 'POST' }),
+  resume: (id: string) => request<TransferControl>(`/api/v1/transfers/${id}/resume`, { method: 'POST' }),
+
   display: () => request<DisplayStatus>('/api/v1/display'),
+
+  settings: () => request<DisplaySettings>('/api/v1/settings'),
+
+  updateSettings: (patch: DisplaySettingsPatch) =>
+    request<DisplaySettings>('/api/v1/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }),
+
+  // originalFile is the file as it was uploaded. inline asks for it to be shown in place, which the server
+  // honours only for types it considers safe to render.
+  originalFile: (id: string, inline = false) =>
+    `/api/v1/transfers/${id}/file${inline ? '?inline=1' : ''}`,
 
   // nextDisplayFrame long-polls: it resolves when the display moves past `after`, or null when the poll
   // expires with nothing new. Returning null rather than throwing matters — an expired poll is the

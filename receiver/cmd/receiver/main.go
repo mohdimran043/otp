@@ -159,6 +159,14 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 			// The API reports on whichever session is running, so a dashboard needs no session id to ask
 			// about the live capture.
 			Session: func() uuid.UUID { return receiver.Session() },
+			// Only the source knows how deep its backlog got, and the API must not reach into the pipeline
+			// to ask — so the number is injected.
+			Behind: func() int64 {
+				if fs, ok := source.(interface{ Behind() int64 }); ok {
+					return fs.Behind()
+				}
+				return 0
+			},
 		}).Routes(),
 		ReadTimeout:  cfg.Server.ReadTimeout,
 		WriteTimeout: cfg.Server.WriteTimeout,

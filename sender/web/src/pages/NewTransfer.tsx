@@ -184,8 +184,9 @@ export function NewTransfer() {
             {defaults && (
               <Alert severity="info" variant="outlined">
                 Frames are rendered on a {defaults.grid} grid at {defaults.cell_pixels}px cells and displayed
-                at {defaults.fps} frames a second. Changing the grid needs a restart, because it is written
-                into every frame header.
+                at {defaults.fps} frames a second. Both are changeable under <strong>Settings</strong> — the
+                frame rate at any time, the grid only while nothing is in flight, because it is written into
+                every frame header and the chunk size is derived from it.
               </Alert>
             )}
 
