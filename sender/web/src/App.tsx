@@ -78,13 +78,34 @@ export function App() {
     <ThemeProvider theme={theme}>
       <CssBaseline />
       <AppBar position="sticky" color="default" sx={{ borderBottom: 1, borderColor: 'divider' }}>
-        <Toolbar sx={{ gap: 2 }}>
+        <Toolbar sx={{ gap: { xs: 1, md: 2 }, px: { xs: 1, md: 3 } }}>
           <SendIcon color="primary" />
-          <Typography variant="h6" sx={{ fontWeight: 600 }}>
+          {/* Shortened on a phone. At 390 pixels the full title wrapped onto three lines and pushed the tabs
+              out of reach, so the page an operator arrived on was the only one they could get to. */}
+          <Typography
+            variant="h6"
+            noWrap
+            sx={{ fontWeight: 600, display: { xs: 'none', md: 'block' } }}
+          >
             Optical Transport · Sender
           </Typography>
+          <Typography
+            variant="subtitle1"
+            noWrap
+            sx={{ fontWeight: 600, display: { xs: 'block', md: 'none' } }}
+          >
+            Sender
+          </Typography>
 
-          <Tabs value={current?.path ?? '/'} sx={{ ml: 3, flexGrow: 1 }}>
+          {/* Scrollable, because five tabs do not fit a phone and the ones that did not fit were simply
+              unreachable — there was no indication they existed. */}
+          <Tabs
+            value={current?.path ?? '/'}
+            variant="scrollable"
+            scrollButtons="auto"
+            allowScrollButtonsMobile
+            sx={{ ml: { xs: 1, md: 3 }, flexGrow: 1, minWidth: 0 }}
+          >
             {tabs.map((tab) => (
               <Tab key={tab.path} value={tab.path} label={tab.label} component={RouterLink} to={tab.path} />
             ))}

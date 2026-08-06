@@ -366,6 +366,47 @@ inside it. The API binds to the container's loopback interface, so nginx is the 
 To watch the whole path on one host, [`demo/docker-compose.yml`](demo/docker-compose.yml) runs both
 sides plus a callback endpoint.
 
+## Reaching it from a phone, or anywhere else
+
+Each side can publish itself over HTTPS through an ngrok tunnel defined in its own compose file. It is behind a
+profile, because a service that publishes itself the moment somebody runs `docker compose up` is not one anybody
+should ship.
+
+```bash
+# Once, per side: put your token in sender/.env and receiver/.env
+#   NGROK_AUTHTOKEN=...            from https://dashboard.ngrok.com/get-started/your-authtoken
+#   NGROK_BASIC_AUTH=user:password
+cd sender   && docker compose --profile public up -d
+cd receiver && docker compose --profile public up -d
+
+# The public addresses, read from each agent's own inspector
+curl -s localhost:4040/api/tunnels | python3 -c 'import json,sys;print(json.load(sys.stdin)["tunnels"][0]["public_url"])'
+curl -s localhost:4041/api/tunnels | python3 -c 'import json,sys;print(json.load(sys.stdin)["tunnels"][0]["public_url"])'
+```
+
+**HTTPS is not a nicety here.** A browser will not hand a camera to an insecure page, and `localhost` is the only
+other context it treats as secure — which does not help a phone. So a tunnel is the shortest route to capturing
+with a phone's camera at all.
+
+**Both tunnels have basic auth on by default, deliberately.** Neither application authenticates its own API yet,
+so a public address without a password lets anyone who finds it upload files, change the frame geometry, cancel
+transfers, start a camera and read what has arrived. One flag is a poor substitute for real authentication and a
+great deal better than none. Remove `--basic-auth` from the compose file only if the address is genuinely meant
+to be open.
+
+## On a phone
+
+Both interfaces are built for it, and the receiver is the one that matters: a phone is usually the easiest camera
+to aim at a display.
+
+- **The rear camera is preferred by default on a phone**, because the point is to photograph a screen and the
+  front camera points at whoever is holding it. A laptop has no rear camera and ignores the preference.
+- **Start and Stop are full-width** at phone size, and the navigation tabs scroll rather than overflowing into
+  nothing.
+- **The camera keeps running while you move around the interface.** It is held outside the page components, so
+  going from Settings to Live capture to watch frames land does not release it — which it used to, at exactly the
+  moment you would want it not to. It stops when you press Stop or close the tab, and at no other time.
+
 ## Testing
 
 ```bash
