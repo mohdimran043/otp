@@ -618,6 +618,18 @@ func (w *Watcher) Reload() error {
 	return nil
 }
 
+// SetSource records the capture source now in use.
+//
+// Called after the source has actually been swapped, not before — so what the API reports is what the receiver
+// is really reading from. Reporting an intention as a fact is how an operator comes to believe a camera is
+// running when it is not.
+func (w *Watcher) SetSource(source string) Config {
+	next := w.Current()
+	next.Capture.Source = source
+	w.current.Store(&next)
+	return next
+}
+
 // SetCamera applies a camera selection without a restart.
 //
 // It is a method rather than a reload because the choice does not come from the configuration file: it

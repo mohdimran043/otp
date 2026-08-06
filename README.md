@@ -143,6 +143,32 @@ the display prunes its own backlog once it is deep enough, so the surplus costs 
 delivers nothing. **Receiver → Settings** reports the deepest queue it has seen: one means it kept up, and
 a large number is the direct answer to "is my frame rate too high".
 
+### Selecting a camera starts it
+
+The capture source is swapped while the receiver runs, so choosing a camera means the camera opens — not that a
+preference is filed for the next restart. That was the first attempt, and the reasoning behind it (the capture
+loop holds its source open) turned out to be an argument for doing the swap carefully rather than for not doing
+it: an operator clicking a camera and being told to restart the service is being asked to do the work the
+service should do.
+
+**The order of a swap depends on what is open**, and this is the part that has to be right. A directory can be
+opened twice, so the new source is opened first and a failure leaves the receiver reading from whatever it had.
+A camera cannot: attempting it fails with `device or resource busy` every time — which it did, when
+re-selecting the camera that was already running. So an exclusive source is closed first, and if the
+replacement then will not open, the previous configuration is reopened to put things back.
+
+### Watching frames arrive
+
+**Receiver → Live capture** shows the newest captures as thumbnails, newest first, refreshing on the interval
+you choose. Each is the stored image — the bytes the decoder was actually given, not a re-render — labelled with
+the chunk it carried, coloured by kind, and carrying its fiducial, timing, contrast and bit-error figures in a
+tooltip.
+
+The counters above it answer "is it working"; this answers **"is it working now"**. A count that has stopped
+moving looks exactly like one moving slowly, and that difference is the whole question when a camera has just
+been aimed. Failures appear alongside successes, deliberately: a panel showing only what decoded would look
+healthy while a camera drifted out of focus.
+
 ### Capturing from a real camera
 
 `OTP_RECEIVER_CAPTURE_SOURCE=camera` opens one and streams from it, through Video4Linux's memory-mapped

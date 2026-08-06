@@ -168,6 +168,38 @@ func (r *Frames) Record(ctx context.Context, f CapturedFrame) error {
 
 // Failed returns the frames of a session that could not be read, which is the evidence an
 // operator needs when a capture is going badly.
+// Recent returns the newest captures of a session, decoded or not.
+//
+// Newest first, because the question a live page asks is "what is arriving now" — and the answer to that is the
+// last few frames, not the first. Both outcomes are included: a page showing only what decoded would look
+// healthy while a camera drifted out of focus, and one showing only failures would look broken during a perfect
+// transfer.
+func (r *Frames) Recent(ctx context.Context, sessionID uuid.UUID, limit int) ([]CapturedFrame, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, session_id, sequence, stored_path, sha256, decoded, decode_error,
+		       transmission_id, frame_number, chunk_number, is_manifest, is_parity,
+		       bit_error_rate, finder_score, timing_score, contrast, captured_at
+		FROM captured_frames WHERE session_id = $1
+		ORDER BY sequence DESC LIMIT $2`, sessionID, page(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CapturedFrame
+	for rows.Next() {
+		var f CapturedFrame
+		if err := rows.Scan(&f.ID, &f.SessionID, &f.Sequence, &f.StoredPath, &f.SHA256,
+			&f.Decoded, &f.DecodeError, &f.TransmissionID, &f.FrameNumber, &f.ChunkNumber,
+			&f.IsManifest, &f.IsParity, &f.BitErrorRate, &f.FinderScore, &f.TimingScore,
+			&f.Contrast, &f.CapturedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
 func (r *Frames) Failed(ctx context.Context, sessionID uuid.UUID, limit int) ([]CapturedFrame, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, session_id, sequence, stored_path, sha256, decoded, decode_error,

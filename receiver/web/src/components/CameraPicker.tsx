@@ -157,16 +157,20 @@ export function CameraPicker() {
             value={source}
             onChange={(_, value: string | null) => value !== null && setSource(value)}
           >
-            {(cameras.data?.known_sources ?? ['file', 'gocv']).map((option) => (
+            {(cameras.data?.known_sources ?? ['file']).map((option) => (
               <ToggleButton key={option} value={option}>
-                {option === 'file' ? 'file — read a directory' : 'gocv — open a camera'}
+                {/* Labelled from the name the server gave, not from a hardcoded list. The old version said
+                    "gocv — open a camera" for whatever the second source happened to be, which named a source
+                    this build does not even have. */}
+                {option === 'file' ? 'file — read a directory' : `${option} — open a camera`}
               </ToggleButton>
             ))}
           </ToggleButtonGroup>
           {cameras.data && source !== cameras.data.source && (
             <Alert severity="info" variant="outlined" sx={{ mt: 1 }}>
-              Changing the source takes effect when the receiver next starts. The capture loop holds its
-              source open, so it is not swapped underneath a running session.
+              Save below and the source changes straight away — the camera is opened there and then, not at the
+              next restart. If it cannot be opened, capture carries on from{' '}
+              <strong>{cameras.data.source}</strong> and you are told why.
             </Alert>
           )}
         </Box>

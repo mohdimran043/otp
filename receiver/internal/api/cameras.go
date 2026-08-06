@@ -63,8 +63,8 @@ type camerasResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
-// cameraSource is the capture source name that opens a camera.
-const cameraSource = "gocv"
+// liveCameraSource is the capture source that opens a real camera.
+const liveCameraSource = "camera"
 
 // listCameras reports the capture devices attached to this machine.
 func (s *Server) listCameras(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +80,7 @@ func (s *Server) listCameras(w http.ResponseWriter, r *http.Request) {
 	response := camerasResponse{
 		Supported:        camera.Available(),
 		Source:           cfg.Capture.Source,
-		SourceUsesCamera: cfg.Capture.Source == cameraSource,
+		SourceUsesCamera: cfg.Capture.Source == liveCameraSource,
 		KnownSources:     pipeline.AvailableSources(),
 		Selection:        configured,
 	}
@@ -193,12 +193,9 @@ func (s *Server) setCamera(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.SetCamera(selection.Device, selection.Format, selection.Width, selection.Height, selection.FPS)
 	s.log.Info("camera selected", zap.String("selection", selection.String()))
 
-	// The source is recorded but not applied to the running process: the capture loop holds the source open
-	// and swapping it underneath would mean tearing down a session mid-frame. It takes effect at the next
-	// start, and the response says so rather than leaving an operator to wonder why nothing changed.
 	sourceChanged := selection.Source != "" && selection.Source != cfg.Capture.Source
 
-	// The source is persisted even though it is not applied now, so it is in force at the next start.
+	// Persisted so the choice is in force at the next start as well as now.
 	persisted := selection
 	if persisted.Source == "" {
 		persisted.Source = cfg.Capture.Source
@@ -223,15 +220,42 @@ func (s *Server) setCamera(w http.ResponseWriter, r *http.Request) {
 	if warning != "" {
 		response["warning"] = warning
 	}
-	switch {
-	case sourceChanged:
-		response["note"] = "saved. The capture source becomes " + selection.Source +
-			" when the receiver next starts — the capture loop holds its source open, so it is not swapped " +
-			"underneath a running session. Restart the receiver to apply it."
-	case cfg.Capture.Source != cameraSource:
-		response["note"] = "this receiver's capture source is " + cfg.Capture.Source +
-			", so the selection is recorded but no camera is opened. Set the source to " + cameraSource +
-			" above and restart to capture from it."
+	// Applied to the running receiver, not merely recorded. Selecting a camera should mean the camera starts;
+	// being told to restart the service is being asked to do work the service should do.
+	//
+	// The new source is opened before the old one is closed, so a camera that will not open leaves the receiver
+	// capturing from whatever it had — a failed switch must not turn a working receiver into one with no
+	// source at all.
+	target := cfg.Capture
+	if selection.Source != "" {
+		target.Source = selection.Source
+	}
+	target.Device, target.Format = selection.Device, selection.Format
+	target.Width, target.Height, target.FPS = selection.Width, selection.Height, selection.FPS
+
+	if s.switchSource != nil {
+		if err := s.switchSource(target); err != nil {
+			// The selection is already saved, so the operator's choice is not lost — but the switch failed and
+			// saying which is which matters: "recorded but not running" is a different situation from either
+			// "running" or "refused".
+			s.log.Warn("could not switch the capture source", zap.Error(err))
+			response["applied"] = false
+			response["error_detail"] = err.Error()
+			response["note"] = "The choice is saved and will be used at the next start, but the source could " +
+				"not be opened now: " + err.Error() + ". Capture continues from " + cfg.Capture.Source + "."
+			s.respond(w, http.StatusOK, response)
+			return
+		}
+		response["capturing_from"] = target.Source
+		switch {
+		case sourceChanged && target.Source == liveCameraSource:
+			response["note"] = "The camera is open and capturing now. It waits quietly until frames appear on " +
+				"the display — nothing is recorded while there is nothing to see."
+		case sourceChanged:
+			response["note"] = "Now capturing from " + target.Source + "."
+		case target.Source == liveCameraSource:
+			response["note"] = "The camera was reopened in the mode you chose."
+		}
 	}
 	s.respond(w, http.StatusOK, response)
 }

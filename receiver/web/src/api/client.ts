@@ -181,6 +181,12 @@ export const api = {
     request<{ chunks: Chunk[] | null }>(`/api/v1/transmissions/${id}/chunks`).then((r) => r.chunks ?? []),
   missing: (id: string) =>
     request<{ missing: number[] | null; count: number }>(`/api/v1/transmissions/${id}/missing`),
+  // The newest captures, decoded or not — what a live page needs to show frames arriving.
+  recentFrames: (limit = 40) =>
+    request<{ frames: CapturedFrame[] | null; capturing: boolean }>(
+      `/api/v1/frames/recent?limit=${limit}`,
+    ).then((r) => r.frames ?? []),
+
   failedFrames: (limit = 30) =>
     request<{ frames: CapturedFrame[] | null }>(`/api/v1/frames/failed?limit=${limit}`).then(
       (r) => r.frames ?? [],
@@ -205,6 +211,9 @@ export const api = {
       // Set when the server chose the mode itself, with a sentence saying what it chose and why.
       auto_configured?: boolean
       configured?: string
+      applied?: boolean
+      capturing_from?: string
+      error_detail?: string
     }>(
       '/api/v1/cameras/selection',
       {

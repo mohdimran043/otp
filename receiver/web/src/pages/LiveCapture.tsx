@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api, formatBytes, formatDuration, formatPercent } from '../api/client'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { Grid } from '../components/Grid'
+import { LiveFrames } from '../components/LiveFrames'
 import { Stat } from '../components/Stat'
 import { useUi } from '../store/ui'
 
@@ -66,13 +67,21 @@ export function LiveCapture() {
         </Grid>
       )}
 
+      {/* The counters above answer "is it working"; this answers "is it working now". A count that stopped
+          moving looks exactly like one moving slowly, and that difference is the whole question when a camera
+          has just been aimed. */}
+      <LiveFrames />
+
       <Paper variant="outlined" sx={{ p: 2 }}>
+        {/* Files, as opposed to the frames panel above. Both were called "Arriving now", which read as one
+            section repeated rather than two different questions: which transfers are in flight, and which frames
+            landed in the last second. */}
         <Typography variant="subtitle1" sx={{ mb: 1 }}>
-          Arriving now
+          Transfers in progress
         </Typography>
         {active.length === 0 ? (
           <Typography variant="body2" color="text.secondary">
-            Nothing is arriving. The channel is quiet.
+            No transfer is in progress. The channel is quiet.
           </Typography>
         ) : (
           <Stack spacing={2}>

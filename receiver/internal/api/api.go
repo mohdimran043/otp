@@ -41,6 +41,10 @@ type Server struct {
 	// capture reports the deepest backlog of unread frames. Injected because only the source can know it,
 	// and the API must not reach into the pipeline to ask.
 	capture func() int64
+
+	// switchSource replaces the running capture source. Injected rather than called directly for the same
+	// reason: the API's job is to decide whether a request is allowed, not to own the capture loop.
+	switchSource func(config.Capture) error
 }
 
 // Options configure a server.
@@ -51,17 +55,19 @@ type Options struct {
 	Log     *zap.Logger
 	Session func() uuid.UUID
 	Behind  func() int64
+	Switch  func(config.Capture) error
 }
 
 // New returns a server.
 func New(opts Options) *Server {
 	return &Server{
-		store:   opts.Store,
-		objects: opts.Objects,
-		cfg:     opts.Config,
-		log:     opts.Log.Named("api"),
-		session: opts.Session,
-		capture: opts.Behind,
+		store:        opts.Store,
+		objects:      opts.Objects,
+		cfg:          opts.Config,
+		log:          opts.Log.Named("api"),
+		session:      opts.Session,
+		capture:      opts.Behind,
+		switchSource: opts.Switch,
 	}
 }
 
@@ -79,6 +85,8 @@ func (s *Server) Routes() http.Handler {
 	// crossed the optical channel in the manifest, and the delivery was made from here.
 	mux.HandleFunc("GET /api/v1/transmissions/{id}/deliveries", s.listDeliveries)
 	mux.HandleFunc("GET /api/v1/frames/failed", s.listFailedFrames)
+	// The newest captures, decoded or not: what a live page needs to show frames arriving.
+	mux.HandleFunc("GET /api/v1/frames/recent", s.listRecentFrames)
 	mux.HandleFunc("GET /api/v1/frames/{id}/image", s.frameImage)
 	mux.HandleFunc("GET /api/v1/config", s.getConfig)
 
@@ -149,10 +157,20 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 	if session.FramesCaptured > 0 {
 		rate = float64(session.FramesDecoded) / float64(session.FramesCaptured)
 	}
+	// The source reported is the one in force now, not the one the session opened with.
+	//
+	// The row records what it started from, which is historically true and unhelpful on a live page: switching
+	// to a camera mid-session left the page saying "file" while the camera was running. An operator reading
+	// "Source" on a page called Live capture means "what is it reading from at this moment".
+	source := session.Source
+	if configured := s.cfg.Current().Capture.Source; configured != "" {
+		source = configured
+	}
+
 	s.respond(w, http.StatusOK, SessionView{
 		ID:             session.ID,
 		Status:         session.Status,
-		Source:         session.Source,
+		Source:         source,
 		TransmissionID: session.TransmissionID,
 		FramesCaptured: session.FramesCaptured,
 		FramesDecoded:  session.FramesDecoded,
@@ -481,6 +499,40 @@ func (s *Server) listDeliveries(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	s.respond(w, http.StatusOK, map[string]any{"deliveries": views})
+}
+
+// listRecentFrames returns the newest captures of the running session.
+//
+// Both outcomes, decoded and not. A page showing only what decoded would look healthy while a camera drifted out
+// of focus; one showing only failures would look broken during a perfect transfer.
+func (s *Server) listRecentFrames(w http.ResponseWriter, r *http.Request) {
+	id := uuid.Nil
+	if s.session != nil {
+		id = s.session()
+	}
+	if id == uuid.Nil {
+		s.respond(w, http.StatusOK, map[string]any{"frames": []any{}, "capturing": false})
+		return
+	}
+
+	limit := 40
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = min(parsed, 200)
+		}
+	}
+
+	frames, err := s.store.Frames.Recent(r.Context(), id, limit)
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, "could not read the recent captures", err)
+		return
+	}
+	// An empty list rather than null. A nil slice marshals as null, and a client that has to treat null and []
+	// as the same thing will one day forget to.
+	if frames == nil {
+		frames = []store.CapturedFrame{}
+	}
+	s.respond(w, http.StatusOK, map[string]any{"frames": frames, "capturing": true})
 }
 
 func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {

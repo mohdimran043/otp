@@ -192,13 +192,16 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 		cfg.Capture.Source = fallback.Source
 		source = fallbackSource
 	}
-	defer source.Close()
+	// Wrapped so the source can be replaced while the receiver runs. Selecting a camera in the settings page
+	// should mean the camera starts, not that a preference is filed for the next restart.
+	channel := pipeline.NewSwappable(source, cfg.Capture)
+	defer channel.Close()
 
 	// The watcher is built after the source is opened, so cfg already carries any substitution — which means
 	// the settings page reports the source actually in use rather than the one that was asked for and failed.
 	watcher := config.NewWatcher(configPath, cfg)
 	st := store.New(pool)
-	receiver := pipeline.New(st, objects, acks, source, watcher, log.Logger)
+	receiver := pipeline.New(st, objects, acks, channel, watcher, log.Logger)
 
 	server := &http.Server{
 		Addr: cfg.Addr(),
@@ -213,10 +216,22 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 			// Only the source knows how deep its backlog got, and the API must not reach into the pipeline
 			// to ask — so the number is injected.
 			Behind: func() int64 {
-				if fs, ok := source.(interface{ Behind() int64 }); ok {
+				if fs, ok := channel.Current().(interface{ Behind() int64 }); ok {
 					return fs.Behind()
 				}
 				return 0
+			},
+			// Replaces the running source. The new one is opened before the old is closed, so a camera that
+			// will not open leaves the receiver capturing from whatever it had.
+			Switch: func(next config.Capture) error {
+				if err := channel.Swap(next); err != nil {
+					return err
+				}
+				// Recorded after the swap succeeded, so what the API reports is what is really being read from.
+				watcher.SetSource(next.Source)
+				log.Info("capture source switched",
+					zap.String("source", next.Source), zap.String("device", next.Device))
+				return nil
 			},
 		}).Routes(),
 		ReadTimeout:  cfg.Server.ReadTimeout,
@@ -250,7 +265,7 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 
 	errs := make(chan error, 2)
 	go func() {
-		log.Info("capture starting", zap.String("source", source.Name()))
+		log.Info("capture starting", zap.String("source", channel.Name()))
 		errs <- receiver.Run(ctx)
 	}()
 	go func() {

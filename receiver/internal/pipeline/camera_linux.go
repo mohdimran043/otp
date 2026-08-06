@@ -127,6 +127,10 @@ func (s *CameraSource) Next(ctx context.Context) (Capture, error) {
 // Close stops the camera.
 func (s *CameraSource) Close() error { return s.stream.Close() }
 
+// Exclusive reports that this source holds a device that cannot be opened twice, which decides the order a
+// source swap has to happen in.
+func (s *CameraSource) Exclusive() bool { return true }
+
 // looksLikeAFrame is a cheap test for "is there anything on that screen".
 //
 // It exists to keep a camera that is waiting from filling the failure log. Locating a frame properly means
