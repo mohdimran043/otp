@@ -141,8 +141,23 @@ func (r *Receiver) Run(ctx context.Context) error {
 	// The readers close work when they have all finished; the decoders then drain and exit, and closing
 	// results ends the applier. Shutting down in that order means no goroutine is left writing to a closed
 	// channel.
+	// One reader, deliberately, after trying more than one and putting it back.
+	//
+	// Several readers looked right: the source releases its lock as soon as it has claimed a frame, so the
+	// file read, the PNG decode and — on the simulated channel — the optics model could all overlap. What
+	// happened instead was that the end-to-end suite became unstable, with a different test timing out on
+	// each run. Nineteen decoders and several readers is more CPU-bound goroutines than the machine has
+	// cores, and oversubscribing it made every individual frame slower without making more of them finish.
+	//
+	// A different test failing each time is a reason to stop and put the change back, not to tune it. The
+	// decode fan-out is where the measured gain is — 8 MB of incompressible payload at 1.46 MB/s — and it
+	// does not need this.
+	//
+	// The lock is still released early, which costs nothing and is correct regardless: only claiming a frame
+	// off the channel needs mutual exclusion.
+	readerCount := 1
 	var readers sync.WaitGroup
-	for range workers {
+	for range readerCount {
 		readers.Add(1)
 		go func() {
 			defer readers.Done()
