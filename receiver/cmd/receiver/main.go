@@ -18,6 +18,7 @@ import (
 	"github.com/opticaltransport/otp/shared/protocol"
 
 	"github.com/opticaltransport/otp/receiver/internal/api"
+	"github.com/opticaltransport/otp/receiver/internal/camera"
 	"github.com/opticaltransport/otp/receiver/internal/config"
 	"github.com/opticaltransport/otp/receiver/internal/db"
 	"github.com/opticaltransport/otp/receiver/internal/logging"
@@ -100,6 +101,43 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 		return err
 	}
 	defer acks.Close()
+
+	// The camera an operator chose through the UI, applied before capture opens.
+	//
+	// Precedence is explicit configuration, then the saved choice, then the default camera in its best
+	// mode. Configuration wins because it is what an operator wrote down deliberately, and a service that
+	// let a click override a checked-in setting would make deployments unreproducible. The saved choice
+	// wins over the default because it is also deliberate, just made through a different interface.
+	if cfg.Capture.Device == "" {
+		saved, err := camera.LoadSelection(cfg.Storage.Root)
+		if err != nil {
+			log.Warn("could not read the saved camera selection", zap.Error(err))
+		} else if !saved.Zero() {
+			cfg.Capture.Device = saved.Device
+			cfg.Capture.Format = saved.Format
+			cfg.Capture.Width = saved.Width
+			cfg.Capture.Height = saved.Height
+			cfg.Capture.FPS = saved.FPS
+			log.Info("using the saved camera selection", zap.String("camera", saved.String()))
+		}
+	}
+	if cfg.Capture.Source == "gocv" && cfg.Capture.Device == "" {
+		if devices, err := camera.List(); err == nil {
+			if preferred, ok := camera.Preferred(devices); ok {
+				cfg.Capture.Device = preferred.Device
+				cfg.Capture.Format = preferred.Format
+				cfg.Capture.Width = preferred.Width
+				cfg.Capture.Height = preferred.Height
+				cfg.Capture.FPS = preferred.FPS
+				log.Info("no camera configured; using the default at its best mode",
+					zap.String("camera", preferred.String()))
+			} else {
+				log.Warn("no capture device is attached")
+			}
+		} else {
+			log.Warn("could not enumerate capture devices", zap.Error(err))
+		}
+	}
 
 	source, err := pipeline.OpenSource(cfg.Capture)
 	if err != nil {

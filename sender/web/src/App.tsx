@@ -19,6 +19,7 @@ import LightModeIcon from '@mui/icons-material/LightMode'
 import SendIcon from '@mui/icons-material/Send'
 
 import { Dashboard } from './pages/Dashboard'
+import { Display } from './pages/Display'
 import { NewTransfer } from './pages/NewTransfer'
 import { TransferDetail } from './pages/TransferDetail'
 import { Transfers } from './pages/Transfers'
@@ -30,6 +31,7 @@ const tabs = [
   { path: '/', label: 'Dashboard' },
   { path: '/send', label: 'Send a file' },
   { path: '/transfers', label: 'Transfers' },
+  { path: '/display', label: 'Display' },
   { path: '/profiles', label: 'Profiles' },
 ]
 
@@ -102,6 +104,7 @@ export function App() {
             <Route path="/send" element={<NewTransfer />} />
             <Route path="/transfers" element={<Transfers />} />
             <Route path="/transfers/:id" element={<TransferDetail />} />
+            <Route path="/display" element={<Display />} />
             <Route path="/profiles" element={<Profiles />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

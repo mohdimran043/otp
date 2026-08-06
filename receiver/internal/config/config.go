@@ -95,6 +95,21 @@ type Capture struct {
 	// works from, so an installation still being tuned wants them.
 	RetainFrames bool `yaml:"retain_frames"`
 
+	// Device, Format, Width, Height, and FPS configure the camera the "gocv" source opens.
+	//
+	// An empty Device means the default camera — the lowest-numbered device that actually reports a video
+	// capture capability, which is not the same as the lowest-numbered /dev/video node: most webcams also
+	// register a metadata node that produces no images at all. An empty mode means the camera's best, which
+	// is what this platform wants: resolution is bytes per frame and frame rate is frames per second, and
+	// their product is the transfer rate.
+	//
+	// Reloadable, so that choosing a camera from the settings page does not need a restart.
+	Device string  `yaml:"device"`
+	Format string  `yaml:"format"`
+	Width  int     `yaml:"width"`
+	Height int     `yaml:"height"`
+	FPS    float64 `yaml:"fps"`
+
 	// Simulate degrades every frame before it is decoded, as a lens and a sensor would: "clean", "typical",
 	// "harsh", or "rolling-shutter". Empty means frames are read exactly as they were written.
 	//
@@ -498,6 +513,11 @@ func applyEnv(c *Config) error {
 	dur("CAPTURE_IDLE_INTERVAL", &c.Capture.IdleInterval)
 	boolean("CAPTURE_RETAIN_FRAMES", &c.Capture.RetainFrames)
 	str("CAPTURE_SIMULATE", &c.Capture.Simulate)
+	str("CAPTURE_DEVICE", &c.Capture.Device)
+	str("CAPTURE_FORMAT", &c.Capture.Format)
+	integer("CAPTURE_WIDTH", &c.Capture.Width)
+	integer("CAPTURE_HEIGHT", &c.Capture.Height)
+	float("CAPTURE_FPS", &c.Capture.FPS)
 
 	integer("DECODER_CELL_PIXELS_HINT", &c.Decoder.CellPixelsHint)
 	float("DECODER_MIN_FINDER_SCORE", &c.Decoder.MinFinderScore)
@@ -566,4 +586,23 @@ func (w *Watcher) Reload() error {
 	next.Decoder.MinTimingScore = loaded.Decoder.MinTimingScore
 	w.current.Store(&next)
 	return nil
+}
+
+// SetCamera applies a camera selection without a restart.
+//
+// It is a method rather than a reload because the choice does not come from the configuration file: it
+// comes from an operator clicking a device in a list, and the file is their document to edit rather than
+// this service's to rewrite. Persistence is handled separately, by the caller, in a file of its own.
+//
+// The device fields are the only ones this may touch. Everything else in Capture either cannot change
+// while a session is open or is not the camera's business.
+func (w *Watcher) SetCamera(device, format string, width, height int, fps float64) Config {
+	next := w.Current()
+	next.Capture.Device = device
+	next.Capture.Format = format
+	next.Capture.Width = width
+	next.Capture.Height = height
+	next.Capture.FPS = fps
+	w.current.Store(&next)
+	return next
 }

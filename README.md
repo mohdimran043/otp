@@ -62,6 +62,61 @@ dropped with error correction switched off entirely — recovery there is retran
 else. Every test asserts the merged bytes are identical to what was uploaded, that no chunk is
 outstanding, and that the delivered body hashes to the same value.
 
+## Where to watch it
+
+Three pages, all served from the same origin as the API on each side.
+
+| URL | What it shows |
+|---|---|
+| `http://<sender>/display` | **The frames, live.** What a camera is looking at, one frame at a time, as the display advances. |
+| `http://<sender>/display?camera=1` | The same page with nothing else on it: full screen, black surround, no toolbar. **This is what the camera should be pointed at.** |
+| `http://<sender>/transfers/<id>` | A transfer's chunk map, refreshing as acknowledgements arrive, and **every frame it rendered as an image** — the audit view. |
+| `http://<receiver>/` | Live capture: frames captured, decoded, and unreadable, with the decode rate. |
+| `http://<receiver>/transmissions/<id>` | What has arrived, what is still missing, and the merged file once it verifies. |
+| `http://<receiver>/settings` | The decoder's thresholds, and **which camera to capture from**. |
+
+Two things about the display page are not cosmetic, because getting either wrong breaks decoding rather
+than merely looking untidy. **Scaling is restricted to whole multiples** — a frame is a grid of square
+cells and the decoder takes the median of each cell's pixels, so fractional scaling blends cell
+boundaries into their neighbours. And **smoothing is off**: the browser's default filter is a blur, and
+blur is exactly what the operating envelope budgets for the lens.
+
+The page follows the display by long-poll (`GET /api/v1/display/next?after=<sequence>`) rather than on
+an interval, with the frame inlined in the same response. At thirty frames a second there are 33
+milliseconds between frames, so a second request to fetch the image would spend a meaningful share of
+them; base64 costs a third more bytes over what is either loopback or a cable.
+
+### Auditing a frame after the fact
+
+Every rendered frame is kept — the row in Postgres and the PNG in object storage — and served at
+`GET /api/v1/transfers/{id}/frames/{n}/image`, addressed by the frame number written into the frame's
+own header band. That is the number the receiver reports when a decode fails, so a complaint about
+"frame 214" can be answered by looking at frame 214.
+
+It settles a question that no counter can. A chunk that took four attempts to get through was either
+rendered wrongly or rendered correctly and photographed badly, and those have different fixes. The
+stored image is the same bytes that went to the channel, not a re-render that might differ.
+
+### Choosing a camera
+
+The receiver enumerates capture devices through Video4Linux directly — `VIDIOC_QUERYCAP`,
+`ENUM_FMT`, `ENUM_FRAMESIZES`, `ENUM_FRAMEINTERVALS` — and offers them with their real modes.
+
+Reading `/sys/class/video4linux/*/name` would have been easier and wrong: most webcams register two
+nodes with identical names, one of which is a metadata device that produces no images at all. On the
+machine this was written on, `/dev/video0` and `/dev/video1` both report "Integrated Camera"; only the
+first can capture. A settings page that offered both would produce a receiver that captures nothing and
+reports it as an optical fault.
+
+With nothing configured, the default is the lowest-numbered device that actually declares video
+capture, in its **largest** mode, fastest breaking the tie. Resolution comes first deliberately: cells
+the camera cannot resolve do not decode at all, whereas a slow camera only makes the sender wait — which
+the acknowledgement rule already makes safe.
+
+A mode is validated against the device before it is applied, because a V4L2 driver handed a resolution
+it does not support substitutes one rather than failing. A receiver that asked for 1920×1080 and was
+quietly given 640×480 would fail to resolve the grid and blame the lens.
+
 ## Transfer speed
 
 Throughput is `chunk size × frames per second`, and the chunk size is what one frame carries. Two
@@ -80,9 +135,9 @@ Measured payload capacity per frame, from
 Those are payload bytes, before compression. A file that compresses two to one moves at twice the
 figure shown; one that is already compressed moves at the figure shown.
 
-A larger grid scales it linearly. `color16` on a 256×256 grid carries about 18 KiB a frame — roughly
-**530 KiB/s at 30 fps, or 1 MiB/s at 60** — which is where a 4K panel and an industrial camera would
-actually be run. Whether the receiver can decode at that density is an optical question, and
+A larger grid scales it linearly. `color16` on a 256×256 grid carries **30 226 bytes a frame at 4 px
+cells and 22 669 at 8 px** — roughly **860 KiB/s at 30 fps, or 1.7 MiB/s at 60**, at the denser of the
+two — which is where a 4K panel and an industrial camera would actually be run. Whether the receiver can decode at that density is an optical question, and
 [`TestOpticalEnvelope`](shared/encoding/adversarial_test.go) maps where each encoding gives out:
 `color8` survives the worst channel tested, and the three-bit grey ramp needs a controlled
 installation.

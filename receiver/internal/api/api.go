@@ -71,6 +71,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/frames/{id}/image", s.frameImage)
 	mux.HandleFunc("GET /api/v1/config", s.getConfig)
 
+	// The camera: what is attached, and which of it to use. Discovered rather than configured, which is
+	// why it is not part of the configuration endpoint.
+	mux.HandleFunc("GET /api/v1/cameras", s.listCameras)
+	mux.HandleFunc("PUT /api/v1/cameras/selection", s.setCamera)
+
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)

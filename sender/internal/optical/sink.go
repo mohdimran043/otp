@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sync/atomic"
 
+	"github.com/google/uuid"
+
 	"github.com/opticaltransport/otp/sender/internal/config"
 )
 
@@ -45,6 +47,17 @@ type Frame struct {
 
 	// Number is the frame's own number within its transmission, for logs.
 	Number int
+
+	// Transmission and Manifest identify what is on screen, for an operator watching the display and
+	// for anything following it over HTTP. They travel with the frame rather than being looked up from
+	// its sequence number, because by the time a viewer asks, the display has usually moved on.
+	Transmission uuid.UUID
+	Manifest     bool
+
+	// WidthPx and HeightPx are the image's dimensions, so a page can lay out space for a frame before
+	// it has decoded one, and refuse a scale factor that would not fit.
+	WidthPx  int
+	HeightPx int
 
 	// PNG is the encoded image. It is passed already encoded because the pipeline stored it that
 	// way, and re-encoding a frame on every display would spend real time producing identical bytes.

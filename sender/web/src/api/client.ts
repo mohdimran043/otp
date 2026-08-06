@@ -86,6 +86,44 @@ export interface Frame {
   payload_bytes: number
   displayed_count: number
   last_displayed?: string
+
+  // chunk_id links a frame to what it carried, which is what makes an audit useful: the frame's image
+  // answers "what did we display", and the chunk's retry count answers "did it get through".
+  chunk_id?: string
+
+  // sha256 arrives base64 encoded, being []byte on the wire.
+  sha256?: string
+}
+
+// DisplayFrame is the frame on the screen right now — the one a camera is looking at.
+export interface DisplayFrame {
+  sequence: number
+  frame_number: number
+  transmission_id?: string
+  is_manifest: boolean
+  width_px: number
+  height_px: number
+  bytes: number
+  shown_at: string
+  age_ms: number
+  image_url: string
+
+  // image_png is the frame itself, base64, present when the request asked for include=image.
+  image_png?: string
+}
+
+export interface DisplayStatus {
+  sink: string
+  live: boolean
+  fps: number
+  cell_px: number
+  quiet_zone_px: number
+  grid_cols: number
+  grid_rows: number
+  encoder: string
+  bit_depth: number
+  frames_shown: number
+  frame?: DisplayFrame
 }
 
 export interface Job {
@@ -181,6 +219,38 @@ export const api = {
   jobs: (id: string) =>
     request<{ jobs: Job[] | null }>(`/api/v1/transfers/${id}/jobs`).then((r) => r.jobs ?? []),
 
+  // frameImage is the audit path: the exact bytes that were put on the screen, addressed by the frame
+  // number the receiver reports when a decode fails.
+  frameImage: (id: string, frameNumber: number) =>
+    `/api/v1/transfers/${id}/frames/${frameNumber}/image`,
+
+  display: () => request<DisplayStatus>('/api/v1/display'),
+
+  // nextDisplayFrame long-polls: it resolves when the display moves past `after`, or null when the poll
+  // expires with nothing new. Returning null rather than throwing matters — an expired poll is the
+  // normal case on an idle display, and a caller that treated it as an error would show a fault.
+  nextDisplayFrame: async (after: number, signal?: AbortSignal): Promise<DisplayFrame | null> => {
+    // include=image asks for the pixels in the same response. One round trip per frame rather than two:
+    // at 30 fps there are 33 ms between frames and a second fetch spends a meaningful share of them.
+    const response = await fetch(`/api/v1/display/next?after=${after}&include=image`, {
+      headers: { Accept: 'application/json' },
+      signal,
+    })
+    if (response.status === 204) return null
+    const text = await response.text()
+    if (!response.ok) {
+      let message = text
+      try {
+        const parsed = JSON.parse(text) as { error?: string }
+        if (parsed.error) message = parsed.error
+      } catch {
+        // Keep the raw body.
+      }
+      throw new ApiError(response.status, message || response.statusText)
+    }
+    return JSON.parse(text) as DisplayFrame
+  },
+
   // The upload is a multipart form rather than JSON, because the file travels with it: the whole point
   // of this endpoint is that one request carries the bytes and the URL the result should go to.
   submit: (form: FormData) =>
@@ -192,7 +262,9 @@ export const api = {
 // formatBytes and formatRate exist because every panel needs them and an operator reading "48234496"
 // is doing arithmetic the interface should have done.
 export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
+  // Rounded, because this formats rates as well as sizes. A byte count is always a whole number but
+  // bytes-per-second is not, and "137.83533765032377 B/s" is not a figure anybody reads.
+  if (bytes < 1024) return `${bytes < 10 ? bytes.toFixed(1) : Math.round(bytes)} B`
   const units = ['KiB', 'MiB', 'GiB', 'TiB']
   let value = bytes / 1024
   let unit = 0

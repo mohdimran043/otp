@@ -29,7 +29,9 @@ const tabs = [
   { path: '/', label: 'Live capture' },
   { path: '/transmissions', label: 'Transmissions' },
   { path: '/failures', label: 'Decode failures' },
-  { path: '/settings', label: 'Decoder' },
+  // "Settings" rather than "Decoder": the page now configures the camera as well, and the camera is the
+  // thing an operator goes looking for.
+  { path: '/settings', label: 'Settings' },
 ]
 
 export function App() {

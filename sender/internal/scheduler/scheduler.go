@@ -385,9 +385,13 @@ func (s *Scheduler) show(ctx context.Context, frame store.Frame, priority Priori
 	s.mu.Unlock()
 
 	if err := s.sink.Show(ctx, optical.Frame{
-		Sequence: sequence,
-		Number:   frame.FrameNumber,
-		PNG:      body,
+		Sequence:     sequence,
+		Number:       frame.FrameNumber,
+		Transmission: frame.TransmissionID,
+		Manifest:     frame.IsManifest,
+		WidthPx:      frame.WidthPx,
+		HeightPx:     frame.HeightPx,
+		PNG:          body,
 	}); err != nil {
 		return err
 	}

@@ -20,6 +20,7 @@ import { useParams } from 'react-router-dom'
 
 import { api, eta, formatBytes, formatDuration, formatRate } from '../api/client'
 import { ErrorNotice } from '../components/ErrorNotice'
+import { FrameAudit } from '../components/FrameAudit'
 import { Grid } from '../components/Grid'
 import { Stat } from '../components/Stat'
 import { StatusChip } from '../components/StatusChip'
@@ -266,11 +267,19 @@ export function TransferDetail() {
         <Typography variant="subtitle1" sx={{ mb: 1 }}>
           Frames
         </Typography>
-        <Typography variant="body2" color="text.secondary">
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           {(frames.data ?? []).length} rendered ·{' '}
           {(frames.data ?? []).filter((f) => f.is_manifest).length} of them manifests ·{' '}
-          {(frames.data ?? []).reduce((sum, f) => sum + f.displayed_count, 0)} displays in total
+          {(frames.data ?? []).reduce((sum, f) => sum + f.displayed_count, 0)} displays in total ·
+          every one kept, so any of them can be inspected after the fact
         </Typography>
+        {id && (
+          <FrameAudit
+            transmissionId={id}
+            frames={frames.data ?? []}
+            chunks={chunks.data ?? []}
+          />
+        )}
       </Paper>
     </Stack>
   )

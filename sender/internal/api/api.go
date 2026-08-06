@@ -33,6 +33,7 @@ import (
 	"github.com/opticaltransport/otp/sender/internal/config"
 	"github.com/opticaltransport/otp/sender/internal/jobs"
 	"github.com/opticaltransport/otp/sender/internal/objectstore"
+	"github.com/opticaltransport/otp/sender/internal/optical"
 	"github.com/opticaltransport/otp/sender/internal/pipeline"
 	"github.com/opticaltransport/otp/sender/internal/store"
 )
@@ -46,6 +47,10 @@ type Server struct {
 	acks     *ackwatch.Watcher
 	cfg      *config.Watcher
 	log      *zap.Logger
+
+	// display is the live view of the channel, and may be nil: a build or a deployment without one
+	// still transmits perfectly well, and the display endpoints say so rather than pretending.
+	display *optical.Live
 
 	// transmit is called to start displaying a prepared transmission. It is injected rather than
 	// called directly so the API does not own the display loop: an API handler that blocked until a
@@ -61,6 +66,7 @@ type Options struct {
 	Pipeline *pipeline.Pipeline
 	Acks     *ackwatch.Watcher
 	Config   *config.Watcher
+	Display  *optical.Live
 	Log      *zap.Logger
 	Transmit func(ctx context.Context, transmissionID uuid.UUID)
 }
@@ -74,6 +80,7 @@ func New(opts Options) *Server {
 		pipeline: opts.Pipeline,
 		acks:     opts.Acks,
 		cfg:      opts.Config,
+		display:  opts.Display,
 		log:      opts.Log.Named("api"),
 		transmit: opts.Transmit,
 	}
@@ -92,8 +99,15 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/transfers", s.listTransfers)
 	mux.HandleFunc("GET /api/v1/transfers/{id}/chunks", s.listChunks)
 	mux.HandleFunc("GET /api/v1/transfers/{id}/frames", s.listFrames)
+	mux.HandleFunc("GET /api/v1/transfers/{id}/frames/{number}/image", s.getFrameImage)
 	mux.HandleFunc("GET /api/v1/transfers/{id}/jobs", s.listJobs)
 	mux.HandleFunc("GET /api/v1/transfers/{id}/result", s.getResult)
+
+	// The channel, as opposed to the queue: what is on the display now, for a camera to watch and for a
+	// receiver to follow.
+	mux.HandleFunc("GET /api/v1/display", s.getDisplay)
+	mux.HandleFunc("GET /api/v1/display/next", s.nextDisplayFrame)
+	mux.HandleFunc("GET /api/v1/display/frame.png", s.getDisplayFrameImage)
 
 	mux.HandleFunc("GET /api/v1/profiles", s.listProfiles)
 	mux.HandleFunc("GET /health", s.health)

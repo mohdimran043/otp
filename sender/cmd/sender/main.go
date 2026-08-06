@@ -132,10 +132,15 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 	line.Register(engine)
 	acks := ackwatch.New(st, watcher, log.Logger)
 
-	sink, err := optical.Open(cfg.Display)
+	channel, err := optical.Open(cfg.Display)
 	if err != nil {
 		return err
 	}
+
+	// Everything that displays goes through Live, so "what is on the screen right now" has one answer
+	// rather than one per scheduler. It is what the camera-facing page reads, and what a receiver pulling
+	// frames over HTTP will follow — neither of which should have to know which channel is underneath.
+	sink := optical.NewLive(channel)
 	defer sink.Close()
 
 	// One display loop per transmission, tracked so shutdown can wait for them.
@@ -196,6 +201,7 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 			Pipeline: line,
 			Acks:     acks,
 			Config:   watcher,
+			Display:  sink,
 			Log:      log.Logger,
 			Transmit: transmit,
 		}).Routes(),

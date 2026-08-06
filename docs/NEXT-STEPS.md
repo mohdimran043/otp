@@ -4,6 +4,23 @@ Written at the end of the session that measured throughput, so the next one can 
 The order is not arbitrary: steps 1 and 2 are prerequisites for the 50 MB test being meaningful at
 all, and doing 3 before them would make the result worse rather than better.
 
+## Done since this was written
+
+- **The display is a URL.** `/display` follows the frame on screen by long-poll, and `?camera=1` is the
+  same page with nothing else on it — black surround, no chrome, whole-multiple scaling, smoothing off.
+  `optical.Live` wraps whichever sink is configured, so this works over the file sink today and over
+  OpenGL later. `GET /api/v1/display`, `/display/next?after=N[&include=image]`, `/display/frame.png`.
+  This is also **half of step 2**: the receiver's `http` source has an endpoint to pull from now.
+- **Every frame is auditable.** `GET /api/v1/transfers/{id}/frames/{n}/image` serves the stored PNG by
+  the frame number written into its own header band, and the transfer page shows the whole set with the
+  chunk each carried and how many times it had to be sent.
+- **The receiver can be pointed at a camera from its UI.** Devices come from Video4Linux directly
+  (`VIDIOC_QUERYCAP`, `ENUM_FMT`, `ENUM_FRAMESIZES`, `ENUM_FRAMEINTERVALS`), the default is the
+  lowest-numbered device that actually declares capture, and its best mode is preferred — largest frame
+  first, fastest breaking the tie. A mode is validated against the device before it is applied.
+
+What remains below is unchanged, and step 1 is still the thing that matters most.
+
 ## 1 · Fix the acknowledgement path — before anything else
 
 Measured: 1 MB of incompressible payload took 292 s (3.4 KB/s) against a channel that allows

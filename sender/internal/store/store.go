@@ -580,6 +580,21 @@ func (r *Frames) List(ctx context.Context, transmissionID uuid.UUID) ([]Frame, e
 	return out, rows.Err()
 }
 
+// GetByNumber returns one frame of a transmission, addressed the way an auditor thinks of it.
+//
+// By frame number rather than by row id, because that is the number written into the frame's own header
+// band and reported by the receiver when a decode fails — so an operator holding a complaint about
+// "frame 214" can ask for frame 214 rather than having to find its identifier first.
+func (r *Frames) GetByNumber(ctx context.Context, transmissionID uuid.UUID, number int) (Frame, error) {
+	f, err := scanFrame(r.pool.QueryRow(ctx,
+		`SELECT `+frameColumns+` FROM encoded_frames WHERE transmission_id = $1 AND frame_number = $2`,
+		transmissionID, number))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Frame{}, fmt.Errorf("%w: transmission %s has no frame %d", ErrNotFound, transmissionID, number)
+	}
+	return f, err
+}
+
 // ForChunk returns the frame carrying a chunk, which is what a retransmission needs.
 func (r *Frames) ForChunk(ctx context.Context, chunkID uuid.UUID) (Frame, error) {
 	f, err := scanFrame(r.pool.QueryRow(ctx,

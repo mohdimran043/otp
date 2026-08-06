@@ -75,14 +75,55 @@ export interface DecoderConfig {
   callback: { allowed_hosts: string[] | null; allow_any_host: boolean }
 }
 
+// A capture device attached to this machine, as V4L2 reports it.
+export interface CameraDevice {
+  path: string
+  name: string
+  driver: string
+  bus_info: string
+  modes: CameraMode[]
+  default: boolean
+  selected: boolean
+}
+
+export interface CameraMode {
+  format: string
+  format_name: string
+  width: number
+  height: number
+  fps: number[] | null
+}
+
+export interface CameraSelection {
+  device: string
+  format?: string
+  width?: number
+  height?: number
+  fps?: number
+}
+
+export interface CamerasView {
+  supported: boolean
+  source: string
+  source_uses_camera: boolean
+  devices: CameraDevice[] | null
+  selection: CameraSelection
+  effective: CameraSelection
+  substituted: boolean
+  error?: string
+}
+
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
     super(message)
   }
 }
 
-async function request<T>(path: string): Promise<T> {
-  const response = await fetch(path, { headers: { Accept: 'application/json' } })
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    headers: { Accept: 'application/json', ...(init?.headers ?? {}) },
+  })
   const text = await response.text()
   if (!response.ok) {
     let message = text
@@ -113,6 +154,20 @@ export const api = {
       (r) => r.frames ?? [],
     ),
   config: () => request<DecoderConfig>('/api/v1/config'),
+
+  cameras: () => request<CamerasView>('/api/v1/cameras'),
+
+  // The selection is a PUT rather than a POST: choosing a camera replaces the choice rather than adding
+  // to a collection, and sending it twice must mean the same thing as sending it once.
+  selectCamera: (selection: CameraSelection) =>
+    request<{ selection: CameraSelection; source: string; warning?: string; note?: string }>(
+      '/api/v1/cameras/selection',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(selection),
+      },
+    ),
   health: () => request<{ status: string; protocol_version: number }>('/health'),
 
   // The stored capture, served straight from the object store. It is a URL rather than a fetch because it
@@ -123,7 +178,9 @@ export const api = {
 }
 
 export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
+  // Rounded, because this formats rates as well as sizes. A byte count is always a whole number but
+  // bytes-per-second is not, and "137.83533765032377 B/s" is not a figure anybody reads.
+  if (bytes < 1024) return `${bytes < 10 ? bytes.toFixed(1) : Math.round(bytes)} B`
   const units = ['KiB', 'MiB', 'GiB', 'TiB']
   let value = bytes / 1024
   let unit = 0

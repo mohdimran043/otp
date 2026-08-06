@@ -164,6 +164,98 @@ nothing is delivered anywhere; files still arrive, are verified, and can be down
 
 ---
 
+---
+
+## 8 · The display, as a camera sees it
+
+The frames are not only files on a volume. `http://localhost:8080/display` is the transmitting end of
+the channel as a page, following the display frame by frame:
+
+![The sender's live display page](screenshots/13-sender-display-live.png)
+
+Read the chips along the bottom: display sequence 939, frame 91 of the transmission, 600×600 pixels
+shown at 1×, 10.8 KiB of PNG, the `file` sink underneath, 30 fps configured, 96×96 cells at 6 pixels,
+`color8`. The last one — 1081 shown — climbs while the picture holds still, which is the display
+repeating an unacknowledged frame rather than idling.
+
+`?camera=1` is the same page with everything else removed. This is what the camera is pointed at:
+
+![The camera view](screenshots/14-sender-display-camera-view.png)
+
+Black surround, no toolbar, no caption, cursor hidden. Every other pixel on the screen would be stray
+light the sensor has to expose for, and a frame sharing its exposure with a white toolbar loses contrast
+where it needs it most.
+
+Two properties of that page are load-bearing rather than decorative:
+
+- **Scaling is whole multiples only.** A frame is a grid of square cells and the decoder takes the median
+  of each cell's pixels. At 1.5× every other cell boundary lands mid-pixel and blends two cells that
+  were meant to be distinguished.
+- **Smoothing is off** (`image-rendering: pixelated`). The browser's default filter is a blur, and blur
+  is precisely what the operating envelope budgets for the lens — spending it here leaves none for the
+  optics.
+
+The page follows the display by long-poll rather than polling on a timer, with the frame inlined in the
+same response. Measured on the running stack: a request that is already behind returns in 11 ms, and one
+that is up to date holds open until either a new frame arrives or the timeout, then answers 204.
+
+---
+
+## 9 · Auditing any frame afterwards
+
+Every frame is kept — the row in Postgres, the PNG in object storage — and served by frame number.
+The transfer page shows them all:
+
+![The frame audit view](screenshots/15-sender-frame-audit.png)
+
+That transfer is 149 bytes in one chunk, so it has six frames: the chunk, its parity, and the manifest
+re-emitted. The first two thumbnails carry payload and show colour; the rest are parity and manifest
+frames. The border says which kind it is — outlined for an ordinary frame, coloured for a manifest, amber
+for one whose chunk needed retransmitting — and the filter buttons above narrow to manifests, frames
+displayed more than once, or the ones that were retransmitted.
+
+Clicking a thumbnail opens the exact bytes that went to the channel, at whole-multiple zoom, with the
+chunk it carried, whether that chunk was acknowledged, and how many times it had to be sent.
+
+This answers a question no counter can. A chunk that took four attempts was either rendered wrongly or
+rendered correctly and photographed badly, and those have different fixes — the stored image decides
+which, because it is the same bytes rather than a re-render that might differ.
+
+---
+
+## 10 · Choosing the camera on the receiver
+
+![The receiver's camera settings](screenshots/16-receiver-camera-settings.png)
+
+The device list comes from Video4Linux directly, and the filtering is doing real work. On the machine
+this was captured on, `/dev/video0` and `/dev/video1` both report "Integrated Camera" — the second is a
+metadata node that produces no images. Reading `/sys/class/video4linux/*/name` would have offered both,
+and an operator who picked the second would get a receiver that captures nothing and reports it as an
+optical fault. Only devices that declare a video capture capability appear.
+
+With nothing configured the default is the lowest-numbered capture device in its largest mode, fastest
+breaking the tie. Resolution first, deliberately: cells the camera cannot resolve do not decode at all,
+whereas a slow camera only makes the sender wait — which the acknowledgement rule already makes safe.
+
+The receiver in this demonstration has no camera passed through to its container, so it says so, with
+the compose line that would fix it — and separately that its capture source is `file`, so it is reading
+frames rather than photographing them. Those are two different facts and the page states both, because
+"capture is not working" would send an operator looking in the wrong place.
+
+To see the picker populated, pass a device through to the receiver service:
+
+```yaml
+    devices:
+      - "/dev/video0:/dev/video0"
+```
+
+Enumeration was verified against real hardware on the host this was written on, where it found
+`/dev/video0` — "Integrated Camera", `uvcvideo`, `usb-0000:00:14.0-6` — with 18 modes, the best being
+1920×1080 at 30 fps in MJPG. It also correctly declined to offer `/dev/video1`, which reports the same
+card name and is a metadata node that produces no images.
+
+---
+
 ## Measured on this run
 
 | | colour-test.png | chime.wav |

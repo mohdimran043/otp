@@ -2,6 +2,7 @@ import { Alert, Paper, Stack, Table, TableBody, TableCell, TableRow, Typography 
 import { useQuery } from '@tanstack/react-query'
 
 import { api, formatPercent } from '../api/client'
+import { CameraPicker } from '../components/CameraPicker'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { Grid } from '../components/Grid'
 import { Stat } from '../components/Stat'
@@ -19,8 +20,12 @@ export function Settings() {
 
   return (
     <Stack spacing={3}>
-      <Typography variant="h5">Decoder</Typography>
+      <Typography variant="h5">Capture</Typography>
       <ErrorNotice error={config.error} />
+
+      <CameraPicker />
+
+      <Typography variant="h5">Decoder</Typography>
 
       {data && (
         <Grid container spacing={2}>
