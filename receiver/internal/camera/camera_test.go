@@ -94,7 +94,8 @@ func TestValidateRefusesModesTheCameraDoesNotHave(t *testing.T) {
 	require.NoError(t, Selection{Device: "/dev/video0", Format: "MJPG", Width: 1920, Height: 1080, FPS: 30}.Validate(list))
 	require.NoError(t, Selection{Device: "/dev/video0", Width: 1280, Height: 720, FPS: 60}.Validate(list))
 
-	require.ErrorContains(t, Selection{Device: "/dev/video7"}.Validate(list), "not an attached capture device")
+	require.ErrorContains(t, Selection{Device: "/dev/video7"}.Validate(list),
+		"not one of the 2 attached capture devices")
 	require.ErrorContains(t,
 		Selection{Device: "/dev/video0", Width: 4096, Height: 2160}.Validate(list),
 		"does not offer 4096×2160")
@@ -107,7 +108,9 @@ func TestValidateRefusesModesTheCameraDoesNotHave(t *testing.T) {
 	require.ErrorContains(t, Selection{Device: "/dev/video0", Width: 1920}.Validate(list),
 		"a width needs a height")
 	require.ErrorContains(t, Selection{Device: "/dev/video0", FPS: -1}.Validate(list), "cannot be negative")
-	require.ErrorContains(t, Selection{Device: "/dev/video0"}.Validate(nil), "not an attached capture device")
+	// With devices to check against, a mode the camera does not have is refused.
+	require.ErrorContains(t, Selection{Device: "/dev/video9", Width: 640, Height: 480}.Validate(list),
+		"not one of the 2 attached capture devices")
 }
 
 // TestValidateToleratesRationalFrameRates covers 29.97, which V4L2 reports as 30000/1001 and which is
@@ -149,4 +152,30 @@ func TestModeLabel(t *testing.T) {
 	require.Equal(t, "1920×1080 at 30 fps (MJPG)",
 		Mode{Format: "MJPG", Width: 1920, Height: 1080, FPS: []float64{30}}.Label())
 	require.Equal(t, "640×480 YUYV", Mode{Format: "YUYV", Width: 640, Height: 480}.Label())
+}
+
+// TestValidateAcceptsAChoiceWhenNothingCanBeEnumerated is the case that matters in development and inside a
+// container that has not been given a camera yet.
+//
+// Refusing a mode the camera says it cannot do is only defensible when the camera can be asked. When
+// enumeration finds nothing, every choice would be refused and an operator could configure nothing at all —
+// so their word is taken instead. They can see the device on the host, or they are configuring for a
+// passthrough that arrives at the next restart.
+func TestValidateAcceptsAChoiceWhenNothingCanBeEnumerated(t *testing.T) {
+	for _, path := range []string{"/dev/video0", "/dev/video11", "/dev/v4l/by-id/usb-Acme_Cam", "0", "3"} {
+		require.NoError(t, Selection{Device: path}.Validate(nil), "%q", path)
+		require.NoError(t,
+			Selection{Device: path, Width: 1920, Height: 1080, FPS: 60, Format: "MJPG"}.Validate(nil),
+			"a mode cannot be checked either, so it is taken on trust: %q", path)
+	}
+}
+
+// TestValidateStillCatchesTyposWithNothingToEnumerate keeps "take the operator's word" from becoming "accept
+// anything", because a typo that silently becomes the configuration is worse than a refusal.
+func TestValidateStillCatchesTyposWithNothingToEnumerate(t *testing.T) {
+	for _, path := range []string{"video0", "camera", " /dev/video0", "/dev/video0 ", "99", "-1", "./cam"} {
+		require.Error(t, Selection{Device: path}.Validate(nil), "%q should be refused", path)
+	}
+	require.ErrorContains(t, Selection{Width: 640, Height: 480}.Validate(nil),
+		"nothing to select", "no device named and none attached")
 }

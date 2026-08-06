@@ -41,6 +41,10 @@ type camerasResponse struct {
 	// SourceUsesCamera is whether the active source opens a camera at all.
 	SourceUsesCamera bool `json:"source_uses_camera"`
 
+	// KnownSources is what the source may be set to, so the page offers a choice rather than a text field
+	// in which a typo becomes a receiver that captures nothing.
+	KnownSources []string `json:"known_sources"`
+
 	Devices []cameraView `json:"devices"`
 
 	// Selection is what is configured now, and Effective is what would actually be opened — they differ
@@ -76,6 +80,7 @@ func (s *Server) listCameras(w http.ResponseWriter, r *http.Request) {
 		Supported:        camera.Available(),
 		Source:           cfg.Capture.Source,
 		SourceUsesCamera: cfg.Capture.Source == cameraSource,
+		KnownSources:     camera.KnownSources,
 		Selection:        configured,
 	}
 
@@ -163,8 +168,19 @@ func (s *Server) setCamera(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.SetCamera(selection.Device, selection.Format, selection.Width, selection.Height, selection.FPS)
 	s.log.Info("camera selected", zap.String("selection", selection.String()))
 
+	// The source is recorded but not applied to the running process: the capture loop holds the source open
+	// and swapping it underneath would mean tearing down a session mid-frame. It takes effect at the next
+	// start, and the response says so rather than leaving an operator to wonder why nothing changed.
+	sourceChanged := selection.Source != "" && selection.Source != cfg.Capture.Source
+
+	// The source is persisted even though it is not applied now, so it is in force at the next start.
+	persisted := selection
+	if persisted.Source == "" {
+		persisted.Source = cfg.Capture.Source
+	}
+
 	var warning string
-	if err := camera.SaveSelection(cfg.Storage.Root, selection); err != nil {
+	if err := camera.SaveSelection(cfg.Storage.Root, persisted); err != nil {
 		warning = "the camera is in use now, but the choice could not be saved and will not survive a restart"
 		s.log.Warn("could not persist the camera selection", zap.Error(err))
 	}
@@ -177,10 +193,15 @@ func (s *Server) setCamera(w http.ResponseWriter, r *http.Request) {
 	if warning != "" {
 		response["warning"] = warning
 	}
-	if cfg.Capture.Source != cameraSource {
+	switch {
+	case sourceChanged:
+		response["note"] = "saved. The capture source becomes " + selection.Source +
+			" when the receiver next starts — the capture loop holds its source open, so it is not swapped " +
+			"underneath a running session. Restart the receiver to apply it."
+	case cfg.Capture.Source != cameraSource:
 		response["note"] = "this receiver's capture source is " + cfg.Capture.Source +
-			", so the selection is recorded but no camera is opened; set the source to " + cameraSource +
-			" in a build that includes it"
+			", so the selection is recorded but no camera is opened. Set the source to " + cameraSource +
+			" above and restart to capture from it."
 	}
 	s.respond(w, http.StatusOK, response)
 }

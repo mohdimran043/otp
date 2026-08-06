@@ -154,6 +154,17 @@ machine this was written on, `/dev/video0` and `/dev/video1` both report "Integr
 first can capture. A settings page that offered both would produce a receiver that captures nothing and
 reports it as an optical fault.
 
+**The controls are there whether or not a camera is.** That was not true at first: the panel rendered a
+device list, so with an empty list it rendered an explanation and nothing to act on — useless in development,
+which is exactly where it is needed. A device path can now be typed and the server takes it on trust when it
+has no camera to check against, because refusing a mode the camera says it cannot do is only defensible when
+the camera can be asked. A typo is still refused: `video0` is neither a path under `/dev` nor a camera index.
+
+**The capture source is chosen there too** — `file` to read a directory, `gocv` to open a camera — which is
+the first decision and the one that decides whether the rest matters, since a camera selected while the
+source is `file` is recorded and never opened. It applies at the next start, because the capture loop holds
+its source open and swapping it underneath would tear down a session mid-frame.
+
 With nothing configured, the default is the lowest-numbered device that actually declares video
 capture, in its **largest** mode, fastest breaking the tie. Resolution comes first deliberately: cells
 the camera cannot resolve do not decode at all, whereas a slow camera only makes the sender wait — which

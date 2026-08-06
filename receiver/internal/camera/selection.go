@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -26,11 +27,40 @@ type Selection struct {
 
 	// FPS is the frame rate to request. The camera is free to give less.
 	FPS float64 `json:"fps,omitempty"`
+
+	// Source is where frames come from: "file" to read a directory, "gocv" to open a camera.
+	//
+	// It belongs here rather than only in the configuration file because it is the first choice an operator
+	// makes and the one that decides whether any of the rest matters — a camera selected while the source is
+	// "file" is recorded and never opened. Empty means leave whatever is configured alone, so that saving a
+	// camera choice does not silently change the source as a side effect.
+	Source string `json:"source,omitempty"`
+}
+
+// KnownSources are the capture sources that exist.
+//
+// Listed rather than free-form so that a typo is refused rather than becoming a receiver that captures
+// nothing: "gocv" opens a camera, "file" reads the directory a display writes into.
+var KnownSources = []string{"file", "gocv"}
+
+// CheckSource refuses a source this build does not have.
+func CheckSource(source string) error {
+	if source == "" {
+		return nil
+	}
+	for _, known := range KnownSources {
+		if source == known {
+			return nil
+		}
+	}
+	return fmt.Errorf("camera: %q is not a capture source; known sources are %s",
+		source, strings.Join(KnownSources, ", "))
 }
 
 // Zero reports whether nothing has been chosen.
 func (s Selection) Zero() bool {
-	return s.Device == "" && s.Format == "" && s.Width == 0 && s.Height == 0 && s.FPS == 0
+	return s.Device == "" && s.Format == "" && s.Width == 0 && s.Height == 0 && s.FPS == 0 &&
+		s.Source == ""
 }
 
 // String renders a selection for a log line.
@@ -63,11 +93,36 @@ func (s Selection) Validate(devices []Device) error {
 	if s.Zero() {
 		return nil
 	}
+	if err := CheckSource(s.Source); err != nil {
+		return err
+	}
+	// A source chosen on its own is a complete selection: switching to "file" is a decision that needs no
+	// camera at all, and requiring one would make it impossible to switch back.
+	if s.Device == "" && s.Format == "" && s.Width == 0 && s.Height == 0 && s.FPS == 0 {
+		return nil
+	}
 	if s.FPS < 0 {
 		return errors.New("camera: the frame rate cannot be negative")
 	}
 	if (s.Width == 0) != (s.Height == 0) {
 		return errors.New("camera: a width needs a height, and a height needs a width")
+	}
+
+	// Nothing to check against.
+	//
+	// This is the case that matters in development and in a container that has not been given a camera yet:
+	// enumeration finds nothing, so every choice would be refused and the operator could configure nothing
+	// at all. Refusing a mode the camera says it cannot do is only defensible when the camera can be asked.
+	// When it cannot, the operator's word is the better evidence — they can see the device on the host, or
+	// they are configuring for a passthrough that arrives at the next restart.
+	//
+	// The path is still checked for being a plausible device rather than accepted blindly, because a typo
+	// that silently becomes the configuration is worse than a refusal.
+	if len(devices) == 0 {
+		if s.Device == "" {
+			return errors.New("camera: no capture device is attached, so there is nothing to select")
+		}
+		return checkDevicePath(s.Device)
 	}
 
 	// An exact match is required here, deliberately unlike Selected. Falling back to another camera is
@@ -79,7 +134,10 @@ func (s Selection) Validate(devices []Device) error {
 		if s.Device == "" {
 			return errors.New("camera: no capture device is attached")
 		}
-		return fmt.Errorf("camera: %s is not an attached capture device", s.Device)
+		// Named a device that is not in the list. Accepted only if it is plausible and the list might be
+		// incomplete for a reason the receiver cannot see — otherwise refused, because an operator looking
+		// at a list deserves to be told their choice is not on it.
+		return fmt.Errorf("camera: %s is not one of the %d attached capture devices", s.Device, len(devices))
 	}
 
 	if s.Width == 0 && s.Format == "" && s.FPS == 0 {
@@ -116,6 +174,30 @@ func (s Selection) Validate(devices []Device) error {
 	default:
 		return fmt.Errorf("camera: %s does not offer %g fps at %d×%d", device.Path, s.FPS, s.Width, s.Height)
 	}
+}
+
+// checkDevicePath accepts what a capture device is plausibly called, and refuses the rest.
+//
+// Deliberately loose: a Video4Linux node, or a bare index as OpenCV numbers its cameras. The point is to
+// catch a typo — a path with a space in it, an empty string, something that is obviously a filename — not to
+// predict every way a platform might name a device.
+func checkDevicePath(path string) error {
+	if strings.TrimSpace(path) != path || path == "" {
+		return errors.New("camera: the device path has stray whitespace")
+	}
+	if index, err := strconv.Atoi(path); err == nil {
+		if index < 0 || index > 63 {
+			return fmt.Errorf("camera: %q is not a plausible camera index", path)
+		}
+		return nil
+	}
+	if !strings.HasPrefix(path, "/dev/") {
+		return fmt.Errorf("camera: %q is neither a device path under /dev nor a camera index", path)
+	}
+	if strings.ContainsAny(path, " \t\n") {
+		return fmt.Errorf("camera: %q contains whitespace", path)
+	}
+	return nil
 }
 
 // find returns the named device exactly, or the default when no name was given.

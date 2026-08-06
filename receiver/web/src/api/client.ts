@@ -114,12 +114,18 @@ export interface CameraSelection {
   width?: number
   height?: number
   fps?: number
+  // Where frames come from. Empty leaves whatever is configured alone, so saving a camera choice does not
+  // change the source as a side effect.
+  source?: string
 }
 
 export interface CamerasView {
   supported: boolean
   source: string
   source_uses_camera: boolean
+  // What the source may be set to, so the page offers a choice rather than a text field in which a typo
+  // becomes a receiver that captures nothing.
+  known_sources: string[]
   devices: CameraDevice[] | null
   selection: CameraSelection
   effective: CameraSelection

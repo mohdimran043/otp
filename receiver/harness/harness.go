@@ -89,6 +89,15 @@ func Start(ctx context.Context, opts Options) (*Receiver, error) {
 	cfg.Storage.Root = opts.StorageRoot
 	cfg.Capture.Dir = opts.FrameDir
 	cfg.Capture.Consume = true
+
+	// A small, fixed number of decoders rather than one per core.
+	//
+	// The default is per-core because that is right for a deployment, and wrong for a test: every loopback in
+	// the suite would start nineteen CPU-bound goroutines on a twenty-core machine, several suites run in the
+	// same container as two databases, and the result was a suite where a different test timed out on each
+	// run. Concurrency is not what these tests are checking — losslessness is — and a fixed figure makes them
+	// say the same thing twice.
+	cfg.Capture.DecodeWorkers = 4
 	cfg.Capture.IdleInterval = 10 * time.Millisecond
 	cfg.Ack.Dir = opts.AckDir
 	cfg.Ack.Secret = opts.AckSecret

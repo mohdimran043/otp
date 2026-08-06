@@ -113,6 +113,13 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 		if err != nil {
 			log.Warn("could not read the saved camera selection", zap.Error(err))
 		} else if !saved.Zero() {
+			// The source comes from the saved choice too, so an operator who switched to a camera in the UI
+			// gets a camera at the next start rather than having to edit configuration as well.
+			if saved.Source != "" && saved.Source != cfg.Capture.Source {
+				log.Info("using the saved capture source",
+					zap.String("source", saved.Source), zap.String("was", cfg.Capture.Source))
+				cfg.Capture.Source = saved.Source
+			}
 			cfg.Capture.Device = saved.Device
 			cfg.Capture.Format = saved.Format
 			cfg.Capture.Width = saved.Width
