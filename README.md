@@ -472,6 +472,10 @@ this exists to move.
 
 - [A transfer, end to end](docs/DEMONSTRATION.md) — screenshots of the whole path, including the
   frames themselves and what the camera sees
+- **[Technical overview (PDF)](docs/report/optical-transport-overview.pdf)** — the whole system in twelve
+  pages, written for a non-specialist reader: the setup, measured throughput at each end, what a chunk is and
+  how the settings shape it, how a scanned frame is broken down and acknowledged, and how several
+  screen–camera pairs would scale it out
 - [Optimal configuration](docs/OPTIMAL-CONFIG.md) — which settings reach 1 MB/s, measured, and the
   ceiling that no configuration gets around
 - [Design](docs/superpowers/specs/2026-08-04-optical-transport-platform-design.md) — the approved
