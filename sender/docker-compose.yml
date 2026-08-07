@@ -104,6 +104,27 @@ services:
       # The agent's own inspection interface, which is where the public URL is read from.
       - "4040:4040"
 
+  # A second public address, from a different provider.
+  #
+  # Needed because a free ngrok account has exactly one endpoint: both sides define an ngrok tunnel and only one
+  # can be online at a time, so exposing sender and receiver at once takes two providers. Cloudflare's quick
+  # tunnels require no account and print their hostname on startup.
+  #
+  #   docker compose --profile public up -d
+  #   docker compose logs cloudflared | grep trycloudflare
+  #
+  # It has no password, which is the whole caveat: unlike the ngrok service above there is nowhere to put one, and
+  # the sender's API does not authenticate itself. Anyone who finds the address can upload a file, change the frame
+  # geometry, or cancel a transfer. Stop it when you are not testing:
+  #
+  #   docker compose stop cloudflared
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["public"]
+    depends_on: ["sender"]
+    command: ["tunnel", "--no-autoupdate", "--url", "http://sender:80"]
+    restart: unless-stopped
+
 volumes:
   sender-storage:
   sender-postgres:

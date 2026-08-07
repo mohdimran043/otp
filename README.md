@@ -366,27 +366,30 @@ inside it. The API binds to the container's loopback interface, so nginx is the 
 To watch the whole path on one host, [`demo/docker-compose.yml`](demo/docker-compose.yml) runs both
 sides plus a callback endpoint.
 
-## The public address
+## The public addresses
 
-Live now, tunnelled from this machine:
+Both sides, tunnelled from this machine:
 
-| | URL | Credentials |
+| | URL | Password |
 |---|---|---|
-| **Receiver** | **https://cinnamon-dandruff-deprecate.ngrok-free.dev** | in `receiver/.env` as `NGROK_BASIC_AUTH` |
-| Sender | `http://localhost:8080` | none |
+| **Sender** | **https://episode-northern-absence-carl.trycloudflare.com** | **none** |
+| **Receiver** | **https://cinnamon-dandruff-deprecate.ngrok-free.dev** | `NGROK_BASIC_AUTH` in `receiver/.env` |
 
-**One address, because a free ngrok account has one endpoint.** Both sides define a tunnel, but only one can be
-online at a time — starting the second fails with `ERR_NGROK_334`, "the endpoint is already online". The receiver
-is the side that gets it, and not arbitrarily: it is the side that needs HTTPS, because a browser will not hand a
-camera to an insecure page. The sender's display is watched on the machine's own screen at `localhost`, which a
-browser already treats as secure.
+**Two providers, because a free ngrok account has exactly one endpoint.** Both sides define an ngrok tunnel and
+only one can be online at a time — the second fails with `ERR_NGROK_334`, "the endpoint is already online". So the
+receiver keeps ngrok, where a password can be set, and the sender uses a Cloudflare quick tunnel, which needs no
+account at all.
 
-To swap which side is exposed:
+**The sender's address has no password, and that is the one thing to be careful about.** A quick tunnel has
+nowhere to put one and the sender's API does not authenticate itself, so anyone who finds the address can upload a
+file, change the frame geometry, or cancel a transfer. Stop it when you are not testing:
 
 ```bash
-cd receiver && docker compose --profile public stop ngrok
-cd ../sender && docker compose --profile public up -d ngrok
+cd sender && docker compose stop cloudflared
 ```
+
+Neither address is stable. Both die when the containers stop, and both providers hand out a different hostname
+next time — a free ngrok endpoint is persistent per account but the quick tunnel is not.
 
 ## Reaching it from a phone, or anywhere else
 
