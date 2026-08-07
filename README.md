@@ -366,6 +366,28 @@ inside it. The API binds to the container's loopback interface, so nginx is the 
 To watch the whole path on one host, [`demo/docker-compose.yml`](demo/docker-compose.yml) runs both
 sides plus a callback endpoint.
 
+## The public address
+
+Live now, tunnelled from this machine:
+
+| | URL | Credentials |
+|---|---|---|
+| **Receiver** | **https://cinnamon-dandruff-deprecate.ngrok-free.dev** | in `receiver/.env` as `NGROK_BASIC_AUTH` |
+| Sender | `http://localhost:8080` | none |
+
+**One address, because a free ngrok account has one endpoint.** Both sides define a tunnel, but only one can be
+online at a time — starting the second fails with `ERR_NGROK_334`, "the endpoint is already online". The receiver
+is the side that gets it, and not arbitrarily: it is the side that needs HTTPS, because a browser will not hand a
+camera to an insecure page. The sender's display is watched on the machine's own screen at `localhost`, which a
+browser already treats as secure.
+
+To swap which side is exposed:
+
+```bash
+cd receiver && docker compose --profile public stop ngrok
+cd ../sender && docker compose --profile public up -d ngrok
+```
+
 ## Reaching it from a phone, or anywhere else
 
 Each side can publish itself over HTTPS through an ngrok tunnel defined in its own compose file. It is behind a
