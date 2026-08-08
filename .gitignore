@@ -17,3 +17,6 @@ demo/chime.wav
 # created root-owned by the daemon, so they are neither ours to commit nor ours to remove.
 sender/shared/
 receiver/shared/
+
+# The design specification and any other superpowers working notes. Kept locally, not published.
+docs/superpowers/

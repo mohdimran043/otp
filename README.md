@@ -11,7 +11,7 @@ a frame lost to a flicker produces no error — only silence — so the sender n
 waits for good news over a separate channel, and does not move on without it.
 
 **[See a transfer end to end, with screenshots →](docs/DEMONSTRATION.md)** ·
-**[Technical overview (PDF) →](docs/report/optical-transport-overview.pdf)**
+**[Technical overview (PDF) →](docs/optical-transport-overview.pdf)**
 
 ---
 
@@ -87,7 +87,7 @@ frames per second  =  cores × 115 000 ÷ bytes per frame
 **7 MB/s is a multi-channel target.** Four screen–camera pairs at 1.8 MB/s each, carrying disjoint ranges
 of chunks of one file. The foundations exist — chunks are addressed by number, the database claims work
 atomically, acknowledgements are per chunk — but the range-claiming display loop is **designed and not yet
-built** ([overview](docs/report/optical-transport-overview.pdf), §8).
+built** ([overview](docs/optical-transport-overview.pdf), §8).
 
 ## Hardware you need
 
@@ -160,11 +160,10 @@ which is what lets either be restarted, upgraded or replaced while the other kee
 ## Documentation
 
 - [A transfer, end to end](docs/DEMONSTRATION.md) — screenshots of the whole path
-- [Technical overview (PDF)](docs/report/optical-transport-overview.pdf) — twelve pages for a
+- [Technical overview (PDF)](docs/optical-transport-overview.pdf) — twelve pages for a
   non-specialist reader: the setup, speed at each end, what a chunk is, how acknowledgement works, and how
   it would scale out
 - [Optimal configuration](docs/OPTIMAL-CONFIG.md) — every measured figure and what to set
-- [Design specification](docs/superpowers/specs/2026-08-04-optical-transport-platform-design.md)
 
 ## Security notes
 
