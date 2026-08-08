@@ -206,15 +206,24 @@ lowest-numbered device that actually declares video capture, in its largest mode
 
 ### What the hardware has to be
 
-| | Requirement | Why |
+Two columns, because the answer differs sharply between "1 MB/s on one channel" and "7 MB/s across
+several". The camera is where they diverge most.
+
+| | For ~1.5 MB/s, one channel | For 7 MB/s, four channels |
 |---|---|---|
-| Panel | 4K, ≥ 2 160 px vertical | The frame is 1 940 px square at the measured setting |
-| Panel refresh | ≥ 30 Hz | 25 fps with margin; 144 Hz is ample |
-| Camera resolution | ≥ 2× the frame's pixels on the sensor | A cell must land on several sensor pixels to be sampled reliably |
-| Camera frame rate | ≥ 2× the display rate | Frames must not be missed between exposures; the sender re-shows an unacknowledged frame, so this costs throughput rather than correctness |
-| Camera format | MJPG rather than raw | The same size is often 30 fps compressed and 5 fps uncompressed — the bus cannot carry raw frames faster |
-| Receiver CPU | ~9 cores for 1 MB/s | 115 KB/s per core, measured; frames decode concurrently, so cores are what set the rate |
-| Optics | Blur under a fifth of a cell | 8 px cells allow about 1.6 px of blur, 5 px allow 1.0, 4 px allow 0.8. This is the one argument for smaller grids: a 256×256 grid at 8 px cells is more tolerant of a marginal lens than 384×384 at 5 px, and slower. |
+| Geometry | 384×384 at 5 px — a 1 940 px frame | 512×512 at 4 px — a 2 064 px frame |
+| Panel | One 4K, ≥ 30 Hz | Four 4K, ≥ 60 Hz |
+| **Camera** | **1080p is sufficient** — 388 cells across a 1 080 px sensor is 2.8 pixels a cell | **4K required** — 516 cells across 1 080 px is only 2.09 pixels a cell, which leaves no margin at all. 4K gives 4.19 |
+| Camera frame rate | ≥ 2× the display rate | ≥ 60 fps, matched to the panel |
+| Camera format | MJPG — the same size is often 30 fps compressed against 5 fps raw, because the bus cannot carry raw frames faster | MJPG, and check the sensor actually offers 4K at 60 rather than 4K at 30 |
+| Shutter | Rolling is tolerable | Global preferred; a rolling shutter may catch a 60 Hz panel mid-refresh |
+| Receiver CPU | ~19 cores | ~19 cores **per channel**, so four machines |
+| Optics | Blur under a fifth of a cell — 5 px cells allow 1.0 px | 4 px cells allow **0.8 px**. This is the tightest constraint in the whole configuration |
+
+**The cell-size squeeze is the thing to watch.** Going from 5 px cells to 4 px to fit a larger grid on the
+same panel cuts the blur budget from 1.0 px to 0.8 px, at the same time as asking the camera to resolve
+more cells. A marginal lens will show up here before it shows up anywhere else, and the symptom is a decode
+rate that falls before any frame fails outright — which is why that figure is on the receiver's front page.
 
 ## Why not just turn everything up
 

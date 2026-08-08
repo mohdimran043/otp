@@ -366,6 +366,85 @@ inside it. The API binds to the container's loopback interface, so nginx is the 
 To watch the whole path on one host, [`demo/docker-compose.yml`](demo/docker-compose.yml) runs both
 sides plus a callback endpoint.
 
+## Reaching 7 MB/s
+
+7 MB/s is achievable, and it is worth being precise about what it costs, because the sending side is the
+easy half and the arithmetic on the receiving side is what actually decides it.
+
+**On the display: 7.24 MB/s, from settings alone.**
+
+| Setting | Value |
+|---|---|
+| Grid | **512×512** cells |
+| Cell size | 4 px — a **2 064 px** frame |
+| Encoding | `color16` — **126 480 bytes a frame** |
+| Frame rate | **60 fps** |
+| Result | **7.24 MB/s** before compression |
+
+That needs a 4K panel and a 60 Hz refresh, both ordinary. The sending side is not the constraint and never
+has been.
+
+### What it demands of the camera
+
+This is the requirement that changes, and the one most likely to be missed: **a 1080p webcam cannot do
+this.** A 512×512 grid plus its quiet zone is 516 cells across, and a sensor must resolve each cell well
+enough to take a reliable median of its pixels.
+
+| Camera | Sensor pixels per cell | Verdict |
+|---|---|---|
+| 1080p — the webcam used for every measurement here | **2.09** | **Not enough.** At barely two pixels a cell there is no margin for blur, tilt, or a lens that is not perfectly focused |
+| **4K** | **4.19** | **The minimum for this geometry.** Four pixels a cell leaves room for the blur a real lens introduces |
+| 8K | 8.37 | Comfortable, and unnecessary |
+
+Three further requirements follow from the frame rate rather than the geometry:
+
+- **≥ 60 fps capture**, matched to the display. A camera slower than the panel misses frames, and while the
+  acknowledgement rule means nothing is *lost*, every missed frame is throughput given away.
+- **A compressed transport format such as MJPG.** The same sensor often offers 4K at 30 fps compressed and
+  5 fps uncompressed, because the bus cannot carry raw frames faster.
+- **Global shutter, or a genuinely fast rolling shutter.** At 60 fps a rolling-shutter sensor may catch a
+  panel mid-refresh; the `rolling` encoding exists for exactly this and costs capacity to use.
+
+### What it demands of the receiver — the real constraint
+
+Decoding costs **85–115 KB/s per CPU core**, measured, and that figure barely moves with geometry. So:
+
+```
+7 MB/s ÷ 115 KB/s per core  =  64 cores            (86 at the pessimistic figure)
+```
+
+**No single machine in normal use has that.** The 20-core workstation every measurement here was taken on
+tops out at about **2.2 MB/s**, which is why 1.45 MB/s is the largest figure this repository can claim to
+have actually achieved.
+
+**So 7 MB/s is a multi-channel target, not a single-channel one.** Four screen–camera pairs, each carrying
+a disjoint range of chunks of the same file:
+
+| Channels | Per channel | Total | Hardware |
+|---|---|---|---|
+| 3 | 2.2 MB/s | 6.6 MB/s | 3 panels, 3 4K cameras, 3 machines |
+| **4** | **1.8 MB/s** | **7.2 MB/s** | 4 panels, 4 4K cameras, 4 machines |
+| 5 | 1.5 MB/s | 7.5 MB/s | Comfortable headroom on each |
+
+Four channels is the sensible shape: each runs at 1.8 MB/s, well inside what one ordinary machine decodes,
+so no channel is straining and one falling behind does not stall the others.
+
+**The scale-out itself is designed but not built.** The pieces that make it possible are already
+here — chunks are addressed by number rather than by position, the database claims work atomically with
+`SELECT … FOR UPDATE SKIP LOCKED`, and acknowledgements are per chunk and idempotent — but the display loop
+does not yet claim ranges and there is no per-channel accounting. The work is itemised in the
+[technical overview](docs/report/optical-transport-overview.pdf), §8.
+
+### Summary
+
+| | Single channel | 7 MB/s |
+|---|---|---|
+| Panel | 4K, 25 Hz | 4 × 4K, 60 Hz |
+| Camera | 1080p sufficient | **4 × 4K at 60 fps** |
+| Receiver | 1 machine, 20 cores | **4 machines, 20 cores each** |
+| Geometry | 384×384 @ 5 px | 512×512 @ 4 px |
+| Achieved | **1.45 MB/s, measured** | 7.2 MB/s, projected from measured per-channel figures |
+
 ## Reaching it from another machine
 
 Both interfaces are ordinary web applications on ports 8080 and 8081, so anything that can route to them
