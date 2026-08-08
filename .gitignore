@@ -24,3 +24,8 @@ docs/superpowers/
 # Kept locally rather than checked in: the end-to-end suite and the single-host demonstration stack.
 e2e/
 demo/
+
+# Also kept locally: the host setup notes and the containerised test stack. `make test` checks for the
+# compose file and falls back to the host toolchain when it is absent, so a clone without it still runs.
+PREREQUISITES.md
+docker-compose.test.yml

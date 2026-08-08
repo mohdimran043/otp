@@ -139,11 +139,14 @@ mode. It keeps watching, so one plugged in later is noticed — but it never ove
 make test
 ```
 
-Everything runs in containers — Go toolchain, both databases, MinIO. A clone plus Docker is enough.
+Three things are **kept outside this repository**: the containerised test stack that supplies the Go
+toolchain, both databases and MinIO; the end-to-end suite that drives both applications against each
+other under loss, degradation and every encoding; and the single-host demonstration stack.
 
-The end-to-end suite that drives both applications against each other — loss, degradation, encryption,
-every encoding, callback success and failure — is **kept outside this repository**, along with the
-single-host demonstration stack. `make test` notices it is absent and runs the rest rather than failing.
+`make test` notices what is absent rather than failing on it. Without the container stack it runs the
+suite against your host toolchain, and **every test needing Postgres or MinIO skips rather than runs** —
+so read the skips. A pass from a bare clone is a narrower claim than a pass with the full stack, and the
+unit tests below are what remains true either way.
 
 | Suite | Covers |
 |---|---|
