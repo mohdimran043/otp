@@ -74,57 +74,6 @@ services:
       retries: 12
     restart: unless-stopped
 
-  # A public HTTPS address for this side, so a phone or another machine can reach it.
-  #
-  # HTTPS is not a nicety here: a browser will not hand a camera to an insecure page, so capturing with a phone's
-  # camera needs a real certificate — and a tunnel is the shortest way to one. localhost is the only other context
-  # a browser treats as secure, which does not help a phone.
-  #
-  # Started only when asked for, with `--profile public`, because a service that publishes itself the moment
-  # somebody runs `docker compose up` is not one anybody should ship:
-  #
-  #   docker compose --profile public up -d
-  ngrok:
-    image: ngrok/ngrok:latest
-    profiles: ["public"]
-    depends_on: ["sender"]
-    environment:
-      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:?set NGROK_AUTHTOKEN in sender/.env}
-    # Basic auth by default, and deliberately.
-    #
-    # Neither application authenticates its own API — that is still outstanding — so a public address without a
-    # password lets anyone who finds it upload files, change the frame geometry, cancel transfers, start a camera
-    # and read what has arrived. One flag is a poor substitute for real authentication and a great deal better
-    # than none. Remove --basic-auth only if the address is genuinely meant to be open.
-    command:
-      - http
-      - --basic-auth=${NGROK_BASIC_AUTH:-otp:change-this-password}
-      - sender:80
-    ports:
-      # The agent's own inspection interface, which is where the public URL is read from.
-      - "4040:4040"
-
-  # A second public address, from a different provider.
-  #
-  # Needed because a free ngrok account has exactly one endpoint: both sides define an ngrok tunnel and only one
-  # can be online at a time, so exposing sender and receiver at once takes two providers. Cloudflare's quick
-  # tunnels require no account and print their hostname on startup.
-  #
-  #   docker compose --profile public up -d
-  #   docker compose logs cloudflared | grep trycloudflare
-  #
-  # It has no password, which is the whole caveat: unlike the ngrok service above there is nowhere to put one, and
-  # the sender's API does not authenticate itself. Anyone who finds the address can upload a file, change the frame
-  # geometry, or cancel a transfer. Stop it when you are not testing:
-  #
-  #   docker compose stop cloudflared
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    profiles: ["public"]
-    depends_on: ["sender"]
-    command: ["tunnel", "--no-autoupdate", "--url", "http://sender:80"]
-    restart: unless-stopped
-
 volumes:
   sender-storage:
   sender-postgres:

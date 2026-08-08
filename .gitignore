@@ -11,3 +11,9 @@ node_modules/
 demo/shared/
 demo/colour-test.png
 demo/chime.wav
+
+# Bind-mount directories Docker creates in the working tree when a side is run from its own compose
+# file. They hold the shared channel — frames going one way, acknowledgements coming back — and are
+# created root-owned by the daemon, so they are neither ours to commit nor ours to remove.
+sender/shared/
+receiver/shared/

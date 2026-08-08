@@ -74,36 +74,6 @@ services:
       retries: 12
     restart: unless-stopped
 
-  # A public HTTPS address for this side, so a phone or another machine can reach it.
-  #
-  # HTTPS is not a nicety here: a browser will not hand a camera to an insecure page, so capturing with a phone's
-  # camera needs a real certificate — and a tunnel is the shortest way to one. localhost is the only other context
-  # a browser treats as secure, which does not help a phone.
-  #
-  # Started only when asked for, with `--profile public`, because a service that publishes itself the moment
-  # somebody runs `docker compose up` is not one anybody should ship:
-  #
-  #   docker compose --profile public up -d
-  ngrok:
-    image: ngrok/ngrok:latest
-    profiles: ["public"]
-    depends_on: ["receiver"]
-    environment:
-      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:?set NGROK_AUTHTOKEN in receiver/.env}
-    # Basic auth by default, and deliberately.
-    #
-    # Neither application authenticates its own API — that is still outstanding — so a public address without a
-    # password lets anyone who finds it upload files, change the frame geometry, cancel transfers, start a camera
-    # and read what has arrived. One flag is a poor substitute for real authentication and a great deal better
-    # than none. Remove --basic-auth only if the address is genuinely meant to be open.
-    command:
-      - http
-      - --basic-auth=${NGROK_BASIC_AUTH:-otp:change-this-password}
-      - receiver:80
-    ports:
-      # The agent's own inspection interface, which is where the public URL is read from.
-      - "4041:4040"
-
 volumes:
   receiver-storage:
   receiver-postgres:

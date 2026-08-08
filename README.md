@@ -366,58 +366,21 @@ inside it. The API binds to the container's loopback interface, so nginx is the 
 To watch the whole path on one host, [`demo/docker-compose.yml`](demo/docker-compose.yml) runs both
 sides plus a callback endpoint.
 
-## The public addresses
+## Reaching it from another machine
 
-Both sides, tunnelled from this machine:
+Both interfaces are ordinary web applications on ports 8080 and 8081, so anything that can route to them
+works: a LAN address, a reverse proxy, an SSH tunnel, or any of the hosted tunnelling services.
 
-| | URL | Password |
-|---|---|---|
-| **Sender** | **https://episode-northern-absence-carl.trycloudflare.com** | **none** |
-| **Receiver** | **https://cinnamon-dandruff-deprecate.ngrok-free.dev** | `NGROK_BASIC_AUTH` in `receiver/.env` |
+**One requirement is not negotiable, and it is easy to miss.** A browser will not hand a camera to an
+insecure page. `localhost` is the only origin it treats as secure without a certificate — which does not
+help a phone, because a phone cannot reach your `localhost`. So capturing with a phone's camera needs the
+receiver served over **HTTPS**, however you arrange it.
 
-**Two providers, because a free ngrok account has exactly one endpoint.** Both sides define an ngrok tunnel and
-only one can be online at a time — the second fails with `ERR_NGROK_334`, "the endpoint is already online". So the
-receiver keeps ngrok, where a password can be set, and the sender uses a Cloudflare quick tunnel, which needs no
-account at all.
-
-**The sender's address has no password, and that is the one thing to be careful about.** A quick tunnel has
-nowhere to put one and the sender's API does not authenticate itself, so anyone who finds the address can upload a
-file, change the frame geometry, or cancel a transfer. Stop it when you are not testing:
-
-```bash
-cd sender && docker compose stop cloudflared
-```
-
-Neither address is stable. Both die when the containers stop, and both providers hand out a different hostname
-next time — a free ngrok endpoint is persistent per account but the quick tunnel is not.
-
-## Reaching it from a phone, or anywhere else
-
-Each side can publish itself over HTTPS through an ngrok tunnel defined in its own compose file. It is behind a
-profile, because a service that publishes itself the moment somebody runs `docker compose up` is not one anybody
-should ship.
-
-```bash
-# Once, per side: put your token in sender/.env and receiver/.env
-#   NGROK_AUTHTOKEN=...            from https://dashboard.ngrok.com/get-started/your-authtoken
-#   NGROK_BASIC_AUTH=user:password
-cd sender   && docker compose --profile public up -d
-cd receiver && docker compose --profile public up -d
-
-# The public addresses, read from each agent's own inspector
-curl -s localhost:4040/api/tunnels | python3 -c 'import json,sys;print(json.load(sys.stdin)["tunnels"][0]["public_url"])'
-curl -s localhost:4041/api/tunnels | python3 -c 'import json,sys;print(json.load(sys.stdin)["tunnels"][0]["public_url"])'
-```
-
-**HTTPS is not a nicety here.** A browser will not hand a camera to an insecure page, and `localhost` is the only
-other context it treats as secure — which does not help a phone. So a tunnel is the shortest route to capturing
-with a phone's camera at all.
-
-**Both tunnels have basic auth on by default, deliberately.** Neither application authenticates its own API yet,
-so a public address without a password lets anyone who finds it upload files, change the frame geometry, cancel
-transfers, start a camera and read what has arrived. One flag is a poor substitute for real authentication and a
-great deal better than none. Remove `--basic-auth` from the compose file only if the address is genuinely meant
-to be open.
+**Before exposing either side to a network you do not control**, note that neither application authenticates
+its own API yet. Anyone who can reach the sender can upload a file, change the frame geometry or cancel a
+transfer; anyone who can reach the receiver can start a camera and read what has arrived. Put
+authentication in front of them — HTTP basic auth at a reverse proxy is enough for a trial — or keep them on
+a trusted network.
 
 ## On a phone
 
