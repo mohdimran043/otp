@@ -10,6 +10,9 @@ declared before anything was drawn.
 a frame lost to a flicker produces no error — only silence — so the sender never waits for bad news. It
 waits for good news over a separate channel, and does not move on without it.
 
+A chunk is displayed repeatedly until a signed acknowledgement for it arrives. Nothing else promises
+delivery; error correction is an optimisation on top, not the guarantee.
+
 **[See a transfer end to end, with screenshots →](docs/DEMONSTRATION.md)** ·
 **[Technical overview (PDF) →](docs/optical-transport-overview.pdf)**
 
@@ -35,8 +38,8 @@ curl -X POST http://localhost:8080/api/v1/transfers \
     -F "callback_url=https://intake.example.com/received"
 ```
 
-To watch the whole path on one machine, [`demo/docker-compose.yml`](demo/docker-compose.yml) runs both
-sides plus a callback endpoint.
+Both sides need one directory in common — an NFS mount, a SAN, or a synced share. Frames go one way
+through it; acknowledgements come back the other.
 
 ## Transfer speed
 
@@ -138,12 +141,15 @@ make test
 
 Everything runs in containers — Go toolchain, both databases, MinIO. A clone plus Docker is enough.
 
+The end-to-end suite that drives both applications against each other — loss, degradation, encryption,
+every encoding, callback success and failure — is **kept outside this repository**, along with the
+single-host demonstration stack. `make test` notices it is absent and runs the rest rather than failing.
+
 | Suite | Covers |
 |---|---|
 | [`shared`](shared) | Protocol, five encodings against simulated optics, five compressors, four error-correcting codes, RFC 6330 conformance |
 | [`sender`](sender) | Configuration, migrations, the job engine under concurrency, object stores, the pipeline |
 | [`receiver`](receiver) | Camera enumeration, capture sources, decoding, object stores |
-| [`e2e`](e2e) | Both applications together: loss, degradation, encryption, every encoding, callback success and failure |
 
 ## How it is put together
 
@@ -151,11 +157,11 @@ Everything runs in containers — Go toolchain, both databases, MinIO. A clone p
 shared/     Protocol only: frame format, encodings, compression, error correction. No DB, no HTTP.
 sender/     Go + React. Compresses, chunks, codes, renders, displays, watches for acknowledgements.
 receiver/   Go + React. Captures, decodes, acknowledges, merges, verifies, delivers.
-e2e/        Runs both together. Imports each side's harness, never their internals.
 ```
 
 The two applications **do not import each other**. They share a protocol, a directory, and nothing else —
-which is what lets either be restarted, upgraded or replaced while the other keeps running.
+which is what lets either be restarted, upgraded or replaced while the other keeps running. Each exposes a
+`harness` package so an out-of-tree test can drive a whole side without reaching into its internals.
 
 ## Documentation
 

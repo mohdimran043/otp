@@ -20,3 +20,7 @@ receiver/shared/
 
 # The design specification and any other superpowers working notes. Kept locally, not published.
 docs/superpowers/
+
+# Kept locally rather than checked in: the end-to-end suite and the single-host demonstration stack.
+e2e/
+demo/
