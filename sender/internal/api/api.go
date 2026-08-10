@@ -546,6 +546,17 @@ func (s *Server) getTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Migration 004 added encryption_id; every row that predates it defaults to 0 ("none")
+	// there regardless of what it actually carries. Such a row's Encrypted flag was set by
+	// the single global-key scheme this feature replaced, which only ever meant one cipher,
+	// AES-256-GCM — so a row with Encrypted true and EncryptionID still at its zero-value
+	// default is reporting a gap in the migration, not an unencrypted transfer, and must say
+	// so rather than repeat the default.
+	encryptionName := protocol.EncryptionName(uint8(tx.EncryptionID))
+	if tx.Encrypted && tx.EncryptionID == 0 {
+		encryptionName = protocol.EncryptionName(protocol.EncryptionAES256GCM)
+	}
+
 	status := TransferStatus{
 		TransmissionID: tx.ID,
 		Filename:       file.Filename,
@@ -563,7 +574,7 @@ func (s *Server) getTransfer(w http.ResponseWriter, r *http.Request) {
 		Encoder:        tx.Encoder,
 		Compression:    tx.Compression,
 		FECCodec:       tx.FECCodec,
-		Encryption:     protocol.EncryptionName(uint8(tx.EncryptionID)),
+		Encryption:     encryptionName,
 		GridWidth:      tx.GridWidth,
 		GridHeight:     tx.GridHeight,
 		Error:          tx.Error,
@@ -749,6 +760,13 @@ func (s *Server) listProfiles(w http.ResponseWriter, r *http.Request) {
 			"grid":        fmt.Sprintf("%dx%d", cfg.Optical.GridWidth, cfg.Optical.GridHeight),
 			"cell_pixels": cfg.Optical.CellPixels,
 			"fps":         cfg.Display.FPS,
+			// encryption_configured tells the form whether leaving the encryption field
+			// untouched means "plaintext" or "whatever this deployment did before this
+			// feature": parseTransferRequest treats an omitted field as "encrypt under the
+			// global key" exactly when one is configured. The key itself never appears here —
+			// only whether one exists — so a form can match that behaviour without the browser
+			// ever holding key material.
+			"encryption_configured": cfg.Optical.EncryptionKeyHex != "",
 		},
 	})
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/opticaltransport/otp/sender/internal/ackwatch"
 	"github.com/opticaltransport/otp/sender/internal/config"
 	"github.com/opticaltransport/otp/sender/internal/objectstore"
 	"github.com/opticaltransport/otp/sender/internal/store"
@@ -50,11 +51,17 @@ func newArchiveHarness(t *testing.T) *archiveHarness {
 	t.Cleanup(func() { require.NoError(t, objects.Close()) })
 
 	st := store.New(pool)
+	watcher := config.NewWatcher("", cfg)
 	handler := New(Options{
 		Store:   st,
 		Objects: objects,
-		Config:  config.NewWatcher("", cfg),
+		Config:  watcher,
 		Log:     zap.NewNop(),
+		// getTransfer reads through Acks unconditionally, so any test that hits it needs a
+		// real watcher rather than a nil one — even the harness's other tests, which never
+		// call getTransfer, would otherwise leave that field a landmine for the next test
+		// added here.
+		Acks: ackwatch.New(st, watcher, zap.NewNop()),
 	}).Routes()
 
 	return &archiveHarness{store: st, objects: objects, handler: handler}

@@ -57,11 +57,22 @@ export function NewTransfer() {
   const [compression, setCompression] = useState(lastProfile.compression)
   const [fecCodec, setFecCodec] = useState(lastProfile.fecCodec)
   const [level, setLevel] = useState<number>(0)
-  const [encryption, setEncryption] = useState('none')
+  // '' means "the operator has not touched this dropdown" — its effective value below
+  // follows the server's answer once profiles loads, rather than being frozen at whatever
+  // guess was made on the first render.
+  const [encryption, setEncryption] = useState('')
   const [keyHex, setKeyHex] = useState('')
   const [grid, setGrid] = useState<'auto' | number>('auto')
 
   const defaults = profiles.data?.defaults
+
+  // A deployment with a global encryption key configured has always encrypted a transfer
+  // that says nothing about encryption at all (see parseTransferRequest's legacy path); one
+  // without a key has always sent it in the clear. Untouched, this form must default to
+  // whichever of those the deployment actually does — never silently to "none" — so the
+  // encryption choice a caller sees matches what leaving it alone has always meant.
+  const effectiveEncryption =
+    encryption || (defaults?.encryption_configured ? 'default' : 'none')
 
   const keyValid = /^[0-9a-fA-F]{64}$/.test(keyHex.trim())
 
@@ -76,8 +87,14 @@ export function NewTransfer() {
       if (compression) form.append('compression', compression)
       if (fecCodec) form.append('fec_codec', fecCodec)
       if (level > 0) form.append('level', String(level))
-      if (encryption !== 'none') {
-        form.append('encryption', encryption)
+      // "default" omits the field entirely rather than sending "none" or the deployment's
+      // key type explicitly — that omission is exactly what parseTransferRequest reads as
+      // "do what this deployment has always done", which is the legacy behaviour this
+      // option exists to preserve.
+      if (effectiveEncryption === 'default') {
+        // Deliberately nothing appended.
+      } else if (effectiveEncryption !== 'none') {
+        form.append('encryption', effectiveEncryption)
         form.append('encryption_key_hex', keyHex.trim())
       } else {
         form.append('encryption', 'none')
@@ -202,9 +219,12 @@ export function NewTransfer() {
                   select
                   fullWidth
                   label="Encryption"
-                  value={encryption}
+                  value={effectiveEncryption}
                   onChange={(event) => setEncryption(event.target.value)}
                 >
+                  {defaults?.encryption_configured && (
+                    <MenuItem value="default">Deployment default (encrypted)</MenuItem>
+                  )}
                   <MenuItem value="none">
                     None — anyone who can see the display can read the file
                   </MenuItem>
@@ -213,7 +233,7 @@ export function NewTransfer() {
                 </TextField>
               </Grid>
 
-              {encryption !== 'none' && (
+              {effectiveEncryption !== 'none' && effectiveEncryption !== 'default' && (
                 <Grid>
                   <TextField
                     fullWidth
@@ -292,7 +312,11 @@ export function NewTransfer() {
               <Button
                 variant="contained"
                 size="large"
-                disabled={!file || submit.isPending || (encryption !== 'none' && !keyValid)}
+                disabled={
+                  !file ||
+                  submit.isPending ||
+                  (effectiveEncryption !== 'none' && effectiveEncryption !== 'default' && !keyValid)
+                }
                 onClick={() => submit.mutate()}
               >
                 {submit.isPending ? 'Uploading…' : 'Start the transfer'}

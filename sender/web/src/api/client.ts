@@ -216,6 +216,11 @@ export interface Profiles {
     grid: string
     cell_pixels: number
     fps: number
+    // encryption_configured is true when this deployment has a global encryption key set
+    // (OTP_SENDER_ENCRYPTION_KEY_HEX). It never carries the key itself — only whether one
+    // exists — which is enough for the form to pick a default that matches what the API
+    // does with an omitted encryption field: encrypt under that key.
+    encryption_configured: boolean
   }
 }
 

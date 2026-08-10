@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -144,4 +145,47 @@ func TestParseTransferRequestRejectsAGridTheEncoderCannotCarryAtTheResolvedDepth
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cannot carry the binary encoding")
 	require.Contains(t, err.Error(), "does not offer depth 4")
+}
+
+// TestListProfilesReportsWhetherEncryptionIsConfiguredButNeverTheKey covers the form's other
+// half of the legacy-encryption guarantee: NewTransfer.tsx needs to know whether an omitted
+// encryption field means "plaintext" or "encrypt under the global key" before it can default
+// to the right one, and it can only learn that safely if the key itself never leaves the server.
+func TestListProfilesReportsWhetherEncryptionIsConfiguredButNeverTheKey(t *testing.T) {
+	key := strings.Repeat("cd", 32)
+
+	cases := []struct {
+		name       string
+		keyHex     string
+		configured bool
+	}{
+		{name: "no key configured", keyHex: "", configured: false},
+		{name: "key configured", keyHex: key, configured: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Optical.EncryptionKeyHex = tc.keyHex
+			handler := New(Options{
+				Config: config.NewWatcher("", cfg),
+				Log:    zap.NewNop(),
+			}).Routes()
+
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/profiles", nil))
+			require.Equal(t, http.StatusOK, response.Code)
+
+			require.NotContains(t, response.Body.String(), key,
+				"the profiles response must never carry key material")
+
+			var body struct {
+				Defaults struct {
+					EncryptionConfigured bool `json:"encryption_configured"`
+				} `json:"defaults"`
+			}
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &body))
+			require.Equal(t, tc.configured, body.Defaults.EncryptionConfigured)
+		})
+	}
 }

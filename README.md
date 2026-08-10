@@ -157,12 +157,12 @@ the operator's job to carry it to the receiver's **Settings** page — over a ph
 a second air-gapped channel, anything that is not the optical one. No API returns key material once it is
 stored, and the key itself never crosses the light.
 
-**The honest caveat.** A manifest's filename and content hashes are not part of the encrypted payload and
-stay readable to anyone watching the display — the receiver needs them before it has the key, to know what
-it is assembling and to verify it afterwards. And encryption protects the optical channel specifically: the
-sender's own database holds the uploaded file in plaintext regardless, because it has to, to render the
-frames in the first place. Encrypting a transfer answers "who else can see the screen," not "who can reach
-the sender."
+**The honest caveat.** A manifest's filename, content hashes, and callback URL are not part of the encrypted
+payload and stay readable to anyone watching the display — the receiver needs them before it has the key, to
+know what it is assembling, to verify it afterwards, and to know where to deliver it. And encryption protects
+the optical channel specifically: the sender's own database holds the uploaded file in plaintext regardless,
+because it has to, to render the frames in the first place. Encrypting a transfer answers "who else can see
+the screen," not "who can reach the sender."
 
 ## Moving frames without light
 
