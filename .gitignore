@@ -18,6 +18,10 @@ demo/chime.wav
 sender/shared/
 receiver/shared/
 
+# A shared optical directory pointed to by OTP_SHARED_DIR when it lives at the repo root instead of
+# inside either side's own directory. Same reasoning: root-owned frame/ack traffic, not ours to commit.
+/shared-channel/
+
 # The design specification and any other superpowers working notes. Kept locally, not published.
 docs/superpowers/
 
