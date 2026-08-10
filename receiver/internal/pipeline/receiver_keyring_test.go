@@ -3,6 +3,7 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ func TestKeyringIsConfiguredKeyThenStoredKeys(t *testing.T) {
 
 	configured := bytes.Repeat([]byte{0xAA}, 32)
 	cfg := config.Default()
-	cfg.Decoder.EncryptionKeyHex = hexString(configured)
+	cfg.Decoder.EncryptionKeyHex = hex.EncodeToString(configured)
 	r := &Receiver{store: st, cfg: config.NewWatcher("", cfg), log: zap.NewNop()}
 
 	// With nothing loaded yet, the ring holds only the configured key.
@@ -67,12 +68,3 @@ func TestKeyringCachesForAFewSeconds(t *testing.T) {
 	require.Len(t, r.keyring(ctx), 1)
 }
 
-func hexString(b []byte) string {
-	const digits = "0123456789abcdef"
-	out := make([]byte, len(b)*2)
-	for i, c := range b {
-		out[i*2] = digits[c>>4]
-		out[i*2+1] = digits[c&0x0f]
-	}
-	return string(out)
-}
