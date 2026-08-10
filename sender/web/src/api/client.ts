@@ -49,6 +49,9 @@ export interface TransferStatus {
   encoder: string
   compression: string
   fec_codec: string
+  encryption: string
+  grid_width: number
+  grid_height: number
   error?: string
   result?: ResultView
 }
@@ -270,6 +273,11 @@ export const api = {
   // number the receiver reports when a decode fails.
   frameImage: (id: string, frameNumber: number) =>
     `/api/v1/transfers/${id}/frames/${frameNumber}/image`,
+
+  // frameArchiveUrl is the whole-transfer download: every frame the display rendered, zipped (or the
+  // single composite PNG when there is only one), so an operator can hand the images to a receiver that
+  // has no camera at all.
+  frameArchiveUrl: (id: string) => `/api/v1/transfers/${id}/frames/archive`,
 
   // Stopping a transfer. A status change on the row, which the display loop reads every frame — so a stop
   // takes effect within one frame interval rather than needing the process restarted.

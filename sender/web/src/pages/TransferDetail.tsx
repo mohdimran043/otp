@@ -3,6 +3,7 @@ import {
   Alert,
   AlertTitle,
   Box,
+  Button,
   Chip,
   LinearProgress,
   Paper,
@@ -283,9 +284,19 @@ export function TransferDetail() {
       )}
 
       <Paper variant="outlined" sx={{ p: 2 }}>
-        <Typography variant="subtitle1" sx={{ mb: 1 }}>
-          Frames
-        </Typography>
+        <Stack direction="row" alignItems="center" spacing={2} sx={{ mb: 1 }}>
+          <Typography variant="subtitle1">Frames</Typography>
+          <Box sx={{ flexGrow: 1 }} />
+          <Button
+            size="small"
+            variant="outlined"
+            component="a"
+            href={api.frameArchiveUrl(id)}
+            disabled={(transfer.data?.frame_count ?? 0) === 0}
+          >
+            Download frames
+          </Button>
+        </Stack>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           {(frames.data ?? []).length} rendered ·{' '}
           {(frames.data ?? []).filter((f) => f.is_manifest).length} of them manifests ·{' '}
