@@ -159,6 +159,33 @@ export interface KeyView {
   created_at: string
 }
 
+// ImportEntry is one image the importer looked at inside an uploaded archive — a zip entry, or
+// one half of a split composite PNG. It mirrors the receiver's pipeline.IngestResult (decoded,
+// is_manifest, transmission_id, chunk_number, error) plus the two fields the import endpoint
+// itself adds: which file this was, and why it was skipped before ever reaching the pipeline
+// (wrong extension, unreadable, too large, not a decodable PNG).
+export interface ImportEntry {
+  name: string
+  decoded?: boolean
+  is_manifest?: boolean
+  transmission_id?: string
+  chunk_number?: number
+  error?: string
+  skipped?: string
+}
+
+// ImportSummary is exactly what POST /api/v1/import responds with. `transmissions` carries the
+// ids themselves, sorted, so the page can link straight to one rather than merely counting them.
+// `truncated` is present only when the import stopped early (the caller went away, or the
+// request's own deadline passed) — its absence means "no".
+export interface ImportSummary {
+  entries: ImportEntry[]
+  ingested: number
+  skipped: number
+  transmissions: string[]
+  truncated?: boolean
+}
+
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
     super(message)
@@ -222,6 +249,16 @@ export const api = {
       body: JSON.stringify({ key_hex: keyHex, label }),
     }),
   deleteKey: (id: number) => request<void>(`/api/v1/keys/${id}`, { method: 'DELETE' }),
+
+  // importFrames replays a downloaded frame archive (a zip of frame PNGs, or the single
+  // composite PNG a one-chunk transfer produces) into the running pipeline. No Content-Type is
+  // set here — the browser fills in the multipart boundary itself, and overriding it would
+  // strip that boundary out from under `body`.
+  importFrames: (file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request<ImportSummary>('/api/v1/import', { method: 'POST', body })
+  },
 
   cameras: () => request<CamerasView>('/api/v1/cameras'),
 
