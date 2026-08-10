@@ -100,6 +100,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/transfers/{id}/chunks", s.listChunks)
 	mux.HandleFunc("GET /api/v1/transfers/{id}/frames", s.listFrames)
 	mux.HandleFunc("GET /api/v1/transfers/{id}/frames/{number}/image", s.getFrameImage)
+	// The sneakernet path: every frame as one download, for a USB stick instead of a camera.
+	mux.HandleFunc("GET /api/v1/transfers/{id}/frames/archive", s.getFrameArchive)
 	// The file as it was uploaded, so both ends of a transfer can be looked at side by side.
 	mux.HandleFunc("GET /api/v1/transfers/{id}/file", s.getOriginalFile)
 	mux.HandleFunc("GET /api/v1/transfers/{id}/jobs", s.listJobs)
