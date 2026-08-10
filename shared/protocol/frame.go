@@ -39,7 +39,7 @@ const (
 	// than a source chunk.
 	FlagParity Flags = 1 << 1
 
-	// FlagEncrypted marks a payload encrypted with AES-256-GCM.
+	// FlagEncrypted marks an encrypted payload; Header.EncryptionID names the cipher.
 	FlagEncrypted Flags = 1 << 2
 
 	// FlagLastChunk marks the final source chunk of a transmission.
@@ -116,7 +116,12 @@ type Header struct {
 	TotalChunks    uint32    `json:"total_chunks"`
 	PayloadLength  uint32    `json:"payload_length"`
 	TimestampMS    uint64    `json:"timestamp_ms"`
-	Reserved       [8]byte   `json:"-"`
+	// EncryptionID names the AEAD the payload was sealed with (see crypt.go). Zero is
+	// both "not encrypted" and, on frames that set FlagEncrypted anyway, the legacy
+	// AES-256-GCM of builds that predate the field — which is why it occupies the first
+	// formerly-reserved byte rather than a new record: old frames already carry a zero here.
+	EncryptionID uint8   `json:"encryption_id"`
+	Reserved     [7]byte `json:"-"`
 }
 
 // Timestamp returns the header time as a Go time value.
@@ -146,7 +151,8 @@ func (h Header) MarshalBinary() ([]byte, error) {
 	binary.BigEndian.PutUint32(b[64:68], h.TotalChunks)
 	binary.BigEndian.PutUint32(b[68:72], h.PayloadLength)
 	binary.BigEndian.PutUint64(b[72:80], h.TimestampMS)
-	copy(b[80:88], h.Reserved[:])
+	b[80] = h.EncryptionID
+	copy(b[81:88], h.Reserved[:])
 	binary.BigEndian.PutUint32(b[88:92], crc32.ChecksumIEEE(b[0:88]))
 	return b, nil
 }
@@ -186,7 +192,8 @@ func (h *Header) UnmarshalBinary(b []byte) error {
 	h.TotalChunks = binary.BigEndian.Uint32(b[64:68])
 	h.PayloadLength = binary.BigEndian.Uint32(b[68:72])
 	h.TimestampMS = binary.BigEndian.Uint64(b[72:80])
-	copy(h.Reserved[:], b[80:88])
+	h.EncryptionID = b[80]
+	copy(h.Reserved[:], b[81:88])
 	return nil
 }
 

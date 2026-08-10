@@ -160,3 +160,32 @@ func TestVersionSupport(t *testing.T) {
 	assert.ErrorIs(t, CheckVersion(Current+1), ErrUnsupportedVersion)
 	require.NotEmpty(t, Versions())
 }
+
+func TestHeaderEncryptionIDRoundTrip(t *testing.T) {
+	h := Header{
+		Version:        Current,
+		Flags:          FlagEncrypted,
+		EncryptionID:   2,
+		TransmissionID: uuid.New(),
+	}
+	b, err := h.MarshalBinary()
+	require.NoError(t, err)
+	require.Equal(t, byte(2), b[80], "the encryption id is wire byte 80, the first former reserved byte")
+
+	var got Header
+	require.NoError(t, got.UnmarshalBinary(b))
+	require.Equal(t, uint8(2), got.EncryptionID)
+}
+
+func TestHeaderEncryptionIDZeroIsLegacyLayout(t *testing.T) {
+	// A header written before the field existed carries zeroes at byte 80; it must
+	// unmarshal to EncryptionID 0 with nothing else disturbed.
+	var h Header
+	h.Version = Current
+	b, err := h.MarshalBinary()
+	require.NoError(t, err)
+	var got Header
+	require.NoError(t, got.UnmarshalBinary(b))
+	require.Equal(t, uint8(0), got.EncryptionID)
+	require.Equal(t, [7]byte{}, got.Reserved)
+}
