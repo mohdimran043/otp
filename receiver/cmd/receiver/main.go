@@ -235,6 +235,16 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 				}
 				return browser.Push(img, raw)
 			},
+			// Imports replay a frame archive into the live pipeline, exactly as though a camera had
+			// seen each frame. Ingest is a method value on the running receiver, so it needs no
+			// wrapping — its signature already matches what the API package wants.
+			Ingest: receiver.Ingest,
+			// Probe answers the one question the API package must not have to know how to answer
+			// itself: does this image decode as a frame. The importer uses it to tell a composite of
+			// two stacked frames from an ordinary single one.
+			Probe: func(img image.Image) bool {
+				return pipeline.Decodable(img, watcher.Current())
+			},
 			Switch: func(next config.Capture) error {
 				if err := channel.Swap(next); err != nil {
 					return err

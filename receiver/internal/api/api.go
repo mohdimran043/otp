@@ -7,6 +7,7 @@
 package api
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/opticaltransport/otp/receiver/internal/config"
 	"github.com/opticaltransport/otp/receiver/internal/objectstore"
+	"github.com/opticaltransport/otp/receiver/internal/pipeline"
 	"github.com/opticaltransport/otp/receiver/internal/store"
 )
 
@@ -50,6 +52,17 @@ type Server struct {
 	// pushFrame hands a frame captured by a browser to the running source. Nil when this build or deployment
 	// cannot take them, which the handler reports rather than accepting frames into nothing.
 	pushFrame func(image.Image, []byte) (bool, error)
+
+	// ingest runs one uploaded frame image through the live pipeline: store, decode, apply — the same
+	// path a captured frame takes, so acknowledgements, merge, and delivery all fire as normal. Nil when
+	// this build or deployment cannot take imports.
+	ingest func(context.Context, image.Image, []byte) (pipeline.IngestResult, error)
+
+	// probe reports whether an image decodes as a frame, without storing anything. The import handler
+	// uses it to tell a composite of two stacked frames from a single ordinary one — deciding that is a
+	// decode question, and the API package must not know how decoding works, so it is injected exactly
+	// like ingest is.
+	probe func(image.Image) bool
 }
 
 // Options configure a server.
@@ -62,6 +75,8 @@ type Options struct {
 	Behind  func() int64
 	Switch  func(config.Capture) error
 	Push    func(image.Image, []byte) (bool, error)
+	Ingest  func(context.Context, image.Image, []byte) (pipeline.IngestResult, error)
+	Probe   func(image.Image) bool
 }
 
 // New returns a server.
@@ -75,6 +90,8 @@ func New(opts Options) *Server {
 		capture:      opts.Behind,
 		switchSource: opts.Switch,
 		pushFrame:    opts.Push,
+		ingest:       opts.Ingest,
+		probe:        opts.Probe,
 	}
 }
 
@@ -97,6 +114,9 @@ func (s *Server) Routes() http.Handler {
 	// Frames posted by a browser holding the camera — the path that can actually ask permission.
 	mux.HandleFunc("POST /api/v1/capture/frames", s.postFrame)
 	mux.HandleFunc("GET /api/v1/frames/{id}/image", s.frameImage)
+	// The sneakernet path: a frame archive replayed into the live pipeline exactly as though a
+	// camera had seen each frame.
+	mux.HandleFunc("POST /api/v1/import", s.postImport)
 	mux.HandleFunc("GET /api/v1/config", s.getConfig)
 
 	// The decryption keyring: keys go in and fingerprints come out, never the key itself.
