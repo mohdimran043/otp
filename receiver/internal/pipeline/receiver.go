@@ -117,19 +117,6 @@ func (r *Receiver) Run(ctx context.Context) error {
 		zap.String("session", session.ID.String()),
 		zap.String("source", r.source.Name()))
 
-	// running and runDone bracket the span in which the applier loop below can actually
-	// receive from injected. Set only now, rather than at the very top of Run — r.session is
-	// plain, unsynchronised state that prepare reads for every frame it stores, captured or
-	// injected, and the atomic Store here is what an Ingest call's atomic Load synchronises
-	// with. Setting the flag before the assignment above would let a fast Ingest call race it:
-	// the store happening-before the load is exactly what publishes r.session safely, and only
-	// once it has actually been written.
-	r.running.Store(true)
-	defer func() {
-		r.running.Store(false)
-		close(r.runDone)
-	}()
-
 	defer func() {
 		// The session is closed with the context that shut it down rather than the one that is
 		// already cancelled, so the closing write actually lands.
@@ -137,6 +124,26 @@ func (r *Receiver) Run(ctx context.Context) error {
 		if err := r.store.Sessions.Finish(closing, session.ID, "stopped", ""); err != nil {
 			r.log.Warn("could not close the capture session", zap.Error(err))
 		}
+	}()
+
+	// running and runDone bracket the span in which the applier loop below can actually
+	// receive from injected. Set only now, rather than at the very top of Run — r.session is
+	// plain, unsynchronised state that prepare reads for every frame it stores, captured or
+	// injected, and the atomic Store here is what an Ingest call's atomic Load synchronises
+	// with. Setting the flag before the assignment above would let a fast Ingest call race it:
+	// the store happening-before the load is exactly what publishes r.session safely, and only
+	// once it has actually been written.
+	//
+	// This defer is registered *after* the session-close one above so that, by LIFO order, it
+	// runs *first* on the way out: the moment the applier loop actually exits, runDone closes
+	// and running goes false immediately, rather than after the session-close defer's own DB
+	// round-trip. An Ingest call in flight with its own (uncancelled) context would otherwise
+	// have no way to notice shutdown until that write finished — blocking across a database
+	// call it has nothing to do with, for as long as that call takes.
+	r.running.Store(true)
+	defer func() {
+		r.running.Store(false)
+		close(r.runDone)
 	}()
 
 	workers := r.decodeWorkers()
@@ -328,6 +335,14 @@ func resultOf(p prepared) IngestResult {
 // source will reach, so the two never collide within a session.
 const ingestSequenceBase = int64(1) << 40
 
+// ErrNotRunning means Ingest was called while the receiver's applier was not actually able to
+// receive from the injection channel — Run has not been started yet, or it has already
+// stopped. It is a sentinel rather than a bare string so a caller processing many frames in one
+// request — the import endpoint's zip loop, most notably — can tell "the whole pipeline just
+// went away" from "this one frame was bad" with errors.Is, and stop asking rather than turning
+// an outage into hundreds of identical, misleading per-entry failures.
+var ErrNotRunning = errors.New("pipeline: the receiver is not running")
+
 // Ingest runs one uploaded image through the same store-decode-apply path a captured frame
 // takes. prepare fans out safely (it touches nothing shared), and the apply is handed to Run's
 // applier over a channel — so imported frames interleave with camera frames without a single
@@ -336,7 +351,7 @@ const ingestSequenceBase = int64(1) << 40
 // not a parser, and it earns that only by walking the exact path a camera frame would.
 func (r *Receiver) Ingest(ctx context.Context, img image.Image, raw []byte) (IngestResult, error) {
 	if !r.running.Load() {
-		return IngestResult{}, errors.New("pipeline: the receiver is not running")
+		return IngestResult{}, ErrNotRunning
 	}
 
 	capture := Capture{
@@ -354,9 +369,11 @@ func (r *Receiver) Ingest(ctx context.Context, img image.Image, raw []byte) (Ing
 		return IngestResult{}, ctx.Err()
 	case <-r.runDone:
 		// running was observed true a moment ago, but Run has since torn down and nothing will
-		// ever read this off the channel. Reported as a plain error rather than left to block:
-		// an HTTP handler waiting on this is a request an operator is staring at.
-		return IngestResult{}, errors.New("pipeline: the receiver stopped while the frame was being submitted")
+		// ever read this off the channel. Reported as ErrNotRunning rather than left to block:
+		// an HTTP handler waiting on this is a request an operator is staring at, and a caller
+		// making several of these calls needs to be able to tell this apart from a per-frame
+		// failure the same way it would the check above.
+		return IngestResult{}, fmt.Errorf("%w: stopped while the frame was being submitted", ErrNotRunning)
 	}
 
 	select {
@@ -367,7 +384,7 @@ func (r *Receiver) Ingest(ctx context.Context, img image.Image, raw []byte) (Ing
 	case <-r.runDone:
 		// The frame was handed off, but Run stopped before the applier could get to it or before
 		// it could send the reply back — the same race, caught at the other end of the round trip.
-		return IngestResult{}, errors.New("pipeline: the receiver stopped before the frame was applied")
+		return IngestResult{}, fmt.Errorf("%w: stopped before the frame was applied", ErrNotRunning)
 	}
 }
 

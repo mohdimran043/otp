@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/draw"
 	"image/png"
 	"io"
 	"os"
@@ -404,8 +405,15 @@ func decodeFrame(img image.Image, opts protocol.LocateOptions) (*protocol.Frame,
 //
 // Decode-as-probe is affordable here in a way it would not be on the capture path: importing an
 // archive is a rare operator action, not twenty-five frames a second.
+//
+// img need not start at the origin. decodeFrame's geometry search sits on top of a decoder
+// path that assumes Bounds().Min is (0,0) — true of every image a capture source produces, but
+// not of an arbitrary crop, such as one half of a split composite (a SubImage of the far half
+// of a stacked pair keeps the parent's non-zero offset). Rather than document that as a
+// precondition a caller has to remember, Decodable normalises first: a caller can hand it any
+// crop and get a real answer, not a silent false.
 func Decodable(img image.Image, cfg config.Config) bool {
-	frame, geometry, err := decodeFrame(img, cfg.LocateOptions())
+	frame, geometry, err := decodeFrame(originAnchored(img), cfg.LocateOptions())
 	if err != nil || frame == nil {
 		return false
 	}
@@ -414,6 +422,21 @@ func Decodable(img image.Image, cfg config.Config) bool {
 		return false
 	}
 	return true
+}
+
+// originAnchored returns img unchanged if it already starts at (0,0), and a pixel copy
+// anchored there otherwise. See Decodable's doc comment for why this matters: the decoder
+// underneath it reads bands back out of the image at coordinates computed from a zero-based
+// geometry search, which silently samples the wrong pixels against an image whose bounds start
+// elsewhere.
+func originAnchored(img image.Image) image.Image {
+	b := img.Bounds()
+	if b.Min.X == 0 && b.Min.Y == 0 {
+		return img
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(dst, dst.Bounds(), img, b.Min, draw.Src)
+	return dst
 }
 
 // zapFrame renders a frame's identity for a log line.

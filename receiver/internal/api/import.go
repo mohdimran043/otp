@@ -4,12 +4,14 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/draw"
 	"image/png"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -22,6 +24,14 @@ import (
 // exactly as though a camera had seen each frame. Acknowledgements, merge, verification and
 // delivery all fire as normal, which is what makes this a transport rather than a parser: the
 // optical channel and the USB stick end at the same code.
+//
+// Every entry in a zip goes through the pipeline's single-threaded applier synchronously, at
+// roughly the cost of one captured frame — hundreds of milliseconds at a dense geometry. That
+// makes an import request itself a thing worth bounding carefully: an unbounded or oversized
+// one would tie up live capture, and this handler's own WriteTimeout, for minutes. maxImportBytes,
+// maxImportEntries, the per-entry ctx check, and the systemic-failure abort below are all in
+// service of that: fail fast and cheaply, rather than grinding through an archive nobody is
+// waiting on any more.
 
 const (
 	// maxImportBytes bounds the whole upload: a frame archive, not a data lake.
@@ -31,6 +41,15 @@ const (
 	// bound on a single frame posted by the browser path — a frame is a frame, wherever it came
 	// from.
 	maxImportEntryBytes = 16 << 20
+
+	// maxImportEntries bounds how many frames one request may carry. Each one is ingested
+	// synchronously through the single applier, so an archive with no cap on entry count could
+	// keep that applier — and this handler's own response — busy for minutes even while staying
+	// under maxImportBytes (thousands of tiny PNGs are still small in aggregate). 4096 is far
+	// more than any transfer this platform is sized for produces in one archive; a real
+	// transfer that large is already something an operator would split into more than one
+	// import, not something this handler should try to swallow whole.
+	maxImportEntries = 4096
 )
 
 // importEntry is one image the importer looked at, whether it came from a zip entry or a half
@@ -45,14 +64,27 @@ type importEntry struct {
 //
 // The body is read into memory rather than streamed, because a zip's central directory is at
 // the end of the file — there is no way to validate or iterate one without seeing all of it —
-// and a frame archive is small enough (maxImportBytes) that this is not a real cost.
+// and a frame archive is small enough (maxImportBytes) that this is not a real cost, provided
+// that bound is enforced before anything spools the body rather than after.
 func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 	if s.ingest == nil {
 		s.fail(w, http.StatusConflict, "this receiver is not taking imports", nil)
 		return
 	}
 
+	// Wrapped before ParseMultipartForm reads a single byte. Without this, ParseMultipartForm
+	// spools whatever the request carries — past its declared in-memory threshold, straight to a
+	// temporary file, with no bound of its own — before this handler ever gets to look at the
+	// "file" field's size. MaxBytesReader makes the read itself fail once the request has
+	// carried more than maxImportBytes, so an oversized upload is refused while it is arriving,
+	// not after it has been fully written to disk.
+	r.Body = http.MaxBytesReader(w, r.Body, maxImportBytes)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			s.fail(w, http.StatusRequestEntityTooLarge, "that is larger than any real frame archive", err)
+			return
+		}
 		s.fail(w, http.StatusBadRequest, "could not read the upload", err)
 		return
 	}
@@ -73,11 +105,15 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(body) > maxImportBytes {
+		// Belt and braces alongside the MaxBytesReader above, which bounds the request as a
+		// whole rather than this one field specifically.
 		s.fail(w, http.StatusRequestEntityTooLarge, "that is larger than any real frame archive", nil)
 		return
 	}
 
 	var entries []importEntry
+	truncated := false
+
 	switch {
 	case bytes.HasPrefix(body, []byte("PK")):
 		zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
@@ -85,7 +121,22 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, http.StatusBadRequest, "not a readable zip", err)
 			return
 		}
+		if len(zr.File) > maxImportEntries {
+			s.fail(w, http.StatusRequestEntityTooLarge, fmt.Sprintf(
+				"the archive carries %d entries, more than the %d this endpoint will import in one request",
+				len(zr.File), maxImportEntries), nil)
+			return
+		}
+
 		for _, f := range zr.File {
+			if r.Context().Err() != nil {
+				// The caller is gone, or this request's own deadline has passed. Every entry
+				// ingested from here on is work nobody is waiting for, and it is work on the
+				// single applier every captured frame also depends on — so this stops rather
+				// than finishing the archive on principle.
+				truncated = true
+				break
+			}
 			if f.FileInfo().IsDir() {
 				continue
 			}
@@ -118,7 +169,18 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 				entries = append(entries, importEntry{Name: f.Name, Skipped: "not a decodable PNG"})
 				continue
 			}
-			entries = append(entries, s.ingestOne(r.Context(), f.Name, img, data))
+
+			entry, ingestErr := s.ingestOne(r.Context(), f.Name, img, data)
+			entries = append(entries, entry)
+			if errors.Is(ingestErr, pipeline.ErrNotRunning) {
+				// Not a property of this one frame: every remaining entry would fail the same
+				// way, for the same reason, so grinding through the rest would only turn one
+				// outage into hundreds of identical, misleading skips. Abort outright rather than
+				// answer 200 having "skipped" an archive that never had a chance.
+				s.fail(w, http.StatusServiceUnavailable,
+					"this receiver stopped accepting frames partway through the import", ingestErr)
+				return
+			}
 		}
 
 	default:
@@ -128,7 +190,13 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for i, part := range splitComposite(img, s.probe) {
-			entries = append(entries, s.ingestOne(r.Context(), fmt.Sprintf("%s#%d", header.Filename, i), part, nil))
+			entry, ingestErr := s.ingestOne(r.Context(), fmt.Sprintf("%s#%d", header.Filename, i), part, nil)
+			entries = append(entries, entry)
+			if errors.Is(ingestErr, pipeline.ErrNotRunning) {
+				s.fail(w, http.StatusServiceUnavailable,
+					"this receiver stopped accepting frames partway through the import", ingestErr)
+				return
+			}
 		}
 	}
 
@@ -138,7 +206,7 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 		entries = []importEntry{}
 	}
 
-	transmissions := map[uuid.UUID]bool{}
+	transmissionSet := map[uuid.UUID]bool{}
 	ingested, skipped := 0, 0
 	for _, e := range entries {
 		if e.Skipped != "" {
@@ -147,26 +215,44 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 		}
 		ingested++
 		if e.TransmissionID != nil {
-			transmissions[*e.TransmissionID] = true
+			transmissionSet[*e.TransmissionID] = true
 		}
 	}
 
-	s.respond(w, http.StatusOK, map[string]any{
+	// The transmission ids themselves, not merely a count: Task 9's UI navigates straight to
+	// each one once an import finishes, and a count alone would give it nothing to link to.
+	// Sorted for a stable, diffable response.
+	transmissions := make([]string, 0, len(transmissionSet))
+	for id := range transmissionSet {
+		transmissions = append(transmissions, id.String())
+	}
+	sort.Strings(transmissions)
+
+	response := map[string]any{
 		"entries":       entries,
 		"ingested":      ingested,
 		"skipped":       skipped,
-		"transmissions": len(transmissions),
-	})
+		"transmissions": transmissions,
+	}
+	if truncated {
+		// Present only when it happened, rather than always false, so a client can treat its
+		// absence as "no" without a schema that grows a field nobody sets.
+		response["truncated"] = true
+	}
+	s.respond(w, http.StatusOK, response)
 }
 
 // ingestOne runs one image through the pipeline and reports what happened, whether that is the
-// ingest's own verdict or the reason it could not be attempted at all.
-func (s *Server) ingestOne(ctx context.Context, name string, img image.Image, raw []byte) importEntry {
+// ingest's own verdict or the reason it could not be attempted at all. The error is returned
+// alongside the entry — not folded away into the entry's Skipped string — so the caller can
+// tell a systemic failure (errors.Is(err, pipeline.ErrNotRunning)) from an ordinary per-frame
+// one and decide whether to keep going.
+func (s *Server) ingestOne(ctx context.Context, name string, img image.Image, raw []byte) (importEntry, error) {
 	result, err := s.ingest(ctx, img, raw)
 	if err != nil {
-		return importEntry{Name: name, Skipped: err.Error()}
+		return importEntry{Name: name, Skipped: err.Error()}, err
 	}
-	return importEntry{Name: name, IngestResult: result}
+	return importEntry{Name: name, IngestResult: result}, nil
 }
 
 // splitComposite returns the frames inside one uploaded image.
@@ -213,6 +299,11 @@ func splitComposite(img image.Image, probe func(image.Image) bool) []image.Image
 // image at (0,0) costs a pass over a few hundred kilobytes for an operator-driven import and
 // sidesteps the whole class of bug; the zero-copy path is kept for the one crop that is always
 // safe, the one already anchored at the origin.
+//
+// pipeline.Decodable normalises the same way internally, as a second line of defence for any
+// caller that reaches it directly — but the images built here also go on to real Ingest calls,
+// which do not route through Decodable, so this copy is load-bearing on its own, not merely
+// belt-and-braces.
 func subImage(img image.Image, rect image.Rectangle) image.Image {
 	if rect.Min.X == 0 && rect.Min.Y == 0 {
 		if si, ok := img.(interface {

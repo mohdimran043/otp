@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"image"
+	"sync"
 	"testing"
 	"time"
 
@@ -278,4 +279,83 @@ func TestIngestWhenNotRunningErrors(t *testing.T) {
 	result, err := r.Ingest(ctx, image.NewRGBA(image.Rect(0, 0, 4, 4)), nil)
 	require.Error(t, err)
 	require.Equal(t, IngestResult{}, result)
+}
+
+// TestIngestRacesShutdownWithoutHanging is the probe for the shutdown-vs-ingest race the design
+// explicitly accepts and handles rather than prevents: running observed true a moment before
+// Run tears down. TestIngestWhenNotRunningErrors only covers "never started" — this covers "was
+// running, is stopping right now". It fires cancel() and Ingest at each other repeatedly, with
+// no synchronisation between them beyond a shared start gate, and requires every attempt to
+// resolve — with an error or a result, never silence — within a bounded deadline. Run with
+// -race: it was exactly this kind of concurrent Run/Ingest interleaving that caught the
+// r.session ordering bug fixed in Run (running is now set only after r.session is assigned),
+// and this test exists so that class of regression has a permanent, repeated trigger rather
+// than relying on the round-trip tests to happen to schedule it that way.
+func TestIngestRacesShutdownWithoutHanging(t *testing.T) {
+	pool := testdb.New(t)
+	st := store.New(pool)
+	objects, err := objectstore.NewFilesystem(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = objects.Close() })
+	acks, err := objectstore.NewFilesystem(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = acks.Close() })
+
+	cfg := config.Default()
+	cfg.Capture.IdleInterval = time.Millisecond
+	cfg.Capture.DecodeWorkers = 1
+	watcher := config.NewWatcher("", cfg)
+
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+
+	const iterations = 200
+	for i := 0; i < iterations; i++ {
+		r := New(st, objects, acks, noFrameSource{}, watcher, zap.NewNop())
+
+		runCtx, cancel := context.WithCancel(context.Background())
+		runDone := make(chan error, 1)
+		go func() { runDone <- r.Run(runCtx) }()
+
+		// Wait for Run to actually be under way before racing its shutdown — otherwise most
+		// iterations would just be "Ingest before running", which is already covered.
+		require.Eventually(t, func() bool { return r.running.Load() }, time.Second, time.Microsecond)
+
+		// reqCtx stands in for an HTTP request's own context: independent of runCtx, and not
+		// cancelled by Run shutting down. Only runDone can unblock an Ingest call caught by this
+		// race — which is exactly what the fix under test is.
+		reqCtx, reqCancel := context.WithTimeout(context.Background(), 2*time.Second)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			cancel()
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = r.Ingest(reqCtx, img, nil)
+		}()
+		close(start)
+
+		settled := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(settled)
+		}()
+		select {
+		case <-settled:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("iteration %d: cancel() and Ingest did not both return — the shutdown race hung", i)
+		}
+		reqCancel()
+
+		select {
+		case <-runDone:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("iteration %d: Run did not stop after cancel", i)
+		}
+	}
 }

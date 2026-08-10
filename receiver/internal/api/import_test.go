@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"image/draw"
@@ -13,6 +14,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"sync"
 	"testing"
 
@@ -72,20 +74,40 @@ func multipartWriterNoFile(t *testing.T, buf *bytes.Buffer) string {
 // package's own tests) and check the handler's own job: pulling images out of an upload and
 // handing each to Ingest, whatever shape the upload arrived in.
 
-// fakeIngester records every image it was handed and always reports a clean decode, so the
-// tests here can check what reached it without depending on the real decoder.
+// fakeIngester records every image it was handed and, by default, always reports a clean
+// decode — so the tests here can check what reached it without depending on the real decoder.
+// It can also be told to hand back canned per-call results, to fail from some call onward (for
+// the systemic-failure abort), or to run a hook on every call (for tests that need to trigger a
+// side effect, such as cancelling the request's own context, partway through a batch).
 type fakeIngester struct {
-	mu     sync.Mutex
-	images []image.Image
-	raws   [][]byte
+	mu       sync.Mutex
+	images   []image.Image
+	raws     [][]byte
+	results  []pipeline.IngestResult // consumed in call order; falls back to Decoded:true past the end
+	failAt   int                     // 1-based call number at and after which failWith is returned
+	failWith error
+	onCall   func(callNumber int)
 }
 
 func (f *fakeIngester) Ingest(_ context.Context, img image.Image, raw []byte) (pipeline.IngestResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.images = append(f.images, img)
 	f.raws = append(f.raws, raw)
-	return pipeline.IngestResult{Decoded: true}, nil
+	n := len(f.images)
+	result := pipeline.IngestResult{Decoded: true}
+	if n-1 < len(f.results) {
+		result = f.results[n-1]
+	}
+	failAt, failWith, onCall := f.failAt, f.failWith, f.onCall
+	f.mu.Unlock()
+
+	if onCall != nil {
+		onCall(n)
+	}
+	if failWith != nil && failAt > 0 && n >= failAt {
+		return pipeline.IngestResult{}, failWith
+	}
+	return result, nil
 }
 
 func (f *fakeIngester) count() int {
@@ -327,4 +349,101 @@ func TestSplitCompositeUnit(t *testing.T) {
 		parts := splitComposite(composite, nil)
 		require.Len(t, parts, 1)
 	})
+}
+
+// zipOfFrames builds a zip of n distinct, valid PNG entries, for tests that only care about
+// entry count and shape rather than real frame content.
+func zipOfFrames(t *testing.T, n int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for i := 0; i < n; i++ {
+		writeZipFile(t, zw, fmt.Sprintf("frame-%05d.png", i), solidPNG(t, 4, 4, color.RGBA{R: uint8(i), A: 255}))
+	}
+	require.NoError(t, zw.Close())
+	return buf.Bytes()
+}
+
+// TestImportEntryCapRejectsTooManyEntries is the protection against a request that could tie up
+// the single applier (and this handler's own WriteTimeout) for minutes: an archive carrying more
+// than maxImportEntries frames is refused outright, before a single one is ingested.
+func TestImportEntryCapRejectsTooManyEntries(t *testing.T) {
+	fake := &fakeIngester{}
+	handler := newImportServer(t, fake)
+
+	// Entries need not be many bytes each to hit the cap — the archive-file plumbing in
+	// zipOfFrames uses tiny solid PNGs, so maxImportEntries+1 of them is still a small upload.
+	rec := postImportFile(t, handler, "huge.zip", zipOfFrames(t, maxImportEntries+1))
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+	require.Equal(t, 0, fake.count(), "the cap must be enforced before any entry is ingested")
+}
+
+// TestImportStopsProcessingWhenTheRequestContextEnds covers the client-gone case: if the
+// request's own context ends partway through a zip, the handler must stop feeding the applier
+// rather than finish an archive nobody is waiting on, and must say so in the response.
+func TestImportStopsProcessingWhenTheRequestContextEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fake := &fakeIngester{onCall: func(n int) {
+		if n == 2 {
+			cancel()
+		}
+	}}
+	handler := newImportServer(t, fake)
+
+	var form bytes.Buffer
+	contentType := multipartWriter(t, &form, "archive.zip", zipOfFrames(t, 5))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/import", &form).WithContext(ctx)
+	req.Header.Set("Content-Type", contentType)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 2, fake.count(), "processing must stop as soon as the request context ends, not finish the archive")
+
+	var out struct {
+		Truncated bool `json:"truncated"`
+		Ingested  int  `json:"ingested"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.True(t, out.Truncated, "the response must say the import did not run to completion")
+	require.Equal(t, 2, out.Ingested)
+}
+
+// TestImportAbortsWith503WhenThePipelineStopsRunning covers the systemic-failure case: once
+// Ingest starts failing with pipeline.ErrNotRunning, every remaining entry would fail the same
+// way for the same reason, so the handler must abort rather than answer 200 having "skipped" an
+// archive that never had a real chance.
+func TestImportAbortsWith503WhenThePipelineStopsRunning(t *testing.T) {
+	fake := &fakeIngester{failAt: 2, failWith: pipeline.ErrNotRunning}
+	handler := newImportServer(t, fake)
+
+	rec := postImportFile(t, handler, "archive.zip", zipOfFrames(t, 5))
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	require.Equal(t, 2, fake.count(), "must abort the moment the systemic failure appears, not grind through the rest")
+}
+
+// TestImportResponseListsTouchedTransmissionIDs is the Task 9 contract: the UI navigates
+// straight to each transmission an import touched, so the response has to carry the ids
+// themselves, not merely how many there were.
+func TestImportResponseListsTouchedTransmissionIDs(t *testing.T) {
+	first, second := uuid.New(), uuid.New()
+	fake := &fakeIngester{results: []pipeline.IngestResult{
+		{Decoded: true, TransmissionID: &first},
+		{Decoded: true, TransmissionID: &second},
+		{Decoded: true, TransmissionID: &first}, // a repeat, e.g. the manifest and a data frame
+	}}
+	handler := newImportServer(t, fake)
+
+	rec := postImportFile(t, handler, "archive.zip", zipOfFrames(t, 3))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var out struct {
+		Transmissions []string `json:"transmissions"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	expected := []string{first.String(), second.String()}
+	sort.Strings(expected)
+	require.Equal(t, expected, out.Transmissions, "distinct transmission ids, sorted, not a bare count")
 }
