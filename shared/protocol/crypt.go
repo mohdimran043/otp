@@ -118,8 +118,9 @@ func aeadFor(id uint8, key []byte) (cipher.AEAD, error) {
 // Binding makes a chunk decryptable only in the position it was sent in.
 //
 // The header must already carry the transmission id and chunk numbering; the caller
-// then sets FlagEncrypted, which NewEncryptedFrame does. The cipher is h.EncryptionID,
-// which NewEncryptedFrame also sets before calling this.
+// then sets FlagEncrypted, which NewEncryptedFrame does. The cipher used is the
+// caller's id argument, not a header field; NewEncryptedFrame keeps h.EncryptionID
+// in sync with it before sealing, which is what lets DecryptPayload read it back.
 func EncryptPayload(key []byte, id uint8, plaintext []byte, h Header) ([]byte, error) {
 	gcm, err := aeadFor(id, key)
 	if err != nil {
@@ -222,7 +223,12 @@ func OpenFrame(keys [][]byte, f *Frame) ([]byte, error) {
 		if err == nil {
 			return plaintext, nil
 		}
-		if errors.Is(err, ErrEncryptionID) || errors.Is(err, ErrKeySize) {
+		// An unknown cipher id is a property of the frame, not the key: no key in the
+		// ring can help, so stop rather than keep failing the same way. A wrong-length
+		// key, in contrast, is a property of just that ring entry — a malformed or
+		// mismatched key must not veto the keys after it, so that one is skipped and
+		// the loop continues.
+		if errors.Is(err, ErrEncryptionID) {
 			return nil, err
 		}
 	}

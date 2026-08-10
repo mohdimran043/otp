@@ -221,6 +221,23 @@ func TestOpenFrameKeyring(t *testing.T) {
 	require.ErrorIs(t, err, protocol.ErrDecrypt, "an encrypted frame with no keys configured must fail closed")
 }
 
+// TestOpenFrameSkipsMalformedKeys covers a keyring holding a wrong-length key: that
+// entry must not veto the keys after it, since a malformed key is a property of that
+// ring entry, not of the frame.
+func TestOpenFrameSkipsMalformedKeys(t *testing.T) {
+	right := bytes.Repeat([]byte{3}, protocol.KeySize)
+	h := protocol.Header{TransmissionID: uuid.New(), TotalChunks: 1}
+	frame, err := protocol.NewEncryptedFrame(right, protocol.EncryptionAES256GCM, h, []byte("y"))
+	require.NoError(t, err)
+
+	got, err := protocol.OpenFrame([][]byte{[]byte("short"), right}, frame)
+	require.NoError(t, err, "a malformed key must be skipped, not abort the ring")
+	require.Equal(t, []byte("y"), got)
+
+	_, err = protocol.OpenFrame([][]byte{[]byte("short"), []byte("also-wrong-length")}, frame)
+	require.ErrorIs(t, err, protocol.ErrDecrypt, "a ring of only malformed keys must still fail closed")
+}
+
 func TestOpenFrameLegacyIDZeroIsAES(t *testing.T) {
 	// Frames from builds that predate EncryptionID set only the flag. They decrypt as
 	// AES-256-GCM, which is what those builds sealed with.
