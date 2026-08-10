@@ -107,6 +107,10 @@ func New(st *store.Store, objects, acks objectstore.Store, source Source, cfg *c
 func (r *Receiver) Session() uuid.UUID { return r.session }
 
 // Run captures and decodes until the context is done.
+//
+// It is single-use per Receiver: runDone is closed in this method's own defer, and a channel
+// cannot be closed twice, so calling Run again on the same Receiver after it has returned once
+// panics. Build a new Receiver for a new run.
 func (r *Receiver) Run(ctx context.Context) error {
 	session, err := r.store.Sessions.Create(ctx, r.source.Name())
 	if err != nil {

@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	_ "image/jpeg" // registered so a posted JPEG decodes
 	_ "image/png"  // and a posted PNG
@@ -26,6 +27,29 @@ import (
 // tens to hundreds of kilobytes, and something arriving at this size is not a frame.
 const maxPostedFrameBytes = 16 << 20
 
+// maxDecodedPixels bounds the width×height any image on this server is allowed to declare, checked
+// before the pixel data is decoded — on every path that turns untrusted bytes into an image.Image:
+// posted frames here, and both import paths in import.go. A PNG or JPEG header can declare almost any
+// width and height while the file itself is a few hundred bytes — decode.Config trusts that header, so
+// decoding one that lies about being, say, 60000×60000 would allocate hundreds of megabytes to several
+// gigabytes for pixel data that was never actually sent. 64 megapixels is far beyond any real frame (a
+// 4K panel is under 9 megapixels) and leaves headroom for anything this platform will ever render.
+const maxDecodedPixels = 64 * 1024 * 1024
+
+// checkImageDimensions rejects a width×height pulled from an image header (via image.DecodeConfig or a
+// format-specific DecodeConfig, neither of which touches pixel data) before anything decodes the image
+// itself. Called on every path in this package that decodes an image from bytes it did not generate.
+func checkImageDimensions(width, height int) error {
+	if width <= 0 || height <= 0 {
+		return fmt.Errorf("declares non-positive dimensions %dx%d", width, height)
+	}
+	if int64(width)*int64(height) > maxDecodedPixels {
+		return fmt.Errorf("declares %dx%d (%d pixels), more than the %d pixels this receiver will decode",
+			width, height, int64(width)*int64(height), maxDecodedPixels)
+	}
+	return nil
+}
+
 // postFrame accepts one captured frame from a browser.
 //
 // The body is the image itself rather than a multipart form or JSON, because that is what a browser has after
@@ -49,6 +73,18 @@ func (s *Server) postFrame(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(body) > maxPostedFrameBytes {
 		s.fail(w, http.StatusRequestEntityTooLarge, "that is too large to be a captured frame", nil)
+		return
+	}
+
+	// Checked from the header alone, before the pixel data is decoded: see maxDecodedPixels.
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil {
+		s.fail(w, http.StatusUnsupportedMediaType,
+			"the body is not a decodable image; post a JPEG or a PNG", err)
+		return
+	}
+	if err := checkImageDimensions(cfg.Width, cfg.Height); err != nil {
+		s.fail(w, http.StatusRequestEntityTooLarge, err.Error(), err)
 		return
 	}
 

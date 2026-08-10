@@ -4,8 +4,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/draw"
@@ -422,6 +424,104 @@ func TestImportAbortsWith503WhenThePipelineStopsRunning(t *testing.T) {
 	rec := postImportFile(t, handler, "archive.zip", zipOfFrames(t, 5))
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	require.Equal(t, 2, fake.count(), "must abort the moment the systemic failure appears, not grind through the rest")
+}
+
+// pngChunk appends one PNG chunk (length, type, data, CRC) to buf, the on-the-wire shape
+// image/png expects.
+func pngChunk(buf *bytes.Buffer, chunkType string, data []byte) {
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
+	buf.Write(lenBuf[:])
+	typeAndData := append([]byte(chunkType), data...)
+	buf.Write(typeAndData)
+	var crcBuf [4]byte
+	binary.BigEndian.PutUint32(crcBuf[:], crc32.ChecksumIEEE(typeAndData))
+	buf.Write(crcBuf[:])
+}
+
+// hugePNGHeader hand-writes just a PNG signature and an IHDR chunk declaring width×height —
+// enough for png.DecodeConfig (which reads only the header) to report those dimensions,
+// without a single byte of real pixel data. It stands in for a hostile upload: a file that is a
+// few dozen bytes on the wire but claims to be, say, a 60000×60000 image, which is exactly the
+// case checkImageDimensions exists to catch before anything tries to allocate that image.
+func hugePNGHeader(width, height uint32) []byte {
+	var buf bytes.Buffer
+	buf.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:4], width)
+	binary.BigEndian.PutUint32(ihdr[4:8], height)
+	ihdr[8] = 8 // bit depth
+	ihdr[9] = 6 // color type: truecolor with alpha
+	pngChunk(&buf, "IHDR", ihdr)
+	return buf.Bytes()
+}
+
+// TestImportRejectsAnOversizedPNGWithoutDecodingIt covers both places import.go decodes a PNG —
+// a zip entry and the bare-file composite path — against a header that declares far more pixels
+// than maxDecodedPixels allows. Neither upload carries any real pixel data, so if the guard were
+// missing or came after png.Decode, this test would hang or exhaust memory rather than fail
+// cleanly; that it returns quickly with a 4xx (or a per-entry skip) is the proof the check runs
+// before decoding, not after.
+func TestImportRejectsAnOversizedPNGWithoutDecodingIt(t *testing.T) {
+	huge := hugePNGHeader(60000, 60000) // 3.6 billion pixels, far past the 64-megapixel bound
+
+	t.Run("a zip entry with a lying header is skipped, not ingested", func(t *testing.T) {
+		fake := &fakeIngester{}
+		handler := newImportServer(t, fake)
+
+		var zipBuf bytes.Buffer
+		zw := zip.NewWriter(&zipBuf)
+		writeZipFile(t, zw, "frame-00000000.png", huge)
+		require.NoError(t, zw.Close())
+
+		rec := postImportFile(t, handler, "archive.zip", zipBuf.Bytes())
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Equal(t, 0, fake.count(), "an oversized entry must never reach Ingest")
+
+		var out struct {
+			Skipped int `json:"skipped"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+		require.Equal(t, 1, out.Skipped)
+	})
+
+	t.Run("a bare file with a lying header is rejected outright", func(t *testing.T) {
+		fake := &fakeIngester{}
+		handler := newImportServer(t, fake)
+
+		rec := postImportFile(t, handler, "huge.png", huge)
+		require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+		require.Equal(t, 0, fake.count())
+	})
+}
+
+// TestImportRefusesAConcurrentImportWith409 covers the serialization added because this
+// endpoint is unauthenticated, reads up to maxImportBytes into memory per request, and feeds
+// the same single-threaded applier every captured frame also depends on: a second import
+// arriving while one is already running must be refused immediately, not queued or run
+// alongside it.
+func TestImportRefusesAConcurrentImportWith409(t *testing.T) {
+	fake := &fakeIngester{}
+	srv := New(Options{
+		Config: config.NewWatcher("", config.Default()),
+		Log:    zap.NewNop(),
+		Ingest: fake.Ingest,
+		Probe: func(img image.Image) bool {
+			return pipeline.Decodable(img, config.Default())
+		},
+	})
+	handler := srv.Routes()
+
+	// Simulates a request already in flight by holding the same lock the handler takes,
+	// rather than racing a real concurrent request — deterministic, and it exercises exactly
+	// the guard under test rather than a timing window.
+	require.True(t, srv.importMu.TryLock())
+	defer srv.importMu.Unlock()
+
+	rec := postImportFile(t, handler, "archive.zip", zipOfFrames(t, 1))
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "already running")
+	require.Equal(t, 0, fake.count(), "a refused import must never reach Ingest")
 }
 
 // TestImportResponseListsTouchedTransmissionIDs is the Task 9 contract: the UI navigates

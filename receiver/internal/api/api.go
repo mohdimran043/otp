@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,6 +64,13 @@ type Server struct {
 	// decode question, and the API package must not know how decoding works, so it is injected exactly
 	// like ingest is.
 	probe func(image.Image) bool
+
+	// importMu serializes /api/v1/import: the endpoint is unauthenticated, reads up to maxImportBytes
+	// into memory per request, and feeds the same single-threaded applier every captured frame also
+	// depends on. A second request arriving mid-import would double that memory cost for no benefit —
+	// the applier was going to serialize the actual work anyway — so it is refused outright rather than
+	// queued or left to run concurrently.
+	importMu sync.Mutex
 }
 
 // Options configure a server.

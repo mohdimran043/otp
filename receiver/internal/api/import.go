@@ -72,6 +72,17 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// This endpoint is unauthenticated and reads up to maxImportBytes into memory before it does
+	// anything else, so it is cheap for one caller to launch several requests at once and multiply
+	// that cost. TryLock refuses a second import outright rather than making it wait: the single
+	// applier every entry goes through serializes the real work anyway, so queuing here would only
+	// hold a whole extra body in memory for the time it takes the first import to finish.
+	if !s.importMu.TryLock() {
+		s.fail(w, http.StatusConflict, "an import is already running; wait for it to finish and retry", nil)
+		return
+	}
+	defer s.importMu.Unlock()
+
 	// Wrapped before ParseMultipartForm reads a single byte. Without this, ParseMultipartForm
 	// spools whatever the request carries — past its declared in-memory threshold, straight to a
 	// temporary file, with no bound of its own — before this handler ever gets to look at the
@@ -161,6 +172,19 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
+			// Checked from the IHDR chunk alone, before png.Decode reads any pixel data: see
+			// maxDecodedPixels. A zip entry can declare whatever dimensions it likes regardless
+			// of how few bytes actually follow.
+			cfg, err := png.DecodeConfig(bytes.NewReader(data))
+			if err != nil {
+				entries = append(entries, importEntry{Name: f.Name, Skipped: "not a decodable PNG"})
+				continue
+			}
+			if err := checkImageDimensions(cfg.Width, cfg.Height); err != nil {
+				entries = append(entries, importEntry{Name: f.Name, Skipped: err.Error()})
+				continue
+			}
+
 			img, err := png.Decode(bytes.NewReader(data))
 			if err != nil {
 				// A bad entry is reported in its own row rather than failing the whole request —
@@ -184,6 +208,17 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 		}
 
 	default:
+		// Checked from the IHDR chunk alone, before png.Decode reads any pixel data: see
+		// maxDecodedPixels.
+		cfg, err := png.DecodeConfig(bytes.NewReader(body))
+		if err != nil {
+			s.fail(w, http.StatusUnsupportedMediaType, "the file is neither a zip nor a PNG", err)
+			return
+		}
+		if err := checkImageDimensions(cfg.Width, cfg.Height); err != nil {
+			s.fail(w, http.StatusRequestEntityTooLarge, err.Error(), err)
+			return
+		}
 		img, err := png.Decode(bytes.NewReader(body))
 		if err != nil {
 			s.fail(w, http.StatusUnsupportedMediaType, "the file is neither a zip nor a PNG", err)
