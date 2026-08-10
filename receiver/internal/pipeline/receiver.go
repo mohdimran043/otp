@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"image"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -62,6 +64,25 @@ type Receiver struct {
 	// handleChunk), which processes frames one at a time.
 	keys        [][]byte
 	keysFetched time.Time
+
+	// injected carries frames arriving by upload rather than capture into the single-threaded
+	// applier. It has no buffer: an uploader is a synchronous HTTP request holding its own
+	// reply channel, so there is nothing to gain by queuing more than one and every reason not
+	// to silently accept uploads a stopped applier will never drain.
+	injected chan injectedFrame
+
+	// running is true for exactly the span of one Run call, so Ingest can fail fast rather
+	// than block forever when nothing is there to receive from injected.
+	running atomic.Bool
+
+	// runDone is closed when Run returns, which is what lets an Ingest caught mid-shutdown —
+	// running observed true a moment before Run tears down — get an error instead of hanging
+	// on a channel nothing will ever read from or reply to again.
+	runDone chan struct{}
+
+	// ingestSequence numbers frames arriving through Ingest, offset by ingestSequenceBase so
+	// they never collide with a capture source's own sequence numbers within a session.
+	ingestSequence atomic.Int64
 }
 
 // New returns a receiver.
@@ -77,6 +98,8 @@ func New(st *store.Store, objects, acks objectstore.Store, source Source, cfg *c
 		deliver:  NewDeliverer(current.Callback, log),
 		started:  map[uuid.UUID]time.Time{},
 		finished: map[uuid.UUID]bool{},
+		injected: make(chan injectedFrame),
+		runDone:  make(chan struct{}),
 	}
 }
 
@@ -93,6 +116,19 @@ func (r *Receiver) Run(ctx context.Context) error {
 	r.log.Info("capture session started",
 		zap.String("session", session.ID.String()),
 		zap.String("source", r.source.Name()))
+
+	// running and runDone bracket the span in which the applier loop below can actually
+	// receive from injected. Set only now, rather than at the very top of Run — r.session is
+	// plain, unsynchronised state that prepare reads for every frame it stores, captured or
+	// injected, and the atomic Store here is what an Ingest call's atomic Load synchronises
+	// with. Setting the flag before the assignment above would let a fast Ingest call race it:
+	// the store happening-before the load is exactly what publishes r.session safely, and only
+	// once it has actually been written.
+	r.running.Store(true)
+	defer func() {
+		r.running.Store(false)
+		close(r.runDone)
+	}()
 
 	defer func() {
 		// The session is closed with the context that shut it down rather than the one that is
@@ -217,13 +253,122 @@ func (r *Receiver) Run(ctx context.Context) error {
 		close(results)
 	}()
 
-	for p := range results {
-		if err := r.apply(ctx, p); err != nil {
-			r.log.Error("could not process a captured frame",
-				zap.Int64("sequence", p.capture.Sequence), zap.Error(err))
+	// A select over both channels rather than two loops, because the single-threaded applier is
+	// the whole point: a frame imported through the API and a frame read off the optical channel
+	// contend for the same chunk rows, acknowledgements, and merge logic, and keeping them on one
+	// goroutine is what let every downstream piece stay exactly as sequential as it always was.
+	for {
+		select {
+		case p, ok := <-results:
+			if !ok {
+				return nil
+			}
+			if err := r.apply(ctx, p); err != nil {
+				r.log.Error("could not process a captured frame",
+					zap.Int64("sequence", p.capture.Sequence), zap.Error(err))
+			}
+		case inj := <-r.injected:
+			err := r.apply(ctx, inj.p)
+			inj.reply <- ingestReply{result: resultOf(inj.p), err: err}
 		}
 	}
-	return nil
+}
+
+// injectedFrame is a frame arriving by upload rather than capture, carrying a reply channel
+// because the uploader is a synchronous HTTP request that wants the verdict.
+type injectedFrame struct {
+	p     prepared
+	reply chan ingestReply
+}
+
+// ingestReply is what Ingest hands back to its caller.
+type ingestReply struct {
+	result IngestResult
+	err    error
+}
+
+// IngestResult is the outcome of running one uploaded image through the pipeline.
+type IngestResult struct {
+	Decoded        bool       `json:"decoded"`
+	IsManifest     bool       `json:"is_manifest"`
+	TransmissionID *uuid.UUID `json:"transmission_id,omitempty"`
+	ChunkNumber    *int64     `json:"chunk_number,omitempty"`
+	Error          string     `json:"error,omitempty"`
+}
+
+// resultOf reports what a prepared frame decoded to, for the caller of Ingest. It looks only at
+// the decode itself — not at what apply subsequently did with it — because apply's own failure is
+// returned separately as an error, and what happened deeper in the pipeline (a chunk that failed
+// to decrypt, say) is not a decode failure: the frame's own checksums passed.
+func resultOf(p prepared) IngestResult {
+	if p.err != nil {
+		return IngestResult{Error: p.err.Error()}
+	}
+	if p.decodeErr != nil {
+		return IngestResult{Error: p.decodeErr.Error()}
+	}
+	if p.frame == nil {
+		return IngestResult{Error: "pipeline: the image did not decode to a frame"}
+	}
+
+	result := IngestResult{
+		Decoded:    true,
+		IsManifest: p.frame.Header.Flags.Has(protocol.FlagManifest),
+	}
+	transmission := p.frame.Header.TransmissionID
+	result.TransmissionID = &transmission
+	if !result.IsManifest {
+		chunk := int64(p.frame.Header.ChunkNumber)
+		result.ChunkNumber = &chunk
+	}
+	return result
+}
+
+// ingestSequenceBase keeps uploaded frames' sequence numbers out of the range any capture
+// source will reach, so the two never collide within a session.
+const ingestSequenceBase = int64(1) << 40
+
+// Ingest runs one uploaded image through the same store-decode-apply path a captured frame
+// takes. prepare fans out safely (it touches nothing shared), and the apply is handed to Run's
+// applier over a channel — so imported frames interleave with camera frames without a single
+// new lock, and everything downstream (acks, merge, delivery) cannot tell the difference. That
+// indistinguishability is the point: a frame archive imported from a USB stick is a transport,
+// not a parser, and it earns that only by walking the exact path a camera frame would.
+func (r *Receiver) Ingest(ctx context.Context, img image.Image, raw []byte) (IngestResult, error) {
+	if !r.running.Load() {
+		return IngestResult{}, errors.New("pipeline: the receiver is not running")
+	}
+
+	capture := Capture{
+		Sequence:   r.ingestSequence.Add(1) + ingestSequenceBase,
+		Image:      img,
+		Raw:        raw,
+		CapturedAt: time.Now().UTC(),
+	}
+	p := r.prepare(ctx, capture)
+
+	inj := injectedFrame{p: p, reply: make(chan ingestReply, 1)}
+	select {
+	case r.injected <- inj:
+	case <-ctx.Done():
+		return IngestResult{}, ctx.Err()
+	case <-r.runDone:
+		// running was observed true a moment ago, but Run has since torn down and nothing will
+		// ever read this off the channel. Reported as a plain error rather than left to block:
+		// an HTTP handler waiting on this is a request an operator is staring at.
+		return IngestResult{}, errors.New("pipeline: the receiver stopped while the frame was being submitted")
+	}
+
+	select {
+	case reply := <-inj.reply:
+		return reply.result, reply.err
+	case <-ctx.Done():
+		return IngestResult{}, ctx.Err()
+	case <-r.runDone:
+		// The frame was handed off, but Run stopped before the applier could get to it or before
+		// it could send the reply back — the same race, caught at the other end of the round trip.
+		return IngestResult{}, errors.New("pipeline: the receiver stopped before the frame was applied")
+	}
 }
 
 // decodeWorkers is how many frames are decoded at once.

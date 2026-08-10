@@ -67,4 +67,3 @@ func TestKeyringCachesForAFewSeconds(t *testing.T) {
 	r.keysFetched = time.Now().Add(-4 * time.Second)
 	require.Len(t, r.keyring(ctx), 1)
 }
-

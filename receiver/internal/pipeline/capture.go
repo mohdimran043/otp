@@ -396,6 +396,26 @@ func decodeFrame(img image.Image, opts protocol.LocateOptions) (*protocol.Frame,
 	return frame, g, nil
 }
 
+// Decodable reports whether an image can be read as a protocol frame, at the confidence floors
+// this configuration would apply. It exists for the import splitter, which has to judge each
+// half of a composite image without a store to write into or a session to attribute a capture
+// to — so it shares decodeFrame with prepare and the same confidence floors, but persists
+// nothing and returns only the verdict.
+//
+// Decode-as-probe is affordable here in a way it would not be on the capture path: importing an
+// archive is a rare operator action, not twenty-five frames a second.
+func Decodable(img image.Image, cfg config.Config) bool {
+	frame, geometry, err := decodeFrame(img, cfg.LocateOptions())
+	if err != nil || frame == nil {
+		return false
+	}
+	finder, timing, _ := decodeQuality(geometry)
+	if finder < cfg.Decoder.MinFinderScore || timing < cfg.Decoder.MinTimingScore {
+		return false
+	}
+	return true
+}
+
 // zapFrame renders a frame's identity for a log line.
 func zapFrame(frame *protocol.Frame) []zap.Field {
 	if frame == nil {
