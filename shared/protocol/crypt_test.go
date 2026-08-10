@@ -32,7 +32,7 @@ func TestEncryptedPayloadRoundTrips(t *testing.T) {
 	key, h := testKey(), encryptHeader()
 	plaintext := []byte("the quiet zone is outside the grid coordinate space")
 
-	ciphertext, err := protocol.EncryptPayload(key, plaintext, h)
+	ciphertext, err := protocol.EncryptPayload(key, protocol.EncryptionAES256GCM, plaintext, h)
 	require.NoError(t, err)
 	require.Len(t, ciphertext, len(plaintext)+protocol.EncryptionOverhead)
 	require.NotContains(t, string(ciphertext), "quiet zone")
@@ -49,9 +49,9 @@ func TestEncryptionIsRandomised(t *testing.T) {
 	key, h := testKey(), encryptHeader()
 	plaintext := []byte("same chunk, twice")
 
-	first, err := protocol.EncryptPayload(key, plaintext, h)
+	first, err := protocol.EncryptPayload(key, protocol.EncryptionAES256GCM, plaintext, h)
 	require.NoError(t, err)
-	second, err := protocol.EncryptPayload(key, plaintext, h)
+	second, err := protocol.EncryptPayload(key, protocol.EncryptionAES256GCM, plaintext, h)
 	require.NoError(t, err)
 	require.False(t, bytes.Equal(first, second), "each encryption must use a fresh nonce")
 
@@ -69,7 +69,7 @@ func TestEncryptionIsRandomised(t *testing.T) {
 // would be perfectly valid.
 func TestPayloadCannotBeMovedBetweenFrames(t *testing.T) {
 	key, h := testKey(), encryptHeader()
-	ciphertext, err := protocol.EncryptPayload(key, []byte("chunk nine"), h)
+	ciphertext, err := protocol.EncryptPayload(key, protocol.EncryptionAES256GCM, []byte("chunk nine"), h)
 	require.NoError(t, err)
 
 	for name, mutate := range map[string]func(*protocol.Header){
@@ -108,7 +108,7 @@ func TestPayloadCannotBeMovedBetweenFrames(t *testing.T) {
 
 func TestDecryptRejectsTamperingAndBadKeys(t *testing.T) {
 	key, h := testKey(), encryptHeader()
-	ciphertext, err := protocol.EncryptPayload(key, []byte("authenticated"), h)
+	ciphertext, err := protocol.EncryptPayload(key, protocol.EncryptionAES256GCM, []byte("authenticated"), h)
 	require.NoError(t, err)
 
 	// Every single-byte change anywhere in the record — nonce, ciphertext, or tag —
@@ -129,7 +129,7 @@ func TestDecryptRejectsTamperingAndBadKeys(t *testing.T) {
 	require.ErrorIs(t, err, protocol.ErrDecrypt)
 
 	for _, size := range []int{0, 16, 31, 33, 64} {
-		_, err := protocol.EncryptPayload(make([]byte, size), []byte("x"), h)
+		_, err := protocol.EncryptPayload(make([]byte, size), protocol.EncryptionAES256GCM, []byte("x"), h)
 		require.ErrorIs(t, err, protocol.ErrKeySize, "a %d-byte key must be refused", size)
 	}
 }
@@ -141,13 +141,13 @@ func TestEncryptedFrameChecksumsTheCiphertext(t *testing.T) {
 	key := testKey()
 	plaintext := []byte("integrity covers what the camera saw")
 
-	f, err := protocol.NewEncryptedFrame(key, encryptHeader(), plaintext)
+	f, err := protocol.NewEncryptedFrame(key, protocol.EncryptionNone, encryptHeader(), plaintext)
 	require.NoError(t, err)
 	require.True(t, f.Header.Flags.Has(protocol.FlagEncrypted))
 	require.NoError(t, f.Verify(), "the footer must cover the ciphertext as transmitted")
 	require.Equal(t, uint32(len(plaintext)+protocol.EncryptionOverhead), f.Header.PayloadLength)
 
-	got, err := protocol.OpenFrame(key, f)
+	got, err := protocol.OpenFrame([][]byte{key}, f)
 	require.NoError(t, err)
 	require.Equal(t, plaintext, got)
 }
@@ -159,7 +159,7 @@ func TestEncryptedFrameChecksumsTheCiphertext(t *testing.T) {
 func TestOpenFramePassesPlaintextThrough(t *testing.T) {
 	plain := protocol.NewFrame(encryptHeader(), []byte("not encrypted"))
 
-	got, err := protocol.OpenFrame(testKey(), plain)
+	got, err := protocol.OpenFrame([][]byte{testKey()}, plain)
 	require.NoError(t, err)
 	require.Equal(t, []byte("not encrypted"), got)
 
@@ -167,11 +167,82 @@ func TestOpenFramePassesPlaintextThrough(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("not encrypted"), got)
 
-	encrypted, err := protocol.NewEncryptedFrame(testKey(), encryptHeader(), []byte("secret"))
+	encrypted, err := protocol.NewEncryptedFrame(testKey(), protocol.EncryptionNone, encryptHeader(), []byte("secret"))
 	require.NoError(t, err)
 	_, err = protocol.OpenFrame(nil, encrypted)
 	require.ErrorIs(t, err, protocol.ErrDecrypt)
 
-	_, err = protocol.OpenFrame(testKey(), nil)
+	_, err = protocol.OpenFrame([][]byte{testKey()}, nil)
 	require.Error(t, err)
+}
+
+func TestEncryptionIDsRoundTrip(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, protocol.KeySize)
+	h := protocol.Header{TransmissionID: uuid.New(), ChunkNumber: 3, TotalChunks: 9}
+	for _, id := range []uint8{protocol.EncryptionAES256GCM, protocol.EncryptionChaCha20Poly1305} {
+		frame, err := protocol.NewEncryptedFrame(key, id, h, []byte("payload"))
+		require.NoError(t, err)
+		require.Equal(t, id, frame.Header.EncryptionID)
+		require.True(t, frame.Header.Flags.Has(protocol.FlagEncrypted))
+
+		got, err := protocol.OpenFrame([][]byte{key}, frame)
+		require.NoError(t, err)
+		require.Equal(t, []byte("payload"), got)
+	}
+}
+
+func TestOpenFrameWrongCipherFails(t *testing.T) {
+	// The same key with the wrong cipher must fail authentication, not mis-decrypt:
+	// the id is read from the header, so this simulates a tampered id byte.
+	key := bytes.Repeat([]byte{7}, protocol.KeySize)
+	h := protocol.Header{TransmissionID: uuid.New(), ChunkNumber: 1, TotalChunks: 2}
+	frame, err := protocol.NewEncryptedFrame(key, protocol.EncryptionAES256GCM, h, []byte("payload"))
+	require.NoError(t, err)
+	frame.Header.EncryptionID = protocol.EncryptionChaCha20Poly1305
+	_, err = protocol.OpenFrame([][]byte{key}, frame)
+	require.ErrorIs(t, err, protocol.ErrDecrypt)
+}
+
+func TestOpenFrameKeyring(t *testing.T) {
+	right := bytes.Repeat([]byte{1}, protocol.KeySize)
+	wrong := bytes.Repeat([]byte{2}, protocol.KeySize)
+	h := protocol.Header{TransmissionID: uuid.New(), TotalChunks: 1}
+	frame, err := protocol.NewEncryptedFrame(right, protocol.EncryptionChaCha20Poly1305, h, []byte("x"))
+	require.NoError(t, err)
+
+	got, err := protocol.OpenFrame([][]byte{wrong, right}, frame)
+	require.NoError(t, err, "the second key in the ring must be tried")
+	require.Equal(t, []byte("x"), got)
+
+	_, err = protocol.OpenFrame([][]byte{wrong}, frame)
+	require.ErrorIs(t, err, protocol.ErrDecrypt)
+
+	_, err = protocol.OpenFrame(nil, frame)
+	require.ErrorIs(t, err, protocol.ErrDecrypt, "an encrypted frame with no keys configured must fail closed")
+}
+
+func TestOpenFrameLegacyIDZeroIsAES(t *testing.T) {
+	// Frames from builds that predate EncryptionID set only the flag. They decrypt as
+	// AES-256-GCM, which is what those builds sealed with.
+	key := bytes.Repeat([]byte{9}, protocol.KeySize)
+	h := protocol.Header{TransmissionID: uuid.New(), TotalChunks: 1}
+	frame, err := protocol.NewEncryptedFrame(key, protocol.EncryptionNone, h, []byte("legacy"))
+	require.NoError(t, err)
+	require.Equal(t, uint8(0), frame.Header.EncryptionID)
+	require.True(t, frame.Header.Flags.Has(protocol.FlagEncrypted))
+	got, err := protocol.OpenFrame([][]byte{key}, frame)
+	require.NoError(t, err)
+	require.Equal(t, []byte("legacy"), got)
+}
+
+func TestEncryptionNames(t *testing.T) {
+	id, err := protocol.EncryptionByName("chacha20poly1305")
+	require.NoError(t, err)
+	require.Equal(t, protocol.EncryptionChaCha20Poly1305, id)
+	id, err = protocol.EncryptionByName("")
+	require.NoError(t, err)
+	require.Equal(t, protocol.EncryptionNone, id)
+	_, err = protocol.EncryptionByName("rot13")
+	require.Error(t, err)
+	require.Equal(t, "aes256gcm", protocol.EncryptionName(protocol.EncryptionAES256GCM))
 }

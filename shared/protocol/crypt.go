@@ -7,6 +7,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
+
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 // Payload encryption, for transmissions whose contents must not be readable by
@@ -43,6 +46,67 @@ var (
 	ErrDecrypt = errors.New("protocol: payload failed authentication")
 )
 
+// Cipher identities, as written into Header.EncryptionID.
+//
+// Zero is doing double duty deliberately: on a plaintext frame it means "not encrypted",
+// and on a frame that sets FlagEncrypted it means the AES-256-GCM of builds that predate
+// the field. Both readings are what the bytes on old frames already say.
+const (
+	EncryptionNone             uint8 = 0
+	EncryptionAES256GCM        uint8 = 1
+	EncryptionChaCha20Poly1305 uint8 = 2
+)
+
+// ErrEncryptionID means the cipher id is not one this build implements.
+var ErrEncryptionID = errors.New("protocol: unknown encryption id")
+
+// EncryptionByName translates an API name into a wire id.
+func EncryptionByName(name string) (uint8, error) {
+	switch name {
+	case "", "none":
+		return EncryptionNone, nil
+	case "aes256gcm":
+		return EncryptionAES256GCM, nil
+	case "chacha20poly1305":
+		return EncryptionChaCha20Poly1305, nil
+	}
+	return 0, fmt.Errorf("%w: %q is not one of %s", ErrEncryptionID, name, strings.Join(EncryptionNames(), ", "))
+}
+
+// EncryptionName renders a wire id for APIs and logs.
+func EncryptionName(id uint8) string {
+	switch id {
+	case EncryptionAES256GCM:
+		return "aes256gcm"
+	case EncryptionChaCha20Poly1305:
+		return "chacha20poly1305"
+	}
+	return "none"
+}
+
+// EncryptionNames lists the choices a sender can offer.
+func EncryptionNames() []string { return []string{"none", "aes256gcm", "chacha20poly1305"} }
+
+// aeadFor builds the AEAD a frame declares. Id zero is legacy AES-256-GCM (see the
+// constants). Both ciphers share the 32-byte key, 12-byte nonce and 16-byte tag, which
+// is what keeps KeySize and EncryptionOverhead cipher-independent.
+func aeadFor(id uint8, key []byte) (cipher.AEAD, error) {
+	if len(key) != KeySize {
+		return nil, fmt.Errorf("%w: got %d", ErrKeySize, len(key))
+	}
+	switch id {
+	case EncryptionNone, EncryptionAES256GCM:
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			return nil, err
+		}
+		return cipher.NewGCM(block)
+	case EncryptionChaCha20Poly1305:
+		return chacha20poly1305.New(key)
+	}
+	return nil, fmt.Errorf("%w: %d", ErrEncryptionID, id)
+}
+
 // EncryptPayload encrypts a chunk for a frame, binding it to that frame's identity.
 //
 // The header fields go in as additional authenticated data rather than being
@@ -54,9 +118,10 @@ var (
 // Binding makes a chunk decryptable only in the position it was sent in.
 //
 // The header must already carry the transmission id and chunk numbering; the caller
-// then sets FlagEncrypted, which NewEncryptedFrame does.
-func EncryptPayload(key, plaintext []byte, h Header) ([]byte, error) {
-	gcm, err := newGCM(key)
+// then sets FlagEncrypted, which NewEncryptedFrame does. The cipher is h.EncryptionID,
+// which NewEncryptedFrame also sets before calling this.
+func EncryptPayload(key []byte, id uint8, plaintext []byte, h Header) ([]byte, error) {
+	gcm, err := aeadFor(id, key)
 	if err != nil {
 		return nil, err
 	}
@@ -77,9 +142,10 @@ func EncryptPayload(key, plaintext []byte, h Header) ([]byte, error) {
 }
 
 // DecryptPayload reverses EncryptPayload, and fails if the payload was altered or
-// belongs to a different frame.
+// belongs to a different frame. The cipher comes from h.EncryptionID, not a parameter,
+// because a receiver never chooses the cipher — the sender did, and recorded which.
 func DecryptPayload(key, ciphertext []byte, h Header) ([]byte, error) {
-	gcm, err := newGCM(key)
+	gcm, err := aeadFor(h.EncryptionID, key)
 	if err != nil {
 		return nil, err
 	}
@@ -113,25 +179,20 @@ func frameAAD(h Header) []byte {
 	return aad
 }
 
-func newGCM(key []byte) (cipher.AEAD, error) {
-	if len(key) != KeySize {
-		return nil, fmt.Errorf("%w: got %d", ErrKeySize, len(key))
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
-}
-
-// NewEncryptedFrame builds a frame whose payload is encrypted.
+// NewEncryptedFrame builds a frame whose payload is encrypted with the named cipher.
+//
+// EncryptionNone here does not mean "leave it plaintext" — it selects the legacy
+// wire id (see the constants) while still sealing with AES-256-GCM, which is what a
+// build that predates EncryptionID always did. Callers that want an actual plaintext
+// frame use NewFrame directly.
 //
 // The integrity fields in the footer cover the ciphertext, not the plaintext, which
 // is the right way round: the receiver has to be able to tell a frame it captured
 // badly from a frame it decrypted wrongly, and it can only checksum what the camera
 // actually saw.
-func NewEncryptedFrame(key []byte, h Header, plaintext []byte) (*Frame, error) {
-	ciphertext, err := EncryptPayload(key, plaintext, h)
+func NewEncryptedFrame(key []byte, id uint8, h Header, plaintext []byte) (*Frame, error) {
+	h.EncryptionID = id
+	ciphertext, err := EncryptPayload(key, id, plaintext, h)
 	if err != nil {
 		return nil, err
 	}
@@ -141,19 +202,29 @@ func NewEncryptedFrame(key []byte, h Header, plaintext []byte) (*Frame, error) {
 
 // OpenFrame returns a frame's payload, decrypting it if it is encrypted.
 //
-// Frames that are not encrypted pass through, so a receiver can hand every frame to
-// the same call rather than branching on the flag — and a receiver configured with a
-// key still accepts a plaintext transmission, which is what makes changing the
-// sender's encryption setting mid-deployment survivable.
-func OpenFrame(key []byte, f *Frame) ([]byte, error) {
+// It takes every key the receiver holds rather than one, because keys are chosen per
+// transfer on the sender and a receiver cannot know which transfer is on the display.
+// Trying each is safe — an AEAD authenticates, so the wrong key fails rather than
+// yielding garbage — and the ring is small: however many transfers' keys an operator
+// has loaded, not a keyspace.
+func OpenFrame(keys [][]byte, f *Frame) ([]byte, error) {
 	if f == nil {
 		return nil, errors.New("protocol: nil frame")
 	}
 	if !f.Header.Flags.Has(FlagEncrypted) {
 		return f.Payload, nil
 	}
-	if len(key) == 0 {
-		return nil, fmt.Errorf("%w: the frame is encrypted and no key is configured", ErrDecrypt)
+	for _, key := range keys {
+		if len(key) == 0 {
+			continue
+		}
+		plaintext, err := DecryptPayload(key, f.Payload, f.Header)
+		if err == nil {
+			return plaintext, nil
+		}
+		if errors.Is(err, ErrEncryptionID) || errors.Is(err, ErrKeySize) {
+			return nil, err
+		}
 	}
-	return DecryptPayload(key, f.Payload, f.Header)
+	return nil, fmt.Errorf("%w: no configured key opens this frame", ErrDecrypt)
 }
