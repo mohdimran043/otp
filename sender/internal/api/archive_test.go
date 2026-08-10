@@ -120,6 +120,29 @@ func (h *archiveHarness) putFrame(t *testing.T, txID uuid.UUID, number int, mani
 	return frame
 }
 
+// putFrameWithMissingObject writes a frame row whose stored path was never written to the
+// object store — a row surviving without its bytes, the way a botched migration or a purge
+// race might leave one — so a test can drive the "the read failed" branch without needing
+// the object store itself to misbehave.
+func (h *archiveHarness) putFrameWithMissingObject(t *testing.T, txID uuid.UUID, number int, manifest bool, width, height int) store.Frame {
+	t.Helper()
+	ctx := context.Background()
+	key, err := objectstore.Key("frames", txID.String(), fmt.Sprintf("%d-never-written.png", number))
+	require.NoError(t, err)
+	sum := sha256.Sum256([]byte(key))
+	frame := store.Frame{
+		TransmissionID: txID,
+		FrameNumber:    number,
+		IsManifest:     manifest,
+		WidthPx:        width,
+		HeightPx:       height,
+		StoredPath:     key,
+		SHA256:         sum[:],
+	}
+	require.NoError(t, h.store.Frames.InsertMany(ctx, []store.Frame{frame}))
+	return frame
+}
+
 // solidPNG renders a tiny, uniformly-coloured PNG — enough to be a distinct, valid image
 // without needing the real encoder.
 func solidPNG(t *testing.T, width, height int, c color.RGBA) []byte {
@@ -235,4 +258,41 @@ func TestFrameArchiveWhileRenderingIs409(t *testing.T) {
 	h.handler.ServeHTTP(response,
 		httptest.NewRequest(http.MethodGet, "/api/v1/transfers/"+tx.ID.String()+"/frames/archive", nil))
 	require.Equal(t, http.StatusConflict, response.Code)
+}
+
+// TestFrameArchiveUnknownTransferIs404 covers the id that simply does not exist — a typo, or
+// a transfer that was purged — as distinct from one that exists but is not ready yet.
+func TestFrameArchiveUnknownTransferIs404(t *testing.T) {
+	h := newArchiveHarness(t)
+
+	response := httptest.NewRecorder()
+	h.handler.ServeHTTP(response,
+		httptest.NewRequest(http.MethodGet, "/api/v1/transfers/"+uuid.New().String()+"/frames/archive", nil))
+	require.Equal(t, http.StatusNotFound, response.Code)
+}
+
+// TestFrameArchiveFirstFrameReadFailureIsNot200 is the regression the review caught: reading
+// the first selected frame happens before any header is written specifically so that a
+// failure there can still answer with a real status. Before that fix, nothing was written
+// until the loop reached a working entry, so a first-frame failure fell through to
+// net/http's default 200 with an empty body — a "successful" response carrying an invalid
+// zip.
+func TestFrameArchiveFirstFrameReadFailureIsNot200(t *testing.T) {
+	h := newArchiveHarness(t)
+	file := h.putFile(t, "broken.bin", []byte("data"))
+
+	tx := h.putTransmission(t, file.ID, 4)
+	// Frame 0's object was never written to the store — everything the read needs except the
+	// bytes themselves.
+	h.putFrameWithMissingObject(t, tx.ID, 0, true, 4, 4)
+	h.putFrame(t, tx.ID, 1, false, solidPNG(t, 4, 4, color.RGBA{A: 255}))
+	h.putFrame(t, tx.ID, 2, false, solidPNG(t, 4, 4, color.RGBA{A: 255}))
+	h.putFrame(t, tx.ID, 3, false, solidPNG(t, 4, 4, color.RGBA{A: 255}))
+
+	response := httptest.NewRecorder()
+	h.handler.ServeHTTP(response,
+		httptest.NewRequest(http.MethodGet, "/api/v1/transfers/"+tx.ID.String()+"/frames/archive", nil))
+	require.NotEqual(t, http.StatusOK, response.Code,
+		"a first-frame read failure must not look like a successful, empty-bodied zip")
+	require.Equal(t, http.StatusInternalServerError, response.Code)
 }

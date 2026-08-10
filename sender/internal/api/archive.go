@@ -48,7 +48,11 @@ func (s *Server) getFrameArchive(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusInternalServerError, "could not list the frames", err)
 		return
 	}
-	if len(frames) == 0 || tx.FrameCount == 0 || len(frames) < tx.FrameCount {
+	// tx.FrameCount == 0 covers both "nothing rendered yet" and "not even prepared"; a
+	// transmission whose frame count is set always has at least one frame row by the time
+	// len(frames) reaches it, so a separate len(frames) == 0 clause would never fire on its
+	// own.
+	if tx.FrameCount == 0 || len(frames) < tx.FrameCount {
 		s.fail(w, http.StatusConflict, "the frames are still being rendered; try again when the transfer is ready", nil)
 		return
 	}
@@ -78,34 +82,56 @@ func (s *Server) getFrameArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The first frame is read before any header is written, on purpose: WriteHeader has not
+	// been called yet, so a failure here can still answer with a real status instead of the
+	// 200 net/http would send by default the moment anything is written to w. Once the zip
+	// writer has produced its first byte, that option is gone — a failure on frame two onward
+	// really is the "short zip that fails to open" case the loop below logs and truncates on.
+	first, err := objectstore.GetBytes(r.Context(), s.objects, selected[0].StoredPath, maxFrameImageBytes)
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, "could not read a frame image", err)
+		return
+	}
+
 	h := w.Header()
 	h.Set("Content-Type", "application/zip")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Content-Disposition", `attachment; filename="`+escapeHeaderFilename(file.Filename)+`-frames.zip"`)
 	zw := zip.NewWriter(w)
-	for _, f := range selected {
+	if !writeZipEntry(zw, selected[0], first) {
+		return
+	}
+	for _, f := range selected[1:] {
 		body, err := objectstore.GetBytes(r.Context(), s.objects, f.StoredPath, maxFrameImageBytes)
 		if err != nil {
-			// The response has already begun streaming, so an error can only be logged
+			// The response has already begun streaming, so an error here can only be logged
 			// and the archive truncated; the client sees a short zip that fails to open.
 			s.log.Error("frame archive read failed", zap.String("path", f.StoredPath), zap.Error(err))
 			return
 		}
-		name := fmt.Sprintf("frame-%08d.png", f.FrameNumber)
-		if f.IsManifest {
-			name = fmt.Sprintf("frame-%08d-manifest.png", f.FrameNumber)
-		}
-		entry, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
-		if err != nil {
-			return
-		}
-		if _, err := entry.Write(body); err != nil {
+		if !writeZipEntry(zw, f, body) {
 			return
 		}
 	}
 	if err := zw.Close(); err != nil {
 		s.log.Warn("frame archive close failed", zap.Error(err))
 	}
+}
+
+// writeZipEntry adds one frame to the archive, named the way the receiver's importer expects
+// it. It reports whether the write succeeded; a failure here is a write to the response body
+// that has already started, so the caller can only stop rather than report an error.
+func writeZipEntry(zw *zip.Writer, f store.Frame, body []byte) bool {
+	name := fmt.Sprintf("frame-%08d.png", f.FrameNumber)
+	if f.IsManifest {
+		name = fmt.Sprintf("frame-%08d-manifest.png", f.FrameNumber)
+	}
+	entry, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
+	if err != nil {
+		return false
+	}
+	_, err = entry.Write(body)
+	return err == nil
 }
 
 // serveCompositeFrames stacks the manifest frame above the single data frame in one PNG.
@@ -131,6 +157,14 @@ func (s *Server) serveCompositeFrames(w http.ResponseWriter, r *http.Request, fr
 	}
 
 	top, bottom := images[0].Bounds(), images[1].Bounds()
+	if top.Dy() != bottom.Dy() {
+		// The receiver splits the composite into two equal-height bands rather than reading
+		// a boundary out of the image, so a mismatch here would hand it a file it decodes
+		// wrongly rather than one it refuses. Refusing here is the same failure, but honest
+		// about where it happened.
+		s.fail(w, http.StatusInternalServerError, "the manifest and data frames are not the same size", nil)
+		return
+	}
 	width := max(top.Dx(), bottom.Dx())
 	composite := image.NewRGBA(image.Rect(0, 0, width, top.Dy()+bottom.Dy()))
 	draw.Draw(composite, image.Rect(0, 0, top.Dx(), top.Dy()), images[0], top.Min, draw.Src)
