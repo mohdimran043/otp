@@ -41,10 +41,16 @@ curl -X POST http://localhost:8080/api/v1/transfers \
 Both sides need one directory in common — an NFS mount, a SAN, or a synced share. Frames go one way
 through it; acknowledgements come back the other.
 
+The web UI's New Transfer form offers more per transfer than the curl example does: an encryption choice,
+and a grid — presets from 128×128 to 512×512, or **"Auto — fit my screen,"** the default, computed in your
+browser from the panel it is actually open on. Cell size is not part of that choice; it stays a global
+setting under **Settings**, because it depends on the camera/panel pairing rather than on any one transfer.
+
 ## Transfer speed
 
 Throughput is **bytes per frame × frames per second**. Bigger grids carry more per frame; the panel sets
-how many frames a second.
+how many frames a second. The grid is chosen once per transfer, in the New Transfer form; the tables below
+describe what each grid carries, whichever transfer picks it.
 
 **Capacity per frame, measured** — `color16` is four bits per cell, `color8` is three:
 
@@ -108,7 +114,7 @@ built** ([overview](docs/optical-transport-overview.pdf), §8).
 | URL | What it shows |
 |---|---|
 | `<sender>/display?camera=1` | **Point the camera here.** Full screen, black surround, nothing else |
-| `<sender>/settings` | Frame rate and geometry. The panel's refresh rate is measured in your browser |
+| `<sender>/settings` | Frame rate and cell size (grid dimensions are chosen per transfer, in New Transfer). The panel's refresh rate is measured in your browser |
 | `<sender>/transfers/<id>` | Chunk map, the file as sent, every frame as an image, Pause / Stop |
 | `<receiver>/` | Live capture — frames arriving as thumbnails, labelled by chunk |
 | `<receiver>/transmissions/<id>` | The file itself, both hashes side by side, where it was delivered |
@@ -132,6 +138,69 @@ Three ways to capture, all feeding the same pipeline:
 
 A camera configures itself: the lowest-numbered device that actually declares video capture, in its largest
 mode. It keeps watching, so one plugged in later is noticed — but it never overrides a choice you made.
+
+## Encrypting a transfer
+
+An optical channel is a broadcast, not a wire. Anything with line of sight to the monitor receives every
+frame the display draws, and the protocol is documented, so a second camera in the room decodes a file
+exactly as well as the receiver does. An air gap keeps a transfer off the network; it does nothing about who
+else is looking at the screen. Encryption is what makes the channel confidential rather than merely
+inconvenient to intercept.
+
+Each transfer chooses for itself, in the New Transfer form or the equivalent API fields: **none** by
+default, **AES-256-GCM**, or **ChaCha20-Poly1305**. The cipher ID travels in every frame's header, so the
+receiver knows what it is looking at without being told out of band — but the payload itself is unreadable
+without the key.
+
+The key's path is deliberately manual. It is generated in the sender's form (or typed in by hand), and it is
+the operator's job to carry it to the receiver's **Settings** page — over a phone call, a password manager,
+a second air-gapped channel, anything that is not the optical one. No API returns key material once it is
+stored, and the key itself never crosses the light.
+
+**The honest caveat.** A manifest's filename and content hashes are not part of the encrypted payload and
+stay readable to anyone watching the display — the receiver needs them before it has the key, to know what
+it is assembling and to verify it afterwards. And encryption protects the optical channel specifically: the
+sender's own database holds the uploaded file in plaintext regardless, because it has to, to render the
+frames in the first place. Encrypting a transfer answers "who else can see the screen," not "who can reach
+the sender."
+
+## Moving frames without light
+
+Every rendered frame can leave the sender as a file instead of a photograph, and come back into the receiver
+the same way — for a transfer that has to cross on a USB stick, or a one-off where standing up a camera
+isn't worth it.
+
+**Download frames**, on the transfer's own page, packages every frame — the manifest and all chunk and
+parity frames — as a zip. A transfer that fits in one chunk is packaged instead as a single composite PNG,
+the manifest stacked above the data frame, because there is no second frame to zip.
+
+**Import frames**, on the receiver's Transmissions page, takes that zip or PNG back in. It is not a shortcut
+around the pipeline: imported frames are acknowledged, merged and verified exactly as frames captured by a
+camera are, through the same code path. An encrypted archive needs its key loaded into the receiver's
+keyring first — importing before that produces the same acknowledged-but-unreadable failure a camera would
+produce pointed at the same encrypted screen.
+
+## Running 24/7
+
+Streaming frames continuously does not wear the camera out. A sensor reads out
+electronically — there is no shutter mechanism actuating per frame, no moving part
+that accumulates cycles the way a DSLR's mirror does. A webcam or machine-vision
+camera pointed at a monitor for a year performs the same read-out on its last frame
+as on its first. What actually deserves attention in a permanent installation:
+
+- **Heat.** A sensor streaming at 60 fps runs warm, and warm sensors are noisier.
+  Give the camera airflow and keep it out of direct sunlight; noise shows up in the
+  decode quality figures long before frames fail.
+- **Autofocus.** Turn it off. Focus hunting is the only mechanical motion in the
+  system, it is pointless — the target never moves — and every hunt is a stretch of
+  blurred, undecodable frames. Fixed-focus or locked-focus lenses are the right tool.
+- **The panel, not the camera.** The frames change constantly, so the grid area
+  cannot burn in — but the static black surround on an OLED can retain. On an LED
+  panel there is nothing to worry about; on an OLED, let the display page's surround
+  stay pure black (it does) and prefer LED for permanent duty.
+- **The receiver keeps up or tells you.** Decode statistics are per session; a slow
+  decline in finder scores is a lens drifting or dust accumulating — the platform's
+  earliest warning, visible on the receiver's front page.
 
 ## Testing
 
@@ -190,3 +259,7 @@ which is what lets either be restarted, upgraded or replaced while the other kee
   like an image and is an XML document that may carry `<script>`.
 - **Decompression is bounded by the manifest's declared size.** Every codec here can express a small input
   that expands without limit.
+- **Per-transfer keys never cross the optical channel and are never returned by any API.** A key is
+  generated on the sender and carried to the receiver's Settings by the operator, out of band; once stored,
+  no endpoint on either side echoes it back — `GET`ting a transfer or a keyring entry shows that a key
+  exists, never what it is.

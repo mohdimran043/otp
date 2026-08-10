@@ -91,10 +91,10 @@ type Sender struct {
 	// The display, wrapped as the real sender wraps it. Not a bare FileSink: the display sequence is
 	// assigned by Live, and a harness that skipped it would not exercise the arrangement a deployment uses —
 	// which is exactly where concurrent transfers once overwrote each other's frames.
-	sink    *optical.Live
-	acks    *ackwatch.Watcher
-	server  *httptest.Server
-	log     *zap.Logger
+	sink   *optical.Live
+	acks   *ackwatch.Watcher
+	server *httptest.Server
+	log    *zap.Logger
 
 	// displays tracks the display loops started for each transmission, so Stop can wait for them
 	// rather than leaving goroutines writing frames into a directory a test is about to delete.

@@ -47,6 +47,19 @@ From `shared/encoding`. **Capacity depends only on the grid, not the cell size**
 same bytes at 4 px cells as at 8 px. Cell size buys the camera's ability to read it, and costs screen
 area.
 
+The grid is chosen per transfer now, not once for a whole deployment — the New Transfer form offers the
+presets below plus "Auto — fit my screen," computed in the browser. Cell size is not part of that choice;
+it stays a deployment-wide setting under Settings, because it is a camera/panel property rather than a
+per-transfer one. The tables in this document describe what a grid carries and costs, whichever transfer
+picks it.
+
+**Encryption subtracts 28 bytes from every frame's payload capacity** — a 12-byte nonce and a 16-byte
+authentication tag (`protocol.EncryptionOverhead`), because a chunk is sized to fit in exactly one frame
+and the ciphertext still has to fit after the nonce and tag are added. An encrypted transfer's usable
+capacity at a given grid and encoding is the figures below minus 28 bytes; the sender derives chunk size
+from this automatically, so it is invisible operationally, but it is why an encrypted transfer at, say,
+256×256 `color16` chunks at 30 198 bytes rather than 30 226.
+
 | Grid | Frame at 4 px | Frame at 8 px | `color8` | `color16` |
 |---|---|---|---|---|
 | 128×128 | 528 px | 1 056 px | 4 536 B | 6 048 B |
@@ -188,8 +201,12 @@ OTP_SENDER_DISPLAY_FPS=25
 ```
 
 The frame rate can also be changed at any moment from **Settings** in the sender UI, including
-mid-transfer, which is when you want it. The geometry cannot: it is written into every frame header and
-the chunk size is derived from it, so the UI refuses a geometry change while anything is in flight.
+mid-transfer, which is when you want it. The geometry above is the deployment's default and cell size
+throughout — every new transfer starts from it unless the New Transfer form picks a different grid for
+itself, which it can do per transfer (128×128 up to 512×512, or "Auto — fit my screen"). What neither the
+per-transfer choice nor the Settings default can do is change once a transfer exists: the grid is written
+into every frame header and the chunk size is derived from it, so it is fixed at creation and the Settings
+page refuses to change the deployment default while any transfer is in flight, for the same reason.
 
 ### Receiver
 
