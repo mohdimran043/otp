@@ -77,6 +77,12 @@ func TestParseTransferRequestEncryptionAndGrid(t *testing.T) {
 			}},
 		{name: "grid too small to carry anything", fields: map[string]string{
 			"grid_width": "16", "grid_height": "16"}, wantErr: "grid"},
+		{name: "grid renders larger than any panel", fields: map[string]string{
+			// 600 cells at the default 8 px/cell and 2-cell quiet zone renders to
+			// (600+4)*8 = 4832 px, past maxImagePixels (4320) but well inside
+			// NewLayoutQuiet's own 48..4096 cell bound — so this reaches the
+			// panel-size check specifically, not the earlier grid-bounds check.
+			"grid_width": "600", "grid_height": "600"}, wantErr: "larger than any panel"},
 	}
 
 	for _, tc := range cases {
@@ -112,4 +118,30 @@ func TestParseTransferRequestKeepsLegacyBehaviourWithAGlobalKey(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint8(1), result.EncryptionID)
 	require.Equal(t, cfg.EncryptionKey(), result.EncryptionKey)
+}
+
+// TestParseTransferRequestRejectsAGridTheEncoderCannotCarryAtTheResolvedDepth reaches the
+// encoder-capacity branch of the grid validation specifically, which the table test above
+// cannot: every case there that fails validation is stopped earlier, either by the
+// encoder/bit-depth check right after encoding.ByName or by NewLayoutQuiet's own grid-size
+// bound. This case slips past both. The request asks for the "binary" encoder (which only
+// ever carries bit depth 1) and an explicit bit_depth of "0" — read literally as 0, not
+// omitted — so the earlier "does this encoder support the requested depth" check is skipped
+// (it only runs when the request's bit depth is nonzero). The deployment's configured
+// default bit depth is 4, which is not zero, so it is what the grid-validation code
+// resolves "0" to before asking the encoder to estimate capacity at it — and 4 is invalid
+// for "binary". That failure can only come from EstimateCapacity's resolveDepth call.
+func TestParseTransferRequestRejectsAGridTheEncoderCannotCarryAtTheResolvedDepth(t *testing.T) {
+	s := New(Options{
+		Config: config.NewWatcher("", config.Default()),
+		Log:    zap.NewNop(),
+	})
+	cfg := config.Default()
+	cfg.Optical.BitDepth = 4 // valid for color16, not for binary
+
+	req := formRequest(t, map[string]string{"encoder": "binary", "bit_depth": "0"})
+	_, err := s.parseTransferRequest(req, cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "cannot carry the binary encoding")
+	require.Contains(t, err.Error(), "does not offer depth 4")
 }
