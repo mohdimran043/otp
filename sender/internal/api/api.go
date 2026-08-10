@@ -151,6 +151,22 @@ type TransferRequest struct {
 	// Autostart displays the transmission as soon as it is prepared. Off means an operator starts it
 	// from the UI, which is what a scheduled transfer window needs.
 	Autostart bool `json:"autostart,omitempty"`
+
+	// Encryption is the cipher name and EncryptionKeyHex its 32-byte key, both optional.
+	// The default is no encryption; an omitted field with a globally configured key keeps
+	// the pre-feature behaviour (AES-256-GCM under that key) so existing deployments do
+	// not silently start sending plaintext.
+	Encryption       string `json:"encryption,omitempty"`
+	EncryptionKeyHex string `json:"encryption_key_hex,omitempty"`
+
+	// GridWidth and GridHeight override the configured frame geometry for this transfer
+	// alone. Zero means the configured default.
+	GridWidth  int `json:"grid_width,omitempty"`
+	GridHeight int `json:"grid_height,omitempty"`
+
+	// Resolved by parseTransferRequest; never read from the wire.
+	EncryptionID  uint8  `json:"-"`
+	EncryptionKey []byte `json:"-"`
 }
 
 // TransferResponse is what a caller gets back.
@@ -252,11 +268,13 @@ func (s *Server) createTransfer(w http.ResponseWriter, r *http.Request) {
 		FECCodec:         request.FECCodec,
 		FECDataShards:    request.DataShards,
 		FECParityShards:  request.ParityShards,
-		GridWidth:        cfg.Optical.GridWidth,
-		GridHeight:       cfg.Optical.GridHeight,
+		GridWidth:        request.GridWidth,
+		GridHeight:       request.GridHeight,
 		CellPixels:       cfg.Optical.CellPixels,
 		QuietZone:        cfg.Optical.QuietZone,
-		Encrypted:        cfg.Optical.EncryptionKeyHex != "",
+		Encrypted:        request.EncryptionID != protocol.EncryptionNone,
+		EncryptionID:     int(request.EncryptionID),
+		EncryptionKey:    request.EncryptionKey,
 		OriginalSize:     file.SizeBytes,
 		CallbackURL:      request.CallbackURL,
 	})
@@ -319,17 +337,21 @@ func (s *Server) createTransfer(w http.ResponseWriter, r *http.Request) {
 // during rendering — after the upload had been read and the caller had been told it was accepted.
 func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (TransferRequest, error) {
 	request := TransferRequest{
-		Filename:     strings.TrimSpace(r.FormValue("filename")),
-		CallbackURL:  strings.TrimSpace(r.FormValue("callback_url")),
-		Encoder:      strings.TrimSpace(r.FormValue("encoder")),
-		Compression:  strings.TrimSpace(r.FormValue("compression")),
-		FECCodec:     strings.TrimSpace(r.FormValue("fec_codec")),
-		Priority:     strings.TrimSpace(r.FormValue("priority")),
-		BitDepth:     formInt(r, "bit_depth", cfg.Optical.BitDepth),
-		Level:        formInt(r, "level", cfg.Optical.Level),
-		DataShards:   formInt(r, "fec_data_shards", cfg.Optical.FEC.DataShards),
-		ParityShards: formInt(r, "fec_parity_shards", cfg.Optical.FEC.ParityShards),
-		Autostart:    formBool(r, "autostart", true),
+		Filename:         strings.TrimSpace(r.FormValue("filename")),
+		CallbackURL:      strings.TrimSpace(r.FormValue("callback_url")),
+		Encoder:          strings.TrimSpace(r.FormValue("encoder")),
+		Compression:      strings.TrimSpace(r.FormValue("compression")),
+		FECCodec:         strings.TrimSpace(r.FormValue("fec_codec")),
+		Priority:         strings.TrimSpace(r.FormValue("priority")),
+		BitDepth:         formInt(r, "bit_depth", cfg.Optical.BitDepth),
+		Level:            formInt(r, "level", cfg.Optical.Level),
+		DataShards:       formInt(r, "fec_data_shards", cfg.Optical.FEC.DataShards),
+		ParityShards:     formInt(r, "fec_parity_shards", cfg.Optical.FEC.ParityShards),
+		Autostart:        formBool(r, "autostart", true),
+		Encryption:       strings.TrimSpace(r.FormValue("encryption")),
+		EncryptionKeyHex: strings.TrimSpace(r.FormValue("encryption_key_hex")),
+		GridWidth:        formInt(r, "grid_width", cfg.Optical.GridWidth),
+		GridHeight:       formInt(r, "grid_height", cfg.Optical.GridHeight),
 	}
 
 	if request.Encoder == "" {
@@ -388,6 +410,58 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 	default:
 		return request, fmt.Errorf("priority %q is not one of high, normal, low", request.Priority)
 	}
+
+	// Encryption. An omitted field means "whatever the deployment did before this
+	// feature": encrypt under the global key if one is configured. An explicit "none"
+	// always means none — and a key alongside it is refused rather than ignored,
+	// because a caller who supplied a key believes the transfer is confidential.
+	keyHex := request.EncryptionKeyHex
+	switch {
+	case request.Encryption == "" && keyHex == "" && cfg.Optical.EncryptionKeyHex != "":
+		request.EncryptionID = protocol.EncryptionAES256GCM
+		request.EncryptionKey = cfg.EncryptionKey()
+	case request.Encryption == "" && keyHex != "":
+		return request, fmt.Errorf("encryption_key_hex was supplied without an encryption type")
+	default:
+		id, err := protocol.EncryptionByName(request.Encryption)
+		if err != nil {
+			return request, err
+		}
+		if id == protocol.EncryptionNone && keyHex != "" {
+			return request, fmt.Errorf("encryption is \"none\" but a key was supplied; refusing to guess which was meant")
+		}
+		if id != protocol.EncryptionNone {
+			key, err := hex.DecodeString(keyHex)
+			if err != nil || len(key) != protocol.KeySize {
+				return request, fmt.Errorf("encryption %q requires a 64-hex-character key (32 bytes)", request.Encryption)
+			}
+			request.EncryptionKey = key
+		}
+		request.EncryptionID = id
+	}
+
+	// Grid. Validated exactly as the settings endpoint validates geometry: the encoder
+	// must be able to carry something at this grid, and the rendered frame must fit a
+	// real panel. Cell size and quiet zone stay global — they are properties of the
+	// panel and camera, not of one file.
+	layout, err := protocol.NewLayoutQuiet(request.GridWidth, request.GridHeight,
+		cfg.Optical.CellPixels, cfg.Optical.QuietZone)
+	if err != nil {
+		return request, fmt.Errorf("grid %dx%d: %w", request.GridWidth, request.GridHeight, err)
+	}
+	depth := request.BitDepth
+	if depth == 0 {
+		depth = cfg.Optical.BitDepth
+	}
+	if _, err := encoder.EstimateCapacity(layout, uint8(depth)); err != nil {
+		return request, fmt.Errorf("grid %dx%d cannot carry the %s encoding: %w",
+			request.GridWidth, request.GridHeight, request.Encoder, err)
+	}
+	if layout.ImageWidth() > maxImagePixels || layout.ImageHeight() > maxImagePixels {
+		return request, fmt.Errorf("grid %dx%d renders a %d×%d pixel frame, larger than any panel",
+			request.GridWidth, request.GridHeight, layout.ImageWidth(), layout.ImageHeight())
+	}
+
 	return request, nil
 }
 
@@ -416,6 +490,12 @@ type TransferStatus struct {
 	Encoder     string `json:"encoder"`
 	Compression string `json:"compression"`
 	FECCodec    string `json:"fec_codec"`
+
+	// Encryption is the cipher name, never the key: a status response is read by anyone
+	// watching a transfer, and the key must never appear in it.
+	Encryption string `json:"encryption"`
+	GridWidth  int    `json:"grid_width"`
+	GridHeight int    `json:"grid_height"`
 
 	Error string `json:"error,omitempty"`
 
@@ -481,6 +561,9 @@ func (s *Server) getTransfer(w http.ResponseWriter, r *http.Request) {
 		Encoder:        tx.Encoder,
 		Compression:    tx.Compression,
 		FECCodec:       tx.FECCodec,
+		Encryption:     protocol.EncryptionName(uint8(tx.EncryptionID)),
+		GridWidth:      tx.GridWidth,
+		GridHeight:     tx.GridHeight,
 		Error:          tx.Error,
 	}
 	if result, ok := s.acks.Result(id); ok {

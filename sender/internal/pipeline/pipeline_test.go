@@ -377,7 +377,7 @@ func TestEncryptedTransmission(t *testing.T) {
 		// Without the key the payload is unreadable, which is the point.
 		require.NotContains(t, string(frame.Payload), "the receiver writes")
 
-		payload, err := protocol.OpenFrame(decryptionKey, frame)
+		payload, err := protocol.OpenFrame([][]byte{decryptionKey}, frame)
 		require.NoError(t, err)
 		recovered[int(frame.Header.ChunkNumber)] = payload
 	}

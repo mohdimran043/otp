@@ -603,7 +603,7 @@ func (p *Pipeline) render(ctx context.Context, jc *jobs.Context) error {
 
 		var frame *protocol.Frame
 		if len(key) > 0 {
-			frame, err = protocol.NewEncryptedFrame(key, header, payload)
+			frame, err = protocol.NewEncryptedFrame(key, protocol.EncryptionNone, header, payload)
 			if err != nil {
 				return jobs.Permanent(err)
 			}

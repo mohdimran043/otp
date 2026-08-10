@@ -177,6 +177,8 @@ type Transmission struct {
 	CellPixels       int    `json:"cell_pixels"`
 	QuietZone        int    `json:"quiet_zone"`
 	Encrypted        bool   `json:"encrypted"`
+	EncryptionID     int    `json:"encryption_id"`
+	EncryptionKey    []byte `json:"-"`
 
 	// CallbackURL is where the receiver delivers the merged file. It is recorded here because it
 	// travels in the manifest, and the manifest is built from this row.
@@ -213,6 +215,7 @@ type Transmissions struct{ pool *db.Pool }
 const txColumns = `id, file_id, status, priority, compression_profile, encoding_profile,
 	encoder, bit_depth, compression, compression_level, fec_codec, fec_data_shards,
 	fec_parity_shards, grid_width, grid_height, cell_pixels, quiet_zone, encrypted,
+	encryption_id, encryption_key,
 	original_size, compressed_size, chunk_size, chunk_count, frame_count,
 	acked_chunks, retransmits, dropped_frames, callback_url, error, started_at, completed_at,
 	created_at, updated_at`
@@ -222,7 +225,8 @@ func scanTransmission(row pgx.Row) (Transmission, error) {
 	err := row.Scan(&t.ID, &t.FileID, &t.Status, &t.Priority, &t.CompressionProfile,
 		&t.EncodingProfile, &t.Encoder, &t.BitDepth, &t.Compression, &t.CompressionLevel,
 		&t.FECCodec, &t.FECDataShards, &t.FECParityShards, &t.GridWidth, &t.GridHeight,
-		&t.CellPixels, &t.QuietZone, &t.Encrypted, &t.OriginalSize, &t.CompressedSize,
+		&t.CellPixels, &t.QuietZone, &t.Encrypted, &t.EncryptionID, &t.EncryptionKey,
+		&t.OriginalSize, &t.CompressedSize,
 		&t.ChunkSize, &t.ChunkCount, &t.FrameCount, &t.AckedChunks, &t.Retransmits,
 		&t.DroppedFrames, &t.CallbackURL, &t.Error, &t.StartedAt, &t.CompletedAt,
 		&t.CreatedAt, &t.UpdatedAt)
@@ -244,13 +248,13 @@ func (r *Transmissions) Create(ctx context.Context, t Transmission) (Transmissio
 		INSERT INTO transmissions (id, file_id, status, priority, compression_profile,
 			encoding_profile, encoder, bit_depth, compression, compression_level, fec_codec,
 			fec_data_shards, fec_parity_shards, grid_width, grid_height, cell_pixels,
-			quiet_zone, encrypted, original_size, callback_url)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+			quiet_zone, encrypted, encryption_id, encryption_key, original_size, callback_url)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 		RETURNING `+txColumns,
 		t.ID, t.FileID, t.Status, t.Priority, t.CompressionProfile, t.EncodingProfile,
 		t.Encoder, t.BitDepth, t.Compression, t.CompressionLevel, t.FECCodec,
 		t.FECDataShards, t.FECParityShards, t.GridWidth, t.GridHeight, t.CellPixels,
-		t.QuietZone, t.Encrypted, t.OriginalSize, t.CallbackURL))
+		t.QuietZone, t.Encrypted, t.EncryptionID, t.EncryptionKey, t.OriginalSize, t.CallbackURL))
 }
 
 // Get returns one transmission.
