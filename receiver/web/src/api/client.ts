@@ -149,6 +149,16 @@ export interface DeliveryView {
   delivered_at?: string
 }
 
+// KeyView is one decryption key loaded into the receiver's keyring, as the API reports it. The key
+// itself never appears here — only a fingerprint, the first 8 bytes of its SHA-256 in hex — because
+// a page that can display a key is a page that can leak one.
+export interface KeyView {
+  id: number
+  label: string
+  fingerprint: string
+  created_at: string
+}
+
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
     super(message)
@@ -201,6 +211,17 @@ export const api = {
     ),
 
   config: () => request<DecoderConfig>('/api/v1/config'),
+
+  // The decryption keyring. `request` already takes a RequestInit, so POST and DELETE need no
+  // dedicated helper — they pass a method (and a body, for POST) the same way selectCamera does.
+  keys: () => request<{ keys: KeyView[] | null }>('/api/v1/keys').then((r) => r.keys ?? []),
+  addKey: (keyHex: string, label: string) =>
+    request<KeyView>('/api/v1/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key_hex: keyHex, label }),
+    }),
+  deleteKey: (id: number) => request<void>(`/api/v1/keys/${id}`, { method: 'DELETE' }),
 
   cameras: () => request<CamerasView>('/api/v1/cameras'),
 

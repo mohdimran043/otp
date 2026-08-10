@@ -52,6 +52,16 @@ type Receiver struct {
 	// finished remembers which transmissions have already been merged and reported, so a
 	// retransmission arriving after completion does not restart the whole merge.
 	finished map[uuid.UUID]bool
+
+	// keys caches the decryption key ring. The applier consults it for every encrypted
+	// frame, and a database read per frame at 25 fps is a self-inflicted load problem —
+	// so it is refreshed at most every few seconds, only ever from the single-threaded
+	// applier, and a key added on the settings page is in use within one refresh.
+	//
+	// No lock: keys and keysFetched are touched only from the applier goroutine (via
+	// handleChunk), which processes frames one at a time.
+	keys        [][]byte
+	keysFetched time.Time
 }
 
 // New returns a receiver.
@@ -406,6 +416,26 @@ func (r *Receiver) handleManifest(ctx context.Context, frame *protocol.Frame) er
 	return nil
 }
 
+// keyring is every key this receiver holds: the configured one, then the loaded ones.
+func (r *Receiver) keyring(ctx context.Context) [][]byte {
+	if time.Since(r.keysFetched) < 3*time.Second {
+		return r.keys
+	}
+	ring := [][]byte{}
+	if k := r.cfg.Current().EncryptionKey(); len(k) > 0 {
+		ring = append(ring, k)
+	}
+	if stored, err := r.store.DecoderKeys.List(ctx); err == nil {
+		for _, dk := range stored {
+			ring = append(ring, dk.Key)
+		}
+	} else {
+		r.log.Warn("could not list decoder keys", zap.Error(err))
+	}
+	r.keys, r.keysFetched = ring, time.Now()
+	return ring
+}
+
 // handleChunk stores a chunk and acknowledges it.
 //
 // The chunk has already been verified twice by the time it arrives here: the frame's footer carries
@@ -417,7 +447,7 @@ func (r *Receiver) handleChunk(ctx context.Context, frame *protocol.Frame, error
 	chunkNumber := int(frame.Header.ChunkNumber)
 	isParity := frame.Header.Flags.Has(protocol.FlagParity)
 
-	payload, err := protocol.OpenFrame(r.cfg.Current().EncryptionKey(), frame)
+	payload, err := protocol.OpenFrame(r.keyring(ctx), frame)
 	if err != nil {
 		// A payload that will not decrypt is not a channel problem — the frame's own checksums
 		// passed — so it is reported rather than acknowledged, and the sender will try again.

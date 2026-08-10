@@ -99,6 +99,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/frames/{id}/image", s.frameImage)
 	mux.HandleFunc("GET /api/v1/config", s.getConfig)
 
+	// The decryption keyring: keys go in and fingerprints come out, never the key itself.
+	mux.HandleFunc("GET /api/v1/keys", s.listKeys)
+	mux.HandleFunc("POST /api/v1/keys", s.addKey)
+	mux.HandleFunc("DELETE /api/v1/keys/{id}", s.deleteKey)
+
 	// The camera: what is attached, and which of it to use. Discovered rather than configured, which is
 	// why it is not part of the configuration endpoint.
 	mux.HandleFunc("GET /api/v1/cameras", s.listCameras)
@@ -611,7 +616,7 @@ func (s *Server) withCORS(next http.Handler) http.Handler {
 				break
 			}
 		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		if r.Method == http.MethodOptions {

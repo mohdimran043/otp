@@ -21,28 +21,30 @@ var ErrNotFound = errors.New("store: not found")
 type Store struct {
 	pool *db.Pool
 
-	Sessions  *Sessions
-	Frames    *Frames
-	Manifests *Manifests
-	Chunks    *Chunks
-	Merged    *Merged
-	Acks      *Acks
-	Callbacks *Callbacks
-	Stats     *Stats
+	Sessions    *Sessions
+	Frames      *Frames
+	Manifests   *Manifests
+	Chunks      *Chunks
+	Merged      *Merged
+	Acks        *Acks
+	Callbacks   *Callbacks
+	Stats       *Stats
+	DecoderKeys *DecoderKeys
 }
 
 // New returns a store over a connection pool.
 func New(pool *db.Pool) *Store {
 	return &Store{
-		pool:      pool,
-		Sessions:  &Sessions{pool: pool},
-		Frames:    &Frames{pool: pool},
-		Manifests: &Manifests{pool: pool},
-		Chunks:    &Chunks{pool: pool},
-		Merged:    &Merged{pool: pool},
-		Acks:      &Acks{pool: pool},
-		Callbacks: &Callbacks{pool: pool},
-		Stats:     &Stats{pool: pool},
+		pool:        pool,
+		Sessions:    &Sessions{pool: pool},
+		Frames:      &Frames{pool: pool},
+		Manifests:   &Manifests{pool: pool},
+		Chunks:      &Chunks{pool: pool},
+		Merged:      &Merged{pool: pool},
+		Acks:        &Acks{pool: pool},
+		Callbacks:   &Callbacks{pool: pool},
+		Stats:       &Stats{pool: pool},
+		DecoderKeys: &DecoderKeys{pool: pool},
 	}
 }
 
@@ -736,6 +738,61 @@ func (r *Stats) Record(ctx context.Context, metric string, value float64, transm
 		`INSERT INTO statistics (transmission_id, metric, value) VALUES ($1, $2, $3)`,
 		transmissionID, metric, value)
 	return err
+}
+
+// DecoderKey is a decryption key the operator has loaded, alongside the configured one, so this
+// receiver can decode a transmission encrypted with a key that arrived out of band.
+type DecoderKey struct {
+	ID        int64     `json:"id"`
+	Key       []byte    `json:"-"`
+	Label     string    `json:"label"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// DecoderKeys is the decryption-keyring repository.
+type DecoderKeys struct{ pool *db.Pool }
+
+// List returns every loaded key, oldest first — the order they were added, which is the order an
+// operator would expect to see them in.
+func (r *DecoderKeys) List(ctx context.Context) ([]DecoderKey, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, key, label, created_at FROM decoder_keys ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []DecoderKey
+	for rows.Next() {
+		var k DecoderKey
+		if err := rows.Scan(&k.ID, &k.Key, &k.Label, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// Add loads a new key into the ring.
+func (r *DecoderKeys) Add(ctx context.Context, key []byte, label string) (DecoderKey, error) {
+	var k DecoderKey
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO decoder_keys (key, label) VALUES ($1, $2)
+		RETURNING id, key, label, created_at`,
+		key, label).Scan(&k.ID, &k.Key, &k.Label, &k.CreatedAt)
+	return k, err
+}
+
+// Delete removes a key from the ring.
+func (r *DecoderKeys) Delete(ctx context.Context, id int64) error {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM decoder_keys WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: decoder key %d", ErrNotFound, id)
+	}
+	return nil
 }
 
 func page(limit int) int {

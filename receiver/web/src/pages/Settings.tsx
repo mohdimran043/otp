@@ -1,5 +1,20 @@
-import { Alert, Paper, Stack, Table, TableBody, TableCell, TableRow, Typography } from '@mui/material'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
+import {
+  Alert,
+  Button,
+  IconButton,
+  InputAdornment,
+  Paper,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableRow,
+  TextField,
+  Typography,
+} from '@mui/material'
+import DeleteIcon from '@mui/icons-material/Delete'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, formatPercent } from '../api/client'
 import { BrowserCamera } from '../components/BrowserCamera'
@@ -8,6 +23,12 @@ import { ErrorNotice } from '../components/ErrorNotice'
 import { Grid } from '../components/Grid'
 import { Stat } from '../components/Stat'
 import { useUi } from '../store/ui'
+
+function randomKeyHex(): string {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
 
 // What the decoder is doing, and which of it can be changed without a restart.
 //
@@ -19,7 +40,32 @@ export function Settings() {
   const client = useQueryClient()
   const config = useQuery({ queryKey: ['config'], queryFn: api.config })
   const cameras = useQuery({ queryKey: ['cameras'], queryFn: api.cameras })
+  const keys = useQuery({ queryKey: ['keys'], queryFn: api.keys })
   const data = config.data
+
+  const [keyLabel, setKeyLabel] = useState('')
+  const [keyHex, setKeyHex] = useState('')
+  const keyValid = /^[0-9a-fA-F]{64}$/.test(keyHex.trim())
+
+  const addKey = useMutation({
+    mutationFn: () => api.addKey(keyHex.trim(), keyLabel.trim()),
+    onSuccess: async () => {
+      setKeyLabel('')
+      setKeyHex('')
+      await client.invalidateQueries({ queryKey: ['keys'] })
+    },
+  })
+  const deleteKey = useMutation({
+    mutationFn: (id: number) => api.deleteKey(id),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ['keys'] })
+    },
+  })
+
+  // What the "Decryption keys" stat counts: every key loaded through this page, plus one more when
+  // the environment carries a configured key — the same key OpenFrame tries first, just not one
+  // this page can list or remove.
+  const loadedKeyCount = (keys.data?.length ?? 0) + (data?.decoder.encrypted ? 1 : 0)
 
   return (
     <Stack spacing={3}>
@@ -82,13 +128,94 @@ export function Settings() {
           </Grid>
           <Grid size={{ xs: 12, sm: 6, md: 3 }}>
             <Stat
-              label="Payload encryption"
-              value={data.decoder.encrypted ? 'on' : 'off'}
-              hint={data.decoder.encrypted ? 'a key is configured' : 'payloads arrive in the clear'}
+              label="Decryption keys"
+              value={`${loadedKeyCount} loaded`}
+              hint={
+                loadedKeyCount === 0
+                  ? 'payloads arrive in the clear'
+                  : 'the sender chooses a key per transfer, tried in order until one opens the frame'
+              }
             />
           </Grid>
         </Grid>
       )}
+
+      <Paper variant="outlined" sx={{ p: 2 }}>
+        <Typography variant="subtitle1" sx={{ mb: 1 }}>
+          Decryption keys
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          The sender chooses a key per transfer and carries it here out of band — this receiver
+          cannot know which transfer the display will show next, so every key loaded below is tried
+          until one opens the frame. A key is never shown again once it is loaded; only its
+          fingerprint is.
+        </Typography>
+        <ErrorNotice error={keys.error} />
+
+        {(keys.data?.length ?? 0) === 0 ? (
+          <Alert severity="info" variant="outlined" sx={{ mb: 2 }}>
+            No keys loaded. {data?.decoder.encrypted ? 'The configured key is still tried first.' : ''}
+          </Alert>
+        ) : (
+          <Table size="small" sx={{ mb: 2 }}>
+            <TableBody>
+              {keys.data!.map((k) => (
+                <TableRow key={k.id}>
+                  <TableCell>{k.label || '(no label)'}</TableCell>
+                  <TableCell sx={{ fontFamily: 'monospace' }}>{k.fingerprint}</TableCell>
+                  <TableCell align="right">
+                    <IconButton
+                      size="small"
+                      aria-label={`delete ${k.label || k.fingerprint}`}
+                      disabled={deleteKey.isPending}
+                      onClick={() => deleteKey.mutate(k.id)}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+
+        <ErrorNotice error={addKey.error} />
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="flex-start">
+          <TextField
+            label="Label"
+            value={keyLabel}
+            onChange={(event) => setKeyLabel(event.target.value)}
+            size="small"
+          />
+          <TextField
+            label="Key (64 hex characters)"
+            value={keyHex}
+            onChange={(event) => setKeyHex(event.target.value)}
+            error={keyHex.length > 0 && !keyValid}
+            size="small"
+            sx={{ minWidth: 320 }}
+            slotProps={{
+              input: {
+                sx: { fontFamily: 'monospace' },
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <Button size="small" onClick={() => setKeyHex(randomKeyHex())}>
+                      Generate
+                    </Button>
+                  </InputAdornment>
+                ),
+              },
+            }}
+          />
+          <Button
+            variant="contained"
+            disabled={!keyValid || addKey.isPending}
+            onClick={() => addKey.mutate()}
+          >
+            Add key
+          </Button>
+        </Stack>
+      </Paper>
 
       {data && (
         <Paper variant="outlined" sx={{ p: 2 }}>
