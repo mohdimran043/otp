@@ -204,7 +204,7 @@ func (p *Pipeline) compress(ctx context.Context, jc *jobs.Context) error {
 // exactly one chunk fits in exactly one frame. Deriving it rather than configuring it means
 // an operator who changes the grid or the encoder gets chunks that still fit, instead of a
 // transmission that fails at the first render.
-func chunkSizeFor(tx store.Transmission, key []byte) (int, protocol.Layout, encoding.Encoder, error) {
+func chunkSizeFor(tx store.Transmission) (int, protocol.Layout, encoding.Encoder, error) {
 	layout, err := protocol.NewLayoutQuiet(tx.GridWidth, tx.GridHeight, tx.CellPixels, tx.QuietZone)
 	if err != nil {
 		return 0, protocol.Layout{}, nil, err
@@ -219,7 +219,7 @@ func chunkSizeFor(tx store.Transmission, key []byte) (int, protocol.Layout, enco
 	}
 
 	size := capacity.PayloadBytes
-	if len(key) > 0 {
+	if tx.EncryptionID != int(protocol.EncryptionNone) {
 		// Encryption adds a nonce and a tag to every payload, and the sum still has to fit in
 		// one frame — so the chunk has to be smaller by exactly that much.
 		size -= protocol.EncryptionOverhead
@@ -238,9 +238,8 @@ func (p *Pipeline) chunk(ctx context.Context, jc *jobs.Context) error {
 	if err != nil {
 		return err
 	}
-	cfg := p.cfg.Current()
 
-	size, _, _, err := chunkSizeFor(tx, cfg.EncryptionKey())
+	size, _, _, err := chunkSizeFor(tx)
 	if err != nil {
 		return jobs.Permanent(err)
 	}
@@ -477,9 +476,8 @@ func (p *Pipeline) render(ctx context.Context, jc *jobs.Context) error {
 		return err
 	}
 	cfg := p.cfg.Current()
-	key := cfg.EncryptionKey()
 
-	_, layout, encoder, err := chunkSizeFor(tx, key)
+	_, layout, encoder, err := chunkSizeFor(tx)
 	if err != nil {
 		return jobs.Permanent(err)
 	}
@@ -602,8 +600,8 @@ func (p *Pipeline) render(ctx context.Context, jc *jobs.Context) error {
 		}
 
 		var frame *protocol.Frame
-		if len(key) > 0 {
-			frame, err = protocol.NewEncryptedFrame(key, protocol.EncryptionNone, header, payload)
+		if tx.EncryptionID != int(protocol.EncryptionNone) {
+			frame, err = protocol.NewEncryptedFrame(tx.EncryptionKey, uint8(tx.EncryptionID), header, payload)
 			if err != nil {
 				return jobs.Permanent(err)
 			}

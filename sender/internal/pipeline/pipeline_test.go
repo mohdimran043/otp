@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"image/png"
 	"math/rand"
@@ -97,6 +98,15 @@ func newHarness(t *testing.T, tune func(*config.Config)) *harness {
 // handler will.
 func (h *harness) upload(t *testing.T, name string, body []byte) (store.File, store.Transmission) {
 	t.Helper()
+	return h.uploadTuned(t, name, body, nil)
+}
+
+// uploadTuned is upload with a hook to override fields on the transmission row before it is
+// created. It exists for cases the API decides per transfer — encryption and grid geometry
+// among them — where a test has to set the row directly because there is no API layer in
+// this harness to make that decision for it.
+func (h *harness) uploadTuned(t *testing.T, name string, body []byte, tune func(*store.Transmission)) (store.File, store.Transmission) {
+	t.Helper()
 	ctx := context.Background()
 
 	id := uuid.New()
@@ -114,7 +124,7 @@ func (h *harness) upload(t *testing.T, name string, body []byte) (store.File, st
 	})
 	require.NoError(t, err)
 
-	tx, err := h.store.Transmissions.Create(ctx, store.Transmission{
+	row := store.Transmission{
 		FileID:           file.ID,
 		Encoder:          h.cfg.Optical.Encoder,
 		BitDepth:         h.cfg.Optical.BitDepth,
@@ -129,7 +139,12 @@ func (h *harness) upload(t *testing.T, name string, body []byte) (store.File, st
 		QuietZone:        h.cfg.Optical.QuietZone,
 		Encrypted:        h.cfg.Optical.EncryptionKeyHex != "",
 		OriginalSize:     int64(len(body)),
-	})
+	}
+	if tune != nil {
+		tune(&row)
+	}
+
+	tx, err := h.store.Transmissions.Create(ctx, row)
 	require.NoError(t, err)
 	return file, tx
 }
@@ -335,13 +350,26 @@ func TestChunkSizeMatchesFrameCapacity(t *testing.T) {
 // TestEncryptedTransmission covers the confidential path, including that the chunk size
 // shrinks to leave room for the nonce and tag — otherwise the last bytes of every chunk would
 // not fit in the frame.
+//
+// The cipher and key are set on the transmission row, not on the process configuration: that
+// is where the real API decides them (at transfer creation), and the pipeline itself now reads
+// only the row. cfg.Optical.EncryptionKeyHex is deliberately left unset here, so a pipeline
+// that still consulted it would leave this test's frames unencrypted rather than pass by
+// accident.
 func TestEncryptedTransmission(t *testing.T) {
-	key := strings.Repeat("5a", 32)
-	h := newHarness(t, func(c *config.Config) { c.Optical.EncryptionKeyHex = key })
+	h := newHarness(t, nil)
 	ctx := context.Background()
 
+	keyHex := strings.Repeat("5a", 32)
+	key, err := hex.DecodeString(keyHex)
+	require.NoError(t, err)
+
 	original := testPayload(16<<10, 4)
-	_, tx := h.upload(t, "secret.bin", original)
+	_, tx := h.uploadTuned(t, "secret.bin", original, func(tx *store.Transmission) {
+		tx.Encrypted = true
+		tx.EncryptionID = int(protocol.EncryptionAES256GCM)
+		tx.EncryptionKey = key
+	})
 	ready := h.prepareAndWait(t, tx.ID)
 
 	layout, err := protocol.NewLayoutQuiet(ready.GridWidth, ready.GridHeight, ready.CellPixels, ready.QuietZone)
@@ -355,9 +383,6 @@ func TestEncryptedTransmission(t *testing.T) {
 
 	frames, err := h.store.Frames.List(ctx, tx.ID)
 	require.NoError(t, err)
-
-	decryptionKey := h.cfg.EncryptionKey()
-	require.Len(t, decryptionKey, 32)
 
 	recovered := map[int][]byte{}
 	for _, record := range frames {
@@ -373,11 +398,12 @@ func TestEncryptedTransmission(t *testing.T) {
 		}
 
 		require.True(t, frame.Header.Flags.Has(protocol.FlagEncrypted))
+		require.Equal(t, uint8(protocol.EncryptionAES256GCM), frame.Header.EncryptionID)
 
 		// Without the key the payload is unreadable, which is the point.
 		require.NotContains(t, string(frame.Payload), "the receiver writes")
 
-		payload, err := protocol.OpenFrame([][]byte{decryptionKey}, frame)
+		payload, err := protocol.OpenFrame([][]byte{key}, frame)
 		require.NoError(t, err)
 		recovered[int(frame.Header.ChunkNumber)] = payload
 	}
@@ -391,6 +417,112 @@ func TestEncryptedTransmission(t *testing.T) {
 	got, err := compress.UnBytes(codec, stream.Bytes(), int64(len(original)))
 	require.NoError(t, err)
 	require.Equal(t, original, got)
+}
+
+// TestPipelineEncryptsPerTransfer covers the cipher choice living on the transmission row
+// rather than in process configuration: two transfers on the same sender can use different
+// ciphers and keys, so chunkSizeFor and render must read tx.EncryptionID/tx.EncryptionKey
+// rather than a single global key.
+func TestPipelineEncryptsPerTransfer(t *testing.T) {
+	h := newHarness(t, nil)
+	ctx := context.Background()
+
+	key := bytes.Repeat([]byte{5}, protocol.KeySize)
+	wrongKey := bytes.Repeat([]byte{6}, protocol.KeySize)
+
+	original := testPayload(8<<10, 11)
+	_, tx := h.uploadTuned(t, "per-transfer.bin", original, func(tx *store.Transmission) {
+		tx.Encrypted = true
+		tx.EncryptionID = int(protocol.EncryptionChaCha20Poly1305)
+		tx.EncryptionKey = key
+	})
+	h.prepareAndWait(t, tx.ID)
+
+	frames, err := h.store.Frames.List(ctx, tx.ID)
+	require.NoError(t, err)
+
+	dataFrames := 0
+	for _, record := range frames {
+		body, err := objectstore.GetBytes(ctx, h.objects, record.StoredPath, 16<<20)
+		require.NoError(t, err)
+		img, err := png.Decode(bytes.NewReader(body))
+		require.NoError(t, err)
+
+		frame, err := encoding.Decode(img, protocol.LocateOptions{})
+		require.NoError(t, err)
+		if frame.Header.Flags.Has(protocol.FlagManifest) || frame.Header.Flags.Has(protocol.FlagParity) {
+			continue
+		}
+		dataFrames++
+
+		require.Equal(t, uint8(protocol.EncryptionChaCha20Poly1305), frame.Header.EncryptionID)
+		require.True(t, frame.Header.Flags.Has(protocol.FlagEncrypted))
+
+		payload, err := protocol.OpenFrame([][]byte{key}, frame)
+		require.NoError(t, err)
+		require.NotEmpty(t, payload)
+
+		_, err = protocol.OpenFrame([][]byte{wrongKey}, frame)
+		require.Error(t, err, "the wrong key must not open a frame it did not seal")
+	}
+	require.Positive(t, dataFrames)
+}
+
+// TestPipelineChunksSmallerWhenEncrypted pins the size relationship an encrypted transfer
+// depends on: a chunk still has to fit in one frame after it grows by a nonce and a tag, so
+// the encrypted chunk size must be exactly that much smaller than the plaintext one — not
+// approximately, since a chunk one byte too large would fail to encode at render time rather
+// than fail cleanly at chunk time.
+func TestPipelineChunksSmallerWhenEncrypted(t *testing.T) {
+	h := newHarness(t, nil)
+
+	body := testPayload(8<<10, 12)
+
+	_, plain := h.upload(t, "plain.bin", body)
+	plainReady := h.prepareAndWait(t, plain.ID)
+
+	_, encrypted := h.uploadTuned(t, "encrypted.bin", body, func(tx *store.Transmission) {
+		tx.Encrypted = true
+		tx.EncryptionID = int(protocol.EncryptionChaCha20Poly1305)
+		tx.EncryptionKey = bytes.Repeat([]byte{7}, protocol.KeySize)
+	})
+	encryptedReady := h.prepareAndWait(t, encrypted.ID)
+
+	require.Equal(t, plainReady.ChunkSize-protocol.EncryptionOverhead, encryptedReady.ChunkSize,
+		"an encrypted chunk must be smaller by exactly the nonce and tag it carries")
+}
+
+// TestPipelineRendersPerTransferGrid checks that the grid a transfer renders at comes from its
+// own row, not from whatever the sender process happens to be configured with. Encoding
+// profiles are chosen per transfer through the API, and a sender juggling several transfers at
+// once must not let one transfer's geometry leak into another's frames.
+func TestPipelineRendersPerTransferGrid(t *testing.T) {
+	h := newHarness(t, nil) // cfg.Optical.GridWidth/Height are the harness default, 96x96.
+	ctx := context.Background()
+
+	_, tx := h.uploadTuned(t, "big-grid.bin", testPayload(4<<10, 13), func(tx *store.Transmission) {
+		tx.GridWidth = 192
+		tx.GridHeight = 192
+	})
+	require.NotEqual(t, h.cfg.Optical.GridWidth, tx.GridWidth,
+		"the test needs the row and the process config to disagree")
+	h.prepareAndWait(t, tx.ID)
+
+	frames, err := h.store.Frames.List(ctx, tx.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, frames)
+
+	for _, record := range frames {
+		body, err := objectstore.GetBytes(ctx, h.objects, record.StoredPath, 16<<20)
+		require.NoError(t, err)
+		img, err := png.Decode(bytes.NewReader(body))
+		require.NoError(t, err)
+
+		frame, err := encoding.Decode(img, protocol.LocateOptions{})
+		require.NoError(t, err, "frame %d must decode", record.FrameNumber)
+		require.Equal(t, uint16(192), frame.Header.GridWidth)
+		require.Equal(t, uint16(192), frame.Header.GridHeight)
+	}
 }
 
 // TestParityShardsRecoverLostChunks checks the error correction the pipeline added actually
