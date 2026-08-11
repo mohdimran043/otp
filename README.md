@@ -182,15 +182,25 @@ corollary being that editing such a field in `.env` no longer wins once the UI h
 
 ### Start the camera before the transfer
 
-**This ordering is not advice, it is a requirement**, and getting it wrong looks like a hang rather than a
-mistake. The manifest — the frame carrying the filename, the size and the hash — is displayed early and then,
-once every chunk has been acknowledged, the display parks and never shows it again. A camera that starts
-watching after that window decodes every chunk perfectly, acknowledges them all, and still cannot assemble
-anything, because it never learned what it was assembling. The sender sits at `transmitting` with everything
-acknowledged, indefinitely.
+**This ordering is not advice, it is a requirement for small transfers**, and getting it wrong looks like a
+hang rather than a mistake.
 
-So: open the receiver's Camera page and press **Start** first, confirm frames are being decoded, and only then
-create the transfer. Recovering from the wrong order means cancelling and sending again.
+The manifest — the frame carrying the filename, the size and the hash — is displayed first and then re-emitted
+every 64 frames, specifically so a receiver arriving mid-stream can join. That is sound, but it races against
+how fast the chunks get acknowledged. At 10 fps the next manifest is 6.4 seconds away, while a five-chunk
+transfer has every chunk acknowledged inside about two. Once nothing is outstanding the display parks — the
+keep-alive path re-shows the oldest *unacknowledged* chunk, and there isn't one — so the manifest is never
+re-emitted. A camera that caught the chunks but missed the manifest has decoded everything, acknowledged
+everything, and still cannot assemble a file, because it never learned what it was assembling. The sender sits
+at `transmitting` with everything acknowledged, indefinitely.
+
+The smaller the transfer, the worse the odds: the manifest interval is fixed while the time to acknowledge
+everything shrinks with the chunk count. Large transfers are fine — they are still outstanding when the next
+manifest comes round.
+
+So: open the receiver's Camera page, press **Start**, confirm frames are decoding, and only then create the
+transfer — that way the camera catches the manifest shown first, before anything else. Recovering from the
+wrong order means cancelling and sending again.
 
 ## Cameras
 
