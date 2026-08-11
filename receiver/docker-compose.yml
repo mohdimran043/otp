@@ -19,6 +19,12 @@ services:
       # Only nginx is published. The API listens on the loopback interface inside the container, so the proxy
       # is the only route to it rather than merely the recommended one.
       - "${OTP_RECEIVER_HTTP_PORT:-8081}:80"
+    # See the sender's compose file for why this is here: compose reads .env for ${...} substitution
+    # regardless, but that does not hand the variables to the process, so anything in .env not repeated in the
+    # environment block below was silently ignored. The environment block still wins over this file.
+    env_file:
+      - path: .env
+        required: false
     environment:
       OTP_RECEIVER_DATABASE_URL: postgres://otp:${OTP_RECEIVER_DB_PASSWORD:-otp}@postgres:5432/otp_sender?sslmode=disable
 

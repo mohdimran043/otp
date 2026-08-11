@@ -19,6 +19,17 @@ services:
       # Only nginx is published. The API listens on the loopback interface inside the container, so the proxy
       # is the only route to it rather than merely the recommended one.
       - "${OTP_SENDER_HTTP_PORT:-8080}:80"
+    # Compose reads .env for ${...} substitution in this file whether or not this line is here, but that is a
+    # separate thing from handing those variables to the process — and without this, anything in .env that is
+    # not also named in the environment block below was silently ignored. Every OTP_SENDER_* setting the
+    # application understands is documented in .env.example, and an operator who sets one there is entitled to
+    # have it take effect; before this, DISPLAY_SINK, RETENTION_INTERVAL, RETENTION_MAX_AGE, FEC_DATA_SHARDS,
+    # FEC_PARITY_SHARDS, DISPLAY_WINDOW_SIZE and JOB_CONCURRENCY all quietly kept their built-in defaults.
+    # The environment block still wins over this file, so the values below remain the ones this compose
+    # deployment insists on (container paths, the database it runs, the secrets it refuses to invent).
+    env_file:
+      - path: .env
+        required: false
     environment:
       OTP_SENDER_DATABASE_URL: postgres://otp:${OTP_SENDER_DB_PASSWORD:-otp}@postgres:5432/otp_sender?sslmode=disable
 
