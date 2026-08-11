@@ -209,8 +209,12 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 		Handler: api.New(api.Options{
 			Store:   st,
 			Objects: objects,
-			Config:  watcher,
-			Log:     log.Logger,
+			// The acknowledgement channel's own store, so deleting a transmission can clean up
+			// its acks/<id>/ objects too — the one thing here rooted at a different volume than
+			// Objects.
+			Acks:   acks,
+			Config: watcher,
+			Log:    log.Logger,
 			// The API reports on whichever session is running, so a dashboard needs no session id to ask
 			// about the live capture.
 			Session: func() uuid.UUID { return receiver.Session() },

@@ -35,8 +35,13 @@ import (
 type Server struct {
 	store   *store.Store
 	objects objectstore.Store
-	cfg     *config.Watcher
-	log     *zap.Logger
+	// acks is the acknowledgement channel's own store, rooted at a different volume than
+	// objects. The API otherwise never touches it — acknowledgements are the pipeline's
+	// business — but deleting a transmission means removing its acks/<id>/ objects too, and
+	// only this server can be handed both stores at once.
+	acks objectstore.Store
+	cfg  *config.Watcher
+	log  *zap.Logger
 
 	// session reports the capture session currently running, so the dashboard can show live figures
 	// without being told which session to look at.
@@ -77,6 +82,9 @@ type Server struct {
 type Options struct {
 	Store   *store.Store
 	Objects objectstore.Store
+	// Acks is the acknowledgement channel's store, separate from Objects because it is rooted
+	// at its own volume. Nil is fine for any handler that never deletes a transmission.
+	Acks    objectstore.Store
 	Config  *config.Watcher
 	Log     *zap.Logger
 	Session func() uuid.UUID
@@ -92,6 +100,7 @@ func New(opts Options) *Server {
 	return &Server{
 		store:        opts.Store,
 		objects:      opts.Objects,
+		acks:         opts.Acks,
 		cfg:          opts.Config,
 		log:          opts.Log.Named("api"),
 		session:      opts.Session,
@@ -116,6 +125,9 @@ func (s *Server) Routes() http.Handler {
 	// Where the file was sent and whether it got there. The receiver is the only side that knows: the URL
 	// crossed the optical channel in the manifest, and the delivery was made from here.
 	mux.HandleFunc("GET /api/v1/transmissions/{id}/deliveries", s.listDeliveries)
+	// Removing one entirely: its rows across every table that carries its id, and every object
+	// its layout named — chunks, the merged file, and its acknowledgements.
+	mux.HandleFunc("DELETE /api/v1/transmissions/{id}", s.handleDeleteTransmission)
 	mux.HandleFunc("GET /api/v1/frames/failed", s.listFailedFrames)
 	// The newest captures, decoded or not: what a live page needs to show frames arriving.
 	mux.HandleFunc("GET /api/v1/frames/recent", s.listRecentFrames)

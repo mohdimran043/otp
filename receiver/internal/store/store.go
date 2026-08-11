@@ -21,30 +21,32 @@ var ErrNotFound = errors.New("store: not found")
 type Store struct {
 	pool *db.Pool
 
-	Sessions    *Sessions
-	Frames      *Frames
-	Manifests   *Manifests
-	Chunks      *Chunks
-	Merged      *Merged
-	Acks        *Acks
-	Callbacks   *Callbacks
-	Stats       *Stats
-	DecoderKeys *DecoderKeys
+	Sessions      *Sessions
+	Frames        *Frames
+	Manifests     *Manifests
+	Chunks        *Chunks
+	Merged        *Merged
+	Acks          *Acks
+	Callbacks     *Callbacks
+	Stats         *Stats
+	DecoderKeys   *DecoderKeys
+	Transmissions *Transmissions
 }
 
 // New returns a store over a connection pool.
 func New(pool *db.Pool) *Store {
 	return &Store{
-		pool:        pool,
-		Sessions:    &Sessions{pool: pool},
-		Frames:      &Frames{pool: pool},
-		Manifests:   &Manifests{pool: pool},
-		Chunks:      &Chunks{pool: pool},
-		Merged:      &Merged{pool: pool},
-		Acks:        &Acks{pool: pool},
-		Callbacks:   &Callbacks{pool: pool},
-		Stats:       &Stats{pool: pool},
-		DecoderKeys: &DecoderKeys{pool: pool},
+		pool:          pool,
+		Sessions:      &Sessions{pool: pool},
+		Frames:        &Frames{pool: pool},
+		Manifests:     &Manifests{pool: pool},
+		Chunks:        &Chunks{pool: pool},
+		Merged:        &Merged{pool: pool},
+		Acks:          &Acks{pool: pool},
+		Callbacks:     &Callbacks{pool: pool},
+		Stats:         &Stats{pool: pool},
+		DecoderKeys:   &DecoderKeys{pool: pool},
+		Transmissions: &Transmissions{pool: pool},
 	}
 }
 
@@ -793,6 +795,62 @@ func (r *DecoderKeys) Delete(ctx context.Context, id int64) error {
 		return fmt.Errorf("%w: decoder key %d", ErrNotFound, id)
 	}
 	return nil
+}
+
+// Transmissions is the whole-transmission repository. Nothing else in this file operates
+// across every table a transmission touches at once; deleting one does, so it gets a
+// repository of its own rather than living on one of the narrower ones.
+type Transmissions struct{ pool *db.Pool }
+
+// deletedByTransmission lists every table keyed by a bare transmission_id, in the order they
+// are deleted. manifests is last and deliberate: it is the row DeleteCascade checks for
+// existence, so deleting it first would leave a half-finished cascade indistinguishable, on
+// retry, from a transmission that was never there.
+//
+// captured_frames is not here. It is keyed by session_id, cascades from capture_sessions on
+// delete, and is the capture audit log rather than the file itself — a transmission's
+// deletion must not take a session's history of what the camera saw along with it.
+var deletedByTransmission = []string{
+	"decoded_chunks", "missing_chunks", "merged_files", "ack_state", "callbacks", "statistics", "manifests",
+}
+
+// DeleteCascade removes every row a transmission owns, across the seven tables that carry its
+// id, in one transaction.
+//
+// It is explicit rather than a foreign-key cascade because there is no foreign key to lean on:
+// unlike capture_sessions and captured_frames, every one of these tables carries a bare
+// transmission_id with no constraint at all. Nothing but this method's own consistency says a
+// manifest row and a decoded_chunks row for the same id belong together, so nothing but this
+// method can take them all out atomically.
+//
+// Existence is checked against manifests first, because a manifest is this receiver's record
+// that a transmission exists at all — the other six tables can be legitimately empty (no chunk
+// has arrived yet, no callback was ever due) without that meaning the id is unknown, so an
+// existence check against any of them would misreport a real, merely quiet, transmission as
+// not found.
+func (r *Transmissions) DeleteCascade(ctx context.Context, id uuid.UUID) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(context.WithoutCancel(ctx))
+
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM manifests WHERE transmission_id = $1)`, id).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("%w: no manifest for %s", ErrNotFound, id)
+	}
+
+	for _, table := range deletedByTransmission {
+		if _, err := tx.Exec(ctx,
+			fmt.Sprintf(`DELETE FROM %s WHERE transmission_id = $1`, table), id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func page(limit int) int {
