@@ -17,8 +17,6 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, formatPercent } from '../api/client'
-import { BrowserCamera } from '../components/BrowserCamera'
-import { CameraPicker } from '../components/CameraPicker'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { Grid } from '../components/Grid'
 import { Stat } from '../components/Stat'
@@ -35,11 +33,14 @@ function randomKeyHex(): string {
 // The confidence floors are the interesting pair: they are the receiver's own policy rather than the
 // protocol's, and they are reloadable precisely because tuning a marginal camera means trying a threshold
 // and watching what happens.
+//
+// Choosing the camera itself is not here — it moved to its own tab, where opening the page is what asks the
+// browser for permission. This page is for reading numbers and loading keys, and an operator who came to do
+// either should not be answering a hardware prompt on the way.
 export function Settings() {
   const { refreshMs, setRefreshMs } = useUi()
   const client = useQueryClient()
   const config = useQuery({ queryKey: ['config'], queryFn: api.config })
-  const cameras = useQuery({ queryKey: ['cameras'], queryFn: api.cameras })
   const keys = useQuery({ queryKey: ['keys'], queryFn: api.keys })
   const data = config.data
 
@@ -69,29 +70,8 @@ export function Settings() {
 
   return (
     <Stack spacing={3}>
-      <Typography variant="h5">Capture</Typography>
-      <ErrorNotice error={config.error} />
-
-      {/* The browser's camera first, because it is the one that can ask permission and the one that works without
-          a device passed into the container. The receiver's own camera is below it, for a deployment where the
-          camera is attached to the machine the receiver runs on. */}
-      <BrowserCamera
-        taking={cameras.data?.source === 'browser'}
-        onStart={async () => {
-          await api.selectCamera({ device: '', source: 'browser' })
-          await client.invalidateQueries({ queryKey: ['cameras'] })
-          await client.invalidateQueries({ queryKey: ['config'] })
-        }}
-        onStop={async () => {
-          await api.selectCamera({ device: '', source: 'file' })
-          await client.invalidateQueries({ queryKey: ['cameras'] })
-          await client.invalidateQueries({ queryKey: ['config'] })
-        }}
-      />
-
-      <CameraPicker />
-
       <Typography variant="h5">Decoder</Typography>
+      <ErrorNotice error={config.error} />
 
       {data && (
         <Grid container spacing={2}>

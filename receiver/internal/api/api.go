@@ -59,6 +59,12 @@ type Server struct {
 	// cannot take them, which the handler reports rather than accepting frames into nothing.
 	pushFrame func(image.Image, []byte) (bool, error)
 
+	// browserActive reports whether the browser capture source has heard from a page recently. Selecting
+	// "browser" as the source is not the same as a page actually posting frames to it — unlike the camera
+	// source, which opens hardware the moment it is selected, the browser source just sits and waits. Nil
+	// when this build has no way to ask, which is treated as "no".
+	browserActive func() bool
+
 	// ingest runs one uploaded frame image through the live pipeline: store, decode, apply — the same
 	// path a captured frame takes, so acknowledgements, merge, and delivery all fire as normal. Nil when
 	// this build or deployment cannot take imports.
@@ -93,22 +99,26 @@ type Options struct {
 	Push    func(image.Image, []byte) (bool, error)
 	Ingest  func(context.Context, image.Image, []byte) (pipeline.IngestResult, error)
 	Probe   func(image.Image) bool
+	// BrowserActive reports whether the browser capture source has taken a frame recently. See the field
+	// of the same purpose on Server.
+	BrowserActive func() bool
 }
 
 // New returns a server.
 func New(opts Options) *Server {
 	return &Server{
-		store:        opts.Store,
-		objects:      opts.Objects,
-		acks:         opts.Acks,
-		cfg:          opts.Config,
-		log:          opts.Log.Named("api"),
-		session:      opts.Session,
-		capture:      opts.Behind,
-		switchSource: opts.Switch,
-		pushFrame:    opts.Push,
-		ingest:       opts.Ingest,
-		probe:        opts.Probe,
+		store:         opts.Store,
+		objects:       opts.Objects,
+		acks:          opts.Acks,
+		cfg:           opts.Config,
+		log:           opts.Log.Named("api"),
+		session:       opts.Session,
+		capture:       opts.Behind,
+		switchSource:  opts.Switch,
+		pushFrame:     opts.Push,
+		ingest:        opts.Ingest,
+		probe:         opts.Probe,
+		browserActive: opts.BrowserActive,
 	}
 }
 

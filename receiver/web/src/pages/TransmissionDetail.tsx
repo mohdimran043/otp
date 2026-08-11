@@ -1,17 +1,23 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Alert,
   AlertTitle,
   Box,
   Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   Paper,
   Stack,
   Tooltip,
   Typography,
 } from '@mui/material'
+import DeleteIcon from '@mui/icons-material/Delete'
 import DownloadIcon from '@mui/icons-material/Download'
-import { useQuery } from '@tanstack/react-query'
-import { useParams } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate, useParams } from 'react-router-dom'
 
 import { api, formatBytes, formatPercent } from '../api/client'
 import { ErrorNotice } from '../components/ErrorNotice'
@@ -25,6 +31,10 @@ import { useUi } from '../store/ui'
 export function TransmissionDetail() {
   const { id = '' } = useParams()
   const refreshMs = useUi((state) => state.refreshMs)
+  const client = useQueryClient()
+  const navigate = useNavigate()
+
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   const transmission = useQuery({
     queryKey: ['transmission', id],
@@ -45,6 +55,16 @@ export function TransmissionDetail() {
     enabled: Boolean(id),
   })
 
+  // Away from the detail page on success, because the thing it was showing no longer exists — staying would
+  // leave every query on it refetching a 404. The list is invalidated as well so the row is gone on arrival.
+  const deleteTransmission = useMutation({
+    mutationFn: () => api.deleteTransmission(id),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['transmissions'] })
+      navigate('/transmissions')
+    },
+  })
+
   const data = transmission.data
   const merged = data?.merged
 
@@ -62,14 +82,56 @@ export function TransmissionDetail() {
 
   return (
     <Stack spacing={3}>
-      <Stack direction="row" alignItems="baseline" spacing={2}>
+      <Stack direction="row" alignItems="center" spacing={2} flexWrap="wrap" useFlexGap>
         <Typography variant="h5">{data?.filename ?? 'Transmission'}</Typography>
-        <Typography variant="caption" color="text.secondary">
+        <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1 }}>
           {id}
         </Typography>
+        <Button
+          size="small"
+          variant="outlined"
+          color="error"
+          startIcon={<DeleteIcon />}
+          onClick={() => setConfirmingDelete(true)}
+        >
+          Delete
+        </Button>
       </Stack>
 
       <ErrorNotice error={transmission.error} />
+
+      <Dialog open={confirmingDelete} onClose={() => setConfirmingDelete(false)}>
+        <DialogTitle>Delete this transmission?</DialogTitle>
+        <DialogContent>
+          <ErrorNotice error={deleteTransmission.error} />
+          <DialogContentText component="div">
+            This removes the transmission entirely — its manifest, every chunk received for it, the merged
+            file, and the acknowledgements written back to the sender. There is no undo, and the file cannot
+            be downloaded again afterwards.
+            {!merged && (
+              <>
+                <br />
+                <br />
+                Nothing has been merged yet, so frames for this transmission may still be arriving. Deleting
+                it does not stop the sender: the next chunk that decodes will simply start a fresh row from
+                nothing, having lost the {data?.chunks_arrived ?? 0} chunk
+                {(data?.chunks_arrived ?? 0) === 1 ? '' : 's'} already here.
+              </>
+            )}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmingDelete(false)}>Keep it</Button>
+          <Button
+            color="error"
+            variant="contained"
+            disabled={deleteTransmission.isPending}
+            onClick={() => deleteTransmission.mutate()}
+          >
+            {deleteTransmission.isPending ? 'Deleting…' : 'Delete the transmission'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {merged && (
         <Alert severity={merged.verified ? 'success' : 'error'} variant="outlined">

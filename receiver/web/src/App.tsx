@@ -17,6 +17,7 @@ import DarkModeIcon from '@mui/icons-material/DarkMode'
 import LightModeIcon from '@mui/icons-material/LightMode'
 import VideocamIcon from '@mui/icons-material/Videocam'
 
+import { Camera } from './pages/Camera'
 import { LiveCapture } from './pages/LiveCapture'
 import { Transmissions } from './pages/Transmissions'
 import { TransmissionDetail } from './pages/TransmissionDetail'
@@ -27,10 +28,12 @@ import { useUi } from './store/ui'
 
 const tabs = [
   { path: '/', label: 'Live capture' },
+  // The camera has a tab of its own rather than a section inside Settings. Granting a browser access to a
+  // camera is a prompt an operator has to answer, and a page that exists only to ask it can ask on arrival —
+  // buried in Settings, the prompt only ever fired from a Start button most operators never reached.
+  { path: '/camera', label: 'Camera' },
   { path: '/transmissions', label: 'Transmissions' },
   { path: '/failures', label: 'Decode failures' },
-  // "Settings" rather than "Decoder": the page now configures the camera as well, and the camera is the
-  // thing an operator goes looking for.
   { path: '/settings', label: 'Settings' },
 ]
 
@@ -112,6 +115,7 @@ export function App() {
       <Container maxWidth="xl" sx={{ py: 3 }}>
         <Routes>
           <Route path="/" element={<LiveCapture />} />
+          <Route path="/camera" element={<Camera />} />
           <Route path="/transmissions" element={<Transmissions />} />
           <Route path="/transmissions/:id" element={<TransmissionDetail />} />
           <Route path="/failures" element={<DecodeFailures />} />
