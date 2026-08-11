@@ -45,7 +45,11 @@ type Receiver struct {
 	deliver *Deliverer
 
 	// session is the capture session frames are attributed to.
-	session uuid.UUID
+	//
+	// Atomic because it is read by every decode worker for every frame and replaced when the capture source
+	// changes: starting the camera begins a new session so Live capture and the counters describe this attempt
+	// rather than every attempt since the process started.
+	session atomic.Pointer[uuid.UUID]
 
 	// started records when the first frame of a transmission was seen, so the result record can
 	// report throughput measured rather than estimated.
@@ -113,7 +117,47 @@ func New(st *store.Store, objects, acks objectstore.Store, source Source, cfg *c
 }
 
 // Session is the capture session this receiver is recording under.
-func (r *Receiver) Session() uuid.UUID { return r.session }
+func (r *Receiver) Session() uuid.UUID {
+	if id := r.session.Load(); id != nil {
+		return *id
+	}
+	return uuid.Nil
+}
+
+// RotateSession closes the current capture session and starts a new one.
+//
+// Called when the capture source changes, so that one session means one capture run. It used to mean "the life of
+// the process", which left Live capture showing frames from a previous attempt and the counters summing attempts
+// that had nothing to do with each other — "0 decoded of 478" spanning six unrelated tries, with no way to see
+// what an adjustment had done.
+//
+// Nothing is deleted. The old session keeps its rows and is closed properly rather than left claiming to capture
+// for ever, and every view is already scoped by session, so the new one reads empty on its own.
+func (r *Receiver) RotateSession(ctx context.Context) (uuid.UUID, error) {
+	previous := r.Session()
+
+	next, err := r.store.Sessions.Create(ctx, r.source.Name())
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	// Published before the old one is closed, so no frame is ever attributed to a session that has ended.
+	r.session.Store(&next.ID)
+	r.capturedSequence.Store(0)
+
+	if previous != uuid.Nil {
+		if err := r.store.Sessions.Finish(ctx, previous, "stopped", "capture source changed"); err != nil {
+			// The new session is already live and taking frames; failing here would throw that away over
+			// bookkeeping on a session nothing will write to again.
+			r.log.Warn("could not close the previous capture session",
+				zap.String("session", previous.String()), zap.Error(err))
+		}
+	}
+
+	r.log.Info("capture session rotated",
+		zap.String("previous", previous.String()), zap.String("session", next.ID.String()))
+	return next.ID, nil
+}
 
 // Run captures and decodes until the context is done.
 //
@@ -125,7 +169,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	r.session = session.ID
+	r.session.Store(&session.ID)
 	r.log.Info("capture session started",
 		zap.String("session", session.ID.String()),
 		zap.String("source", r.source.Name()))
@@ -140,11 +184,11 @@ func (r *Receiver) Run(ctx context.Context) error {
 	}()
 
 	// running and runDone bracket the span in which the applier loop below can actually
-	// receive from injected. Set only now, rather than at the very top of Run — r.session is
+	// receive from injected. Set only now, rather than at the very top of Run — r.Session() is
 	// plain, unsynchronised state that prepare reads for every frame it stores, captured or
 	// injected, and the atomic Store here is what an Ingest call's atomic Load synchronises
 	// with. Setting the flag before the assignment above would let a fast Ingest call race it:
-	// the store happening-before the load is exactly what publishes r.session safely, and only
+	// the store happening-before the load is exactly what publishes r.Session() safely, and only
 	// once it has actually been written.
 	//
 	// This defer is registered *after* the session-close one above so that, by LIFO order, it
@@ -458,7 +502,7 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 
 	// Persisted before decoding, always. A frame that cannot be read is the primary evidence for
 	// why a capture is going badly, and it is also the only thing a replay can work from.
-	key, sum, err := r.storeCapture(ctx, r.session, capture)
+	key, sum, err := r.storeCapture(ctx, r.Session(), capture)
 	if err != nil {
 		return prepared{capture: capture, err: err}
 	}
@@ -504,7 +548,7 @@ func (r *Receiver) apply(ctx context.Context, p prepared) error {
 	decodeErr := p.decodeErr
 
 	record := store.CapturedFrame{
-		SessionID:   r.session,
+		SessionID:   r.Session(),
 		Sequence:    capture.Sequence,
 		StoredPath:  key,
 		SHA256:      sum,
@@ -526,7 +570,7 @@ func (r *Receiver) apply(ctx context.Context, p prepared) error {
 			}
 			r.log.Warn("a captured frame was not recorded", zap.Int64("sequence", record.Sequence), zap.Error(err))
 		}
-		if err := r.store.Sessions.Count(ctx, r.session, 1, 0, 1); err != nil {
+		if err := r.store.Sessions.Count(ctx, r.Session(), 1, 0, 1); err != nil {
 			return err
 		}
 
@@ -560,12 +604,12 @@ func (r *Receiver) apply(ctx context.Context, p prepared) error {
 		}
 		r.log.Warn("a decoded frame was not recorded", zap.Int64("sequence", record.Sequence), zap.Error(err))
 	}
-	if err := r.store.Sessions.Count(ctx, r.session, 1, 1, 0); err != nil {
+	if err := r.store.Sessions.Count(ctx, r.Session(), 1, 1, 0); err != nil {
 		return err
 	}
 	if _, seen := r.started[transmission]; !seen {
 		r.started[transmission] = capture.CapturedAt
-		if err := r.store.Sessions.Bind(ctx, r.session, transmission); err != nil {
+		if err := r.store.Sessions.Bind(ctx, r.Session(), transmission); err != nil {
 			return err
 		}
 	}
@@ -729,7 +773,7 @@ func (r *Receiver) emitAck(ctx context.Context, frame *protocol.Frame, status pr
 	record := protocol.Ack{
 		Sequence:       sequence,
 		TransmissionID: transmission,
-		SessionID:      r.session,
+		SessionID:      r.Session(),
 		FrameNumber:    frame.Header.FrameNumber,
 		ChunkNumber:    frame.Header.ChunkNumber,
 		Status:         status,
@@ -1005,7 +1049,7 @@ func (r *Receiver) complete(ctx context.Context, manifest store.Manifest) error 
 		return err
 	}
 
-	session, err := r.store.Sessions.Get(ctx, r.session)
+	session, err := r.store.Sessions.Get(ctx, r.Session())
 	if err != nil {
 		return err
 	}

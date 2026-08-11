@@ -271,6 +271,19 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 				}
 				// Recorded after the swap succeeded, so what the API reports is what is really being read from.
 				watcher.SetSource(next.Source)
+
+				// A new capture session, so starting the camera begins a clean slate. One session used to mean
+				// the life of the process, which left Live capture showing frames from a previous attempt and the
+				// counters summing attempts that had nothing to do with each other — no way to see what an
+				// adjustment had actually changed. Nothing is deleted; the old session is closed and keeps its
+				// rows, and every view is scoped by session so the new one reads empty by itself.
+				//
+				// A failure here is not worth refusing the switch over: the source has already changed, and
+				// carrying on with the old session is far better than reporting a switch that did not happen.
+				if _, err := receiver.RotateSession(ctx); err != nil {
+					log.Warn("could not start a new capture session for the switched source", zap.Error(err))
+				}
+
 				log.Info("capture source switched",
 					zap.String("source", next.Source), zap.String("device", next.Device))
 				return nil
