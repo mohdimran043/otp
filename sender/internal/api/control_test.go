@@ -50,11 +50,11 @@ func newControlHarness(t *testing.T) *controlHarness {
 	}
 
 	handler := New(Options{
-		Store:   st,
-		Jobs:    js,
-		Objects: objects,
-		Config:  config.NewWatcher("", cfg),
-		Log:     zap.NewNop(),
+		Store:    st,
+		Jobs:     js,
+		Objects:  objects,
+		Config:   config.NewWatcher("", cfg),
+		Log:      zap.NewNop(),
 		Transmit: h.transmitCallFunc,
 	}).Routes()
 
