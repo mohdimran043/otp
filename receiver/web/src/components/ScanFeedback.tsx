@@ -6,45 +6,66 @@ import { useQuery } from '@tanstack/react-query'
 
 import { api, formatPercent } from '../api/client'
 import { play } from '../lib/beep'
+import { type DecodeSample, recentDecode } from '../lib/decodeRate'
 import { type ScanState, scanEvents } from '../lib/scanEvents'
 import { Stat } from './Stat'
 import { useUi } from '../store/ui'
 
-// How often the receiver is asked what it has decoded. Fast enough that a beep lands while the operator is
-// still holding the camera where it was, slow enough not to matter: two small reads twice a second.
+// How often the receiver is asked what it has decoded. Fast enough that a beep lands while the camera is still
+// where it was, cheap enough not to matter: two small reads twice a second.
 const pollMs = 500
+
+// How many samples the recent-decode window keeps. Twenty at 500ms is the last ten seconds, which is long
+// enough to smooth out one unlucky frame and short enough that moving the camera shows up while you are still
+// moving it.
+const windowSamples = 20
 
 // What the camera is achieving, said out loud.
 //
-// An operator aiming a camera at a monitor cannot watch the monitor they are aiming at, and until now the page
-// told them only how many frames it had *sent* — plus "accepted", which means the frame was queued for
-// decoding and nothing about whether it decoded. So there was no way to tell a well-aimed camera from a badly
-// focused one without walking to another screen.
+// An operator aiming a camera at a screen cannot watch the screen they are aiming at, and the page used to
+// report only how many frames it had *sent* — plus "accepted", which means the frame was queued for decoding and
+// says nothing about whether it decoded.
 //
-// Everything here comes from two endpoints that already existed. Nothing in the decode pipeline changed: the
-// receiver was already recording all of this, it simply was not being shown where it was needed.
+// Two things here are deliberately *not* taken from the capture session, because taking them from there was
+// wrong in a way that cost an evening:
+//
+//   * Whether anything is arriving comes from the transmission actually existing, not from the session's
+//     transmission_id. That field is the last transmission the session ever saw and it is never cleared, so
+//     after any transfer — including one since deleted — it still names something. The panel read that as
+//     "receiving", showed a progress bar against an unknown total, and left it animating over an idle channel.
+//   * The decode figures are measured over a rolling window rather than taken as session lifetime totals. A
+//     session lives for hours, so lifetime figures read healthy long after the camera stopped decoding
+//     anything, which is precisely when an operator is looking at them for help.
 export function ScanFeedback() {
   const { scanSound, setScanSound } = useUi()
 
   const session = useQuery({ queryKey: ['session'], queryFn: api.session, refetchInterval: pollMs })
-  const transmissionId = session.data?.transmission_id
+  const candidateId = session.data?.transmission_id
 
   const transmission = useQuery({
-    queryKey: ['transmission', transmissionId],
-    queryFn: () => api.transmission(transmissionId!),
+    queryKey: ['transmission', candidateId],
+    queryFn: () => api.transmission(candidateId!),
     refetchInterval: pollMs,
-    enabled: Boolean(transmissionId),
+    enabled: Boolean(candidateId),
+    // A transmission the session remembers but the store no longer has is gone, not a transient failure. One
+    // quiet 404 is the answer, not something to hammer.
+    retry: false,
   })
 
+  // The transmission has to exist to count as arriving. Without this the session's stale id was enough to show a
+  // progress bar for something that had been deleted.
+  const live = Boolean(candidateId) && Boolean(transmission.data)
+  const data = live ? transmission.data : undefined
+
   const state: ScanState = {
-    transmissionId: transmissionId ?? null,
-    chunksArrived: transmission.data?.chunks_arrived ?? 0,
-    hasManifest: Boolean(transmission.data?.manifest_received_at),
-    verified: Boolean(transmission.data?.merged?.verified),
+    transmissionId: live ? candidateId! : null,
+    chunksArrived: data?.chunks_arrived ?? 0,
+    hasManifest: Boolean(data?.manifest_received_at),
+    verified: Boolean(data?.merged?.verified),
   }
 
-  // The previous state lives in a ref rather than in state: comparing two renders is the whole mechanism, and
-  // storing it in state would re-render on every poll and compare a value against itself.
+  // Previous state in a ref: comparing successive polls is the whole mechanism, and holding it in state would
+  // re-render on every poll and compare a value against itself.
   const previous = useRef<ScanState>({
     transmissionId: null,
     chunksArrived: 0,
@@ -52,30 +73,39 @@ export function ScanFeedback() {
     verified: false,
   })
 
-  // Serialised into the dependency list so the effect runs when the numbers change rather than on every render
-  // — an object literal is a new reference each time and would fire continuously.
   const fingerprint = `${state.transmissionId}:${state.chunksArrived}:${state.hasManifest}:${state.verified}`
 
   useEffect(() => {
     const events = scanEvents(previous.current, state)
     previous.current = state
 
-    // Muting stops the sound, not the tracking: the previous state is advanced above either way, so unmuting
-    // does not then replay everything that happened while it was quiet.
+    // Muting silences the sound, not the tracking: previous state advances either way, so unmuting does not
+    // replay everything that happened while it was quiet.
     if (!scanSound) return
     events.forEach((event, index) => {
-      // Spaced slightly when a single poll caught more than one event, so a manifest and a chunk are heard as
-      // two things rather than as one muddled noise.
       if (index === 0) play(event)
       else window.setTimeout(() => play(event), index * 140)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fingerprint, scanSound])
 
-  const arrived = transmission.data?.chunks_arrived ?? 0
-  const total = transmission.data?.chunk_count ?? 0
-  const decoded = session.data?.frames_decoded ?? 0
-  const failed = session.data?.frames_failed ?? 0
+  // The rolling window over the session's cumulative counters.
+  const samples = useRef<DecodeSample[]>([])
+  const decodedTotal = session.data?.frames_decoded
+  const failedTotal = session.data?.frames_failed
+  if (decodedTotal !== undefined && failedTotal !== undefined) {
+    const last = samples.current[samples.current.length - 1]
+    if (!last || last.decoded !== decodedTotal || last.failed !== failedTotal) {
+      samples.current = [
+        ...samples.current.slice(-(windowSamples - 1)),
+        { at: performance.now(), decoded: decodedTotal, failed: failedTotal },
+      ]
+    }
+  }
+  const recent = recentDecode(samples.current)
+
+  const arrived = data?.chunks_arrived ?? 0
+  const total = data?.chunk_count ?? 0
 
   return (
     <Paper variant="outlined" sx={{ p: 2 }}>
@@ -90,30 +120,48 @@ export function ScanFeedback() {
         </Tooltip>
       </Stack>
 
-      {!transmissionId ? (
-        <Alert severity="info" variant="outlined">
-          Nothing is arriving yet. Point the camera at the sender's display page and start a transfer — the
-          first sound will be the manifest, a low note, followed by one higher beep per chunk decoded.
-        </Alert>
+      {!live ? (
+        // Split by what the camera is actually managing, because the two faults need opposite responses and
+        // "nothing is arriving" alone sent an operator looking in the wrong place.
+        recent.rate === null ? (
+          <Alert severity="info" variant="outlined">
+            No frames are reaching the decoder. Either the camera is not running, or what it sees does not look
+            like a frame at all — the receiver wants the display to fill a good part of the view, so move the
+            camera closer until the frame dominates the picture.
+          </Alert>
+        ) : recent.rate === 0 ? (
+          <Alert severity="warning" variant="outlined">
+            <strong>Frames are arriving but none of them can be read</strong> — {recent.failed.toLocaleString()}{' '}
+            in the last few seconds. That is aim, focus or distance, not the transfer. Get square on to the
+            screen, fill more of the view, and make sure the picture is sharp.
+          </Alert>
+        ) : (
+          <Alert severity="info" variant="outlined">
+            Decoding frames, but none belong to a transfer yet — {formatPercent(recent.rate)} of the last{' '}
+            {(recent.decoded + recent.failed).toLocaleString()} frames read. Start a transfer on the sender.
+          </Alert>
+        )
       ) : (
         <Stack spacing={2}>
           <Box>
             <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
               <Typography variant="body2" color="text.secondary">
-                {transmission.data?.filename ?? 'Receiving'}
+                {data?.filename ?? 'Receiving'}
               </Typography>
               <Typography variant="body2" sx={{ fontVariantNumeric: 'tabular-nums' }}>
                 {arrived} / {total || '?'} chunks
               </Typography>
             </Stack>
+            {/* Determinate only when the total is known. An indeterminate bar reads as "working on it", which is
+                exactly the wrong thing to show when nothing is happening. */}
             <LinearProgress
               variant={total > 0 ? 'determinate' : 'indeterminate'}
               value={total > 0 ? (arrived / total) * 100 : undefined}
-              color={transmission.data?.merged?.verified ? 'success' : 'primary'}
+              color={data?.merged?.verified ? 'success' : 'primary'}
             />
           </Box>
 
-          {transmission.data?.merged?.verified && (
+          {data?.merged?.verified && (
             <Alert severity="success" variant="outlined">
               Merged and verified against the hash the sender declared.
             </Alert>
@@ -121,16 +169,24 @@ export function ScanFeedback() {
         </Stack>
       )}
 
-      {/* The decode figures are the aiming feedback, and they are shown rather than sounded on purpose: they
-          change ten times a second, so a tone for each would drown out the beeps that mean progress. A decode
-          rate that falls is a lens drifting out of focus long before any chunk stops arriving. */}
+      {/* Shown rather than sounded: these change ten times a second, so a tone for each would drown out the
+          beeps that mean progress. A decode rate falling is a lens drifting out of focus, visible long before a
+          chunk stops arriving. */}
       <Stack direction="row" spacing={2} sx={{ mt: 2 }} flexWrap="wrap" useFlexGap>
-        <Stat label="Frames decoded" value={decoded.toLocaleString()} hint="this capture session" />
         <Stat
-          label="Decode rate"
-          value={formatPercent(session.data?.decode_rate ?? 0)}
-          hint={failed > 0 ? `${failed.toLocaleString()} unreadable` : 'nothing unreadable yet'}
-          accent={(session.data?.decode_rate ?? 0) > 0.75 ? 'success' : 'warning'}
+          label="Decoding now"
+          value={recent.rate === null ? '—' : formatPercent(recent.rate)}
+          hint={
+            recent.rate === null
+              ? 'no frames reaching the decoder'
+              : `${recent.decoded.toLocaleString()} read, ${recent.failed.toLocaleString()} unreadable, last 10s`
+          }
+          accent={recent.rate === null ? undefined : recent.rate > 0.5 ? 'success' : 'warning'}
+        />
+        <Stat
+          label="Session total"
+          value={(session.data?.frames_decoded ?? 0).toLocaleString()}
+          hint="frames decoded since this capture source started — history, not now"
         />
       </Stack>
     </Paper>

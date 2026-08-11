@@ -201,12 +201,27 @@ Two pixels a cell sounds far too small against the measured monitor configuratio
 be. On a phone it is not: at a device pixel ratio of 3 those 264 CSS px are 792 *physical* pixels, so each cell
 is about six real pixels of screen. What the camera resolves is physical pixels, not CSS ones.
 
-**Fill the camera's view with the phone.** The receiver drops frames that do not look like a frame at all —
-a guard against storing thousands of images of a blank screen — and it asks for at least a twelfth of the image
-to be dark and a twelfth to be bright. A phone held at arm's length is mostly dark room, fails the bright test,
-and every frame is discarded before it is even decoded: the decode count stays at zero while frames are
-accepted, which reads as a decoding problem and is not one. Measured against a 1280×720 webcam frame, the
-screen needs to span roughly 660 px — about 92% of the short side. Hold the phone close.
+**Fill at least half the camera's view with the screen.** This is the one that actually decides it, and the
+threshold is sharper than it looks. Measured on a 1920×1080 webcam, square-on and in focus, against a 128×128
+grid:
+
+| Frame spans | Camera px per cell | Result |
+|---|---|---|
+| 28% of the short side | 2.3 | reaches the decoder, unreadable |
+| 37% | 3.0 | unreadable |
+| **46%** | **3.8** | decodes, every frame |
+| 56% and up | 4.5+ | decodes, every frame |
+
+So half the frame height is the floor and about two thirds is where you want to be, because everything real
+costs margin: an angle, a smudge on the lens, glare off the screen, autofocus drifting. Square-on and sharp is
+worth more than close.
+
+There is a second, separate guard that can bite in a dark room. The receiver drops frames that do not look like
+a frame at all — protection against storing thousands of images of a blank screen — by asking for at least a
+twelfth of the image to be dark *and* a twelfth to be bright. A normally lit room passes this without
+thinking about it, because walls and windows supply the bright end. A small screen in a dark room does not, and
+the symptom is distinctive: frames are posted and "held", the decode count stays at zero, and nothing appears
+under Decode failures either, because the frames never reached the decoder to fail.
 
 ### Start the camera before the transfer
 
