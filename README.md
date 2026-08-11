@@ -180,6 +180,34 @@ over the configuration on the next start, so it survives the restart it needs. S
 for the fields the settings page manages, which is what makes "I changed it in the UI" mean anything — the
 corollary being that editing such a field in `.env` no longer wins once the UI has set it.
 
+### Sending from a phone
+
+A phone makes a perfectly good display — it is a bright, dense panel you can hold wherever the camera is — but
+two things about it are not obvious, and both look like "it doesn't work" rather than like a setting.
+
+**The geometry has to fit the phone's CSS viewport, which is about 390 px whichever way you hold it.** The frame
+is square, so the limiting dimension is the short one, and rotating to landscape does not help. The display page
+scales by whole multiples only and **crops rather than shrinks** a frame too large for the window — correct, since
+shrinking blends neighbouring cells and the decoder takes the median of each cell — so an oversized frame means
+the camera photographs a fragment and decodes nothing at all.
+
+| Geometry | Frame | On a phone |
+|---|---|---|
+| 128×128 @ 8 px | 1056 px | **cropped** — camera sees a fragment |
+| 128×128 @ 3 px | 396 px | marginal, and cropped on a 390 px viewport |
+| **128×128 @ 2 px** | **264 px** | **fits, with margin** |
+
+Two pixels a cell sounds far too small against the measured monitor configurations, and on a monitor it would
+be. On a phone it is not: at a device pixel ratio of 3 those 264 CSS px are 792 *physical* pixels, so each cell
+is about six real pixels of screen. What the camera resolves is physical pixels, not CSS ones.
+
+**Fill the camera's view with the phone.** The receiver drops frames that do not look like a frame at all —
+a guard against storing thousands of images of a blank screen — and it asks for at least a twelfth of the image
+to be dark and a twelfth to be bright. A phone held at arm's length is mostly dark room, fails the bright test,
+and every frame is discarded before it is even decoded: the decode count stays at zero while frames are
+accepted, which reads as a decoding problem and is not one. Measured against a 1280×720 webcam frame, the
+screen needs to span roughly 660 px — about 92% of the short side. Hold the phone close.
+
 ### Start the camera before the transfer
 
 **This ordering is not advice, it is a requirement for small transfers**, and getting it wrong looks like a
@@ -195,12 +223,17 @@ everything, and still cannot assemble a file, because it never learned what it w
 at `transmitting` with everything acknowledged, indefinitely.
 
 The smaller the transfer, the worse the odds: the manifest interval is fixed while the time to acknowledge
-everything shrinks with the chunk count. Large transfers are fine — they are still outstanding when the next
-manifest comes round.
+everything shrinks with the chunk count.
 
-So: open the receiver's Camera page, press **Start**, confirm frames are decoding, and only then create the
-transfer — that way the camera catches the manifest shown first, before anything else. Recovering from the
-wrong order means cancelling and sending again.
+**This no longer hangs.** Once the last chunk is acknowledged the manifest is the only thing the receiver can
+still be missing, so it is what stays on screen while the sender waits to be told the file arrived — bounded by
+the acknowledgement timeout, so a sender displaying to an empty room does not run forever, and ended
+immediately by the receiver reporting the merge. A manifest that turns up long after the last chunk now
+completes the transfer rather than being ignored. Verified with a camera made to drop every manifest frame for
+45 seconds: the transfer finished with the manifest arriving 43.8 seconds after the last chunk.
+
+Starting the camera first is still the better habit — it is quicker, since the manifest is the first frame
+shown — but getting the order wrong now costs seconds rather than the whole transfer.
 
 ## Cameras
 
