@@ -22,6 +22,13 @@ import (
 //
 // So the frame rate applies immediately, and geometry is refused while anything is in flight. That
 // asymmetry is the whole design of this file.
+//
+// The sink sits to one side of that split: it is guarded the same way geometry is, but for neither
+// reason above. It is refused while transmitting because moving the channel mid-transfer strands the
+// receiver watching the old one, and even once it is written into the running configuration it does not
+// take hold immediately — the process opens its sink once at startup and nothing here re-opens it, so
+// the effect is deferred to the next restart. That is the same limitation the configuration file itself
+// already has for this field, not a new one this endpoint introduces.
 
 // settingsView is the display configuration as the settings page sees it.
 type settingsView struct {
@@ -73,12 +80,23 @@ type settingsRequest struct {
 	QuietZone  *int    `json:"quiet_zone,omitempty"`
 	Encoder    *string `json:"encoder,omitempty"`
 	BitDepth   *int    `json:"bit_depth,omitempty"`
+
+	// Sink chooses the display channel: "file" writes into the shared directory the receiver's file
+	// camera reads, "none" writes nothing so the receiver can watch the physical display with a real
+	// camera instead. It is not reloadable — the sink is opened once at startup — so a change here
+	// takes effect on the next restart, the same as the frame geometry below.
+	Sink *string `json:"sink,omitempty"`
 }
 
 // touchesGeometry reports whether this change alters what a frame looks like.
 func (r settingsRequest) touchesGeometry() bool {
 	return r.GridWidth != nil || r.GridHeight != nil || r.CellPixels != nil ||
 		r.QuietZone != nil || r.Encoder != nil || r.BitDepth != nil
+}
+
+// touchesChannel reports whether this change alters where a frame goes rather than what it looks like.
+func (r settingsRequest) touchesChannel() bool {
+	return r.Sink != nil
 }
 
 // maxFPS is the highest frame rate that may be configured.
@@ -159,17 +177,24 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	// size are written into every frame header, and the chunk size was derived from the encoder's capacity
 	// at that grid. A transfer that changed geometry halfway would have its remaining chunks rendered to a
 	// different shape than its manifest declared, and the receiver would reassemble the wrong file.
-	if request.touchesGeometry() {
+	//
+	// The sink is guarded the same way, for a different reason: swapping the channel mid-transfer would
+	// move the remaining frames somewhere the receiver on the other end is not watching, which looks from
+	// there exactly like the display having stopped.
+	if request.touchesGeometry() || request.touchesChannel() {
 		active, err := s.store.Transmissions.CountActive(r.Context())
 		if err != nil {
 			s.fail(w, http.StatusInternalServerError, "could not check for transfers in flight", err)
 			return
 		}
 		if active > 0 {
+			what, why := "the frame geometry", "it is written into every frame header and the chunk size is derived from it"
+			if !request.touchesGeometry() {
+				what, why = "the display sink", "the remaining frames would go somewhere the receiver is not watching"
+			}
 			s.fail(w, http.StatusConflict, fmt.Sprintf(
-				"the frame geometry cannot change while %d transfer(s) are in flight: it is written into "+
-					"every frame header and the chunk size is derived from it. The frame rate can be "+
-					"changed at any time.", active), nil)
+				"%s cannot change while %d transfer(s) are in flight: %s. The frame rate can be "+
+					"changed at any time.", what, active, why), nil)
 			return
 		}
 	}
@@ -210,6 +235,9 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if request.BitDepth != nil {
 		next.Optical.BitDepth = *request.BitDepth
 	}
+	if request.Sink != nil {
+		next.Display.Sink = *request.Sink
+	}
 
 	// Validated as a whole configuration rather than field by field, because the fields constrain each
 	// other: an encoder has bit depths it supports, a grid has to be large enough for the encoder to carry
@@ -241,7 +269,8 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		zap.Int("grid_width", applied.Optical.GridWidth),
 		zap.Int("grid_height", applied.Optical.GridHeight),
 		zap.Int("cell_pixels", applied.Optical.CellPixels),
-		zap.String("encoder", applied.Optical.Encoder))
+		zap.String("encoder", applied.Optical.Encoder),
+		zap.String("sink", applied.Display.Sink))
 
 	s.getSettings(w, r)
 }

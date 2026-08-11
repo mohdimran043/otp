@@ -178,8 +178,10 @@ func (c Config) Validate() error {
 		}
 	case "opengl":
 		// Availability is a build-tag matter, reported by the sink itself at startup.
+	case "none":
+		// The discard sink needs nothing: camera-only mode watches the physical display instead.
 	default:
-		add("display.sink %q is not one of file, opengl", c.Display.Sink)
+		add("display.sink %q is not one of file, opengl, none", c.Display.Sink)
 	}
 	if c.Display.FPS <= 0 {
 		add("display.fps must be positive")

@@ -189,7 +189,12 @@ type FEC struct {
 
 // Display configures the optical output.
 type Display struct {
-	// Sink is "file", or "opengl" in a build that includes it.
+	// Sink is "file", "none" for camera-only mode, or "opengl" in a build that includes it.
+	//
+	// "none" writes nothing to the shared directory: the receiver watches the physical display with
+	// its own camera instead of reading files off a volume. It is not reloadable — the sink is opened
+	// once at process startup — so changing it here or through the settings API takes effect on the
+	// next restart.
 	Sink string `yaml:"sink"`
 
 	// Dir is the file sink's output directory: the shared volume the receiver's file

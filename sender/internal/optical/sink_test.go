@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/opticaltransport/otp/sender/internal/config"
 )
 
 // TestFileSinkBoundsTheChannel is the fix for an unbounded directory.
@@ -80,4 +82,43 @@ func TestFileSinkToleratesAFrameAlreadyRemoved(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	require.LessOrEqual(t, len(entries), displayBacklog)
+}
+
+// TestNoneSinkDiscardsFrames covers camera-only mode: the receiver watches the physical display with
+// its own camera, so writing frames into a shared directory as well would be a second, pointless
+// channel. The none sink accepts every frame — Live still needs a Show that succeeds, so it can go on
+// publishing to Current/Next — but writes nothing anywhere.
+func TestNoneSinkDiscardsFrames(t *testing.T) {
+	sink := newNoneSink()
+	require.Equal(t, "none", sink.Name())
+	require.Equal(t, int64(0), sink.Shown())
+
+	require.NoError(t, sink.Show(context.Background(), Frame{PNG: []byte("a frame")}))
+	require.Equal(t, int64(1), sink.Shown(), "a discarded frame still counts as displayed")
+
+	require.NoError(t, sink.Close())
+}
+
+// TestNoneSinkLeavesTheDisplayPageWorking is the point of the sink sitting under Live rather than
+// replacing it: the browser's Display page and camera-view read Current/Next from Live, not from the
+// sink, so a sink that writes nothing must still let a frame become "current".
+func TestNoneSinkLeavesTheDisplayPageWorking(t *testing.T) {
+	live := NewLive(newNoneSink())
+
+	require.NoError(t, live.Show(context.Background(), Frame{PNG: []byte("a frame")}))
+
+	frame, _, have := live.Current()
+	require.True(t, have, "the display page must still see a frame with the none sink")
+	require.Equal(t, []byte("a frame"), frame.PNG)
+}
+
+// TestOpenReturnsTheConfiguredSink covers the switch in open(): "none" must reach the discard sink,
+// the same way "file" reaches the file sink.
+func TestOpenReturnsTheConfiguredSink(t *testing.T) {
+	sink, err := open(config.Display{Sink: "none"})
+	require.NoError(t, err)
+	require.Equal(t, "none", sink.Name())
+
+	require.NoError(t, sink.Show(context.Background(), Frame{PNG: []byte("a frame")}))
+	require.Equal(t, int64(1), sink.Shown())
 }

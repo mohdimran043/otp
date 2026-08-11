@@ -198,6 +198,36 @@ func (s *FileSink) Shown() int64 { return s.shown.Load() }
 // Close releases nothing.
 func (s *FileSink) Close() error { return nil }
 
+// noneSink discards every frame it is given.
+//
+// It is what camera-only mode configures: the receiver watches the physical display with its own
+// camera, so a copy of every frame also landing in the shared directory would be a second, pointless
+// channel and disk nobody reads back. It still has to accept the frame rather than refuse it, because
+// Live sits above every sink and publishes to Current/Next only after the wrapped Show succeeds — so a
+// sink that errored here would take the browser's Display page and camera-view down with it, which is
+// the one thing camera-only mode must not do.
+type noneSink struct {
+	shown atomic.Int64
+}
+
+// newNoneSink returns a sink that discards every frame.
+func newNoneSink() *noneSink { return &noneSink{} }
+
+// Name returns the sink's configuration name.
+func (s *noneSink) Name() string { return "none" }
+
+// Show discards the frame. Nothing is written anywhere.
+func (s *noneSink) Show(ctx context.Context, frame Frame) error {
+	s.shown.Add(1)
+	return nil
+}
+
+// Shown is how many frames this sink has accepted and discarded.
+func (s *noneSink) Shown() int64 { return s.shown.Load() }
+
+// Close releases nothing.
+func (s *noneSink) Close() error { return nil }
+
 // Open returns the sink a configuration selects, wrapped so the display has one sequence and one answer
 // to what is on it.
 //
@@ -215,6 +245,8 @@ func open(cfg config.Display) (Sink, error) {
 	switch cfg.Sink {
 	case "file":
 		return NewFileSink(cfg.Dir, cfg.RetainFrames)
+	case "none":
+		return newNoneSink(), nil
 	case "opengl":
 		// The OpenGL sink is behind a build tag, so a binary without it says so plainly rather than
 		// falling back to a channel the operator did not ask for and may not notice.
