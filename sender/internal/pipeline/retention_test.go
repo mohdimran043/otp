@@ -94,15 +94,89 @@ func TestRetentionSweepsNeverCompletedTransfers(t *testing.T) {
 	assertPresent(t, h, oldCompleted)
 	assertPresent(t, h, recentFailed)
 
-	// And it must have re-enqueued itself, or the sweep only ever runs once.
+	// And it must have re-enqueued itself exactly once, or the sweep either stops or starts
+	// running twice as often as configured.
 	all, err := h.jobs.List(ctx, jobs.Filter{
 		Types:  []string{pipeline.TypeRetention},
 		Status: []jobs.Status{jobs.StatusPending},
 	})
 	require.NoError(t, err)
-	require.NotEmpty(t, all, "the retention job must re-enqueue itself")
+	require.Len(t, all, 1, "the retention job must re-enqueue itself exactly once")
 	require.True(t, all[0].RunAfter.After(before.Add(h.cfg.Retention.Interval/2)),
 		"the next sweep should be scheduled about an interval out, not immediately")
+}
+
+// TestRetentionReschedulesAfterAPerRowFailure covers the guarantee retention.go documents at
+// length: a failure partway through a sweep must never cost the next sweep. Two transmissions
+// are seeded against the *same* file, both old enough to be swept. Reaping the one the sweep
+// processes first deletes their shared file row, which cascades away the second transmission's
+// row too — so by the time the sweep reaches that second id, its own Get returns ErrNotFound
+// and reap.Transfer surfaces that as an error the handler must log and skip rather than abort
+// on. This is deterministic regardless of which of the two ids ListForRetention happens to
+// return first: whichever runs second always finds its row already gone.
+//
+// The genuinely sweep-level failure — ListForRetention itself erroring, before any row is even
+// looked at — is not exercised here or anywhere else in this package. Doing so would need
+// either a database fault injected mid-query (timing-dependent, and the flakiest kind of test
+// to maintain) or a production-only seam: jobs.Context's store field is private to the jobs
+// package, so no test outside it can build a working *jobs.Context by hand, and Pipeline's
+// store and object-store dependencies are concrete types rather than interfaces, by design —
+// nothing else needs them to be swappable. Adding either seam only to serve this one test was
+// judged not worth it. What guarantees the sweep-level case instead is Go's own defer
+// semantics: the successor-scheduling defer in retention.go is registered before
+// ListForRetention is ever called, so it runs on every return from that function, including a
+// return taken because that call failed — which is what this test's sibling above already
+// confirms happens for the ordinary, error-free path, and what a reader of retention.go's
+// comment can verify holds for the erroring one without needing a flaky test to say so.
+func TestRetentionReschedulesAfterAPerRowFailure(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) {
+		c.Retention.MaxAge = 24 * time.Hour
+		c.Retention.Interval = time.Hour
+	})
+	ctx := context.Background()
+
+	fileKey, err := objectstore.Key("files", fmt.Sprintf("retention-shared-%d", time.Now().UnixNano()))
+	require.NoError(t, err)
+	require.NoError(t, objectstore.PutBytes(ctx, h.objects, fileKey, []byte("shared file")))
+	sum := sha256.Sum256([]byte("shared file"))
+	file, err := h.store.Files.Create(ctx, store.File{
+		Filename: "shared.bin", StoredPath: fileKey, SizeBytes: 11, SHA256: sum[:],
+	})
+	require.NoError(t, err)
+
+	age := 25 * time.Hour
+	var ids []uuid.UUID
+	for i := 0; i < 2; i++ {
+		tx, err := h.store.Transmissions.Create(ctx, store.Transmission{FileID: file.ID})
+		require.NoError(t, err)
+		require.NoError(t, h.store.Transmissions.SetStatus(ctx, tx.ID, store.TxPending, ""))
+		_, err = h.store.Pool().Exec(ctx,
+			`UPDATE transmissions SET created_at = $2, updated_at = $2 WHERE id = $1`,
+			tx.ID, time.Now().Add(-age))
+		require.NoError(t, err)
+		ids = append(ids, tx.ID)
+	}
+
+	job, err := h.jobs.Enqueue(ctx, jobs.Spec{Type: pipeline.TypeRetention}, 1)
+	require.NoError(t, err)
+
+	finished := waitForJob(t, h, job.ID)
+	require.Equal(t, jobs.StatusCompleted, finished.Status,
+		"a row that is already gone by the time it is reaped must not fail the sweep: %s", finished.Error)
+
+	for _, id := range ids {
+		_, err := h.store.Transmissions.Get(ctx, id)
+		require.ErrorIs(t, err, store.ErrNotFound, "transmission %s should be gone, directly or by cascade", id)
+	}
+	_, err = h.store.Files.Get(ctx, file.ID)
+	require.ErrorIs(t, err, store.ErrNotFound)
+
+	all, err := h.jobs.List(ctx, jobs.Filter{
+		Types:  []string{pipeline.TypeRetention},
+		Status: []jobs.Status{jobs.StatusPending},
+	})
+	require.NoError(t, err)
+	require.Len(t, all, 1, "exactly one successor must be scheduled even after a row-level failure")
 }
 
 func assertGone(t *testing.T, h *harness, tx store.Transmission) {
