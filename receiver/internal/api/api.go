@@ -159,6 +159,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/cameras", s.listCameras)
 	mux.HandleFunc("PUT /api/v1/cameras/selection", s.setCamera)
 
+	// The blank-screen threshold. Adjustable while aiming a camera, because when it is set too high there is
+	// nothing to look at: rejected frames reach neither the decoder nor the failure log.
+	mux.HandleFunc("GET /api/v1/capture/gate", s.getCaptureGate)
+	mux.HandleFunc("PUT /api/v1/capture/gate", s.setCaptureGate)
+
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
@@ -604,9 +609,10 @@ func (s *Server) getConfig(w http.ResponseWriter, r *http.Request) {
 	s.respond(w, http.StatusOK, map[string]any{
 		"protocol_version": protocol.Current,
 		"capture": map[string]any{
-			"source":        cfg.Capture.Source,
-			"dir":           cfg.Capture.Dir,
-			"idle_interval": cfg.Capture.IdleInterval.String(),
+			"source":            cfg.Capture.Source,
+			"dir":               cfg.Capture.Dir,
+			"idle_interval":     cfg.Capture.IdleInterval.String(),
+			"min_tone_fraction": cfg.Capture.MinToneFraction,
 			// The number that decides whether the receiver can keep up with the display. Decoding is what
 			// it spends its time on, and it scales with cores almost exactly.
 			"decode_workers":     cfg.Capture.DecodeWorkers,

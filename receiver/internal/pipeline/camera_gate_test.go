@@ -39,7 +39,7 @@ func realFrame(t *testing.T) image.Image {
 // TestTheIdleGateLetsARealFrameThrough is the half that must never be wrong: a frame the sender actually
 // rendered has to reach the decoder, or the receiver would sit idle while a transfer was on screen.
 func TestTheIdleGateLetsARealFrameThrough(t *testing.T) {
-	require.True(t, looksLikeAFrame(realFrame(t)),
+	require.True(t, looksLikeAFrame(realFrame(t), defaultMinToneFraction),
 		"a rendered frame must pass the gate that decides whether to decode at all")
 }
 
@@ -53,19 +53,19 @@ func TestTheIdleGateRejectsWhatAWaitingCameraSees(t *testing.T) {
 	for i := range dark.Pix {
 		dark.Pix[i] = 0
 	}
-	require.False(t, looksLikeAFrame(dark), "a dark room or a screen that is off")
+	require.False(t, looksLikeAFrame(dark, defaultMinToneFraction), "a dark room or a screen that is off")
 
 	white := image.NewRGBA(image.Rect(0, 0, w, h))
 	for i := 0; i < len(white.Pix); i += 4 {
 		white.Pix[i], white.Pix[i+1], white.Pix[i+2], white.Pix[i+3] = 255, 255, 255, 255
 	}
-	require.False(t, looksLikeAFrame(white), "a blank white screen")
+	require.False(t, looksLikeAFrame(white, defaultMinToneFraction), "a blank white screen")
 
 	grey := image.NewRGBA(image.Rect(0, 0, w, h))
 	for i := 0; i < len(grey.Pix); i += 4 {
 		grey.Pix[i], grey.Pix[i+1], grey.Pix[i+2], grey.Pix[i+3] = 128, 128, 128, 255
 	}
-	require.False(t, looksLikeAFrame(grey), "a mid-grey desktop")
+	require.False(t, looksLikeAFrame(grey, defaultMinToneFraction), "a mid-grey desktop")
 
 	// A photograph of a room: mid-tones with noise, which is what a misaimed camera sees.
 	room := image.NewRGBA(image.Rect(0, 0, w, h))
@@ -76,10 +76,10 @@ func TestTheIdleGateRejectsWhatAWaitingCameraSees(t *testing.T) {
 			room.Set(x, y, color.RGBA{v, v, uint8(int(v) * 9 / 10), 255})
 		}
 	}
-	require.False(t, looksLikeAFrame(room), "a camera pointed at a room rather than a display")
+	require.False(t, looksLikeAFrame(room, defaultMinToneFraction), "a camera pointed at a room rather than a display")
 
-	require.False(t, looksLikeAFrame(nil), "no image at all")
-	require.False(t, looksLikeAFrame(image.NewRGBA(image.Rect(0, 0, 8, 8))), "too small to be a frame")
+	require.False(t, looksLikeAFrame(nil, defaultMinToneFraction), "no image at all")
+	require.False(t, looksLikeAFrame(image.NewRGBA(image.Rect(0, 0, 8, 8)), defaultMinToneFraction), "too small to be a frame")
 }
 
 // TestTheIdleGateSurvivesTheRealCamera runs against the attached camera when asked. It is a probe: it says

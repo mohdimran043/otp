@@ -43,6 +43,11 @@ export interface TransmissionView {
   manifest_received_at: string
 }
 
+export interface GateView {
+  min_tone_fraction: number
+  note: string
+}
+
 export interface Chunk {
   id: string
   chunk_number: number
@@ -249,6 +254,17 @@ export const api = {
       body: JSON.stringify({ key_hex: keyHex, label }),
     }),
   deleteKey: (id: number) => request<void>(`/api/v1/keys/${id}`, { method: 'DELETE' }),
+
+  // The blank-screen threshold: how much of a captured image must be dark, and how much light, before the
+  // receiver bothers decoding it. Worth surfacing because when it is set too high nothing is observable — a
+  // rejected frame reaches neither the decoder nor the failure log, so frames are posted, counted, and vanish.
+  captureGate: () => request<GateView>('/api/v1/capture/gate'),
+  setCaptureGate: (minToneFraction: number) =>
+    request<GateView>('/api/v1/capture/gate', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ min_tone_fraction: minToneFraction }),
+    }),
 
   // Removing a transmission entirely — its manifest, chunks, merged file and acknowledgements — rather
   // than merely hiding it. There is no undo: the object store rows this deletes are gone with it.

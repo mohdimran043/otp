@@ -2,6 +2,12 @@ package pipeline
 
 import "image"
 
+// defaultMinToneFraction is the historical threshold: a twelfth of the samples dark and a twelfth light.
+//
+// Named here rather than left as a literal so config.Default and the tests refer to the same thing, and a
+// change to one cannot silently disagree with the other.
+const defaultMinToneFraction = 1.0 / 12.0
+
 // looksLikeAFrame is a cheap test for "is there anything on that screen".
 //
 // It exists to keep a camera that is waiting from filling the failure log. Locating a frame properly means
@@ -17,7 +23,19 @@ import "image"
 // It is a gate, not a decision. Anything that passes still goes through the real decoder, which will reject it
 // on its checksums if it was a false positive — so the threshold is set low enough to let a badly lit or
 // off-axis frame through and accept the occasional wasted decode.
-func looksLikeAFrame(img image.Image) bool {
+//
+// minFraction is how much of the image must be dark, and how much must be light, each as a fraction of the
+// samples taken. It is a parameter rather than the constant it used to be because being wrong here is invisible:
+// a rejected image reaches neither the decoder nor the failure log, so frames are posted, counted as "held", and
+// then simply disappear. An operator cannot tell that from a decode failure, since neither leaves evidence.
+//
+// It bites hardest on the case it was meant to serve. A binary frame is pure black and white at source, but
+// with only two levels it averages toward flat grey as soon as it is small in the viewfinder or slightly soft,
+// collapsing both tails — a binary frame filling 65% of a 1920x1080 shot with mild blur already fails a
+// twelfth. Relaxing it costs wasted decode attempts, which this gate's own reasoning already accepts, and
+// nothing else. Zero disables the tone test entirely, leaving the decoder's checksums as the only filter, which
+// is what someone debugging a camera actually wants.
+func looksLikeAFrame(img image.Image, minFraction float64) bool {
 	if img == nil {
 		return false
 	}
@@ -48,8 +66,31 @@ func looksLikeAFrame(img image.Image) bool {
 		return false
 	}
 
-	// A twelfth of each. A frame's quiet zone alone is well past this, and it is far below what any evenly lit
-	// scene produces at both ends of the range at once.
-	const floor = 12
-	return dark*floor >= total && light*floor >= total
+	// Zero, or anything meaningless, turns the tone test off and lets everything through to the decoder. The
+	// size check above still applies: a 16-pixel thumbnail cannot be a frame whatever the threshold says.
+	if minFraction <= 0 {
+		return true
+	}
+
+	need := minFraction * float64(total)
+	return float64(dark) >= need && float64(light) >= need
+}
+
+// toneGated is a source whose blank-screen threshold can be adjusted while it runs.
+//
+// A setter rather than a value passed at construction, because this is the one gate setting an operator changes
+// *while* aiming a camera: a value fixed when the source opened would need the source reopened to take effect,
+// which drops the camera the browser is holding. Sources that do not gate on tone simply do not implement it.
+type toneGated interface {
+	SetMinToneFraction(float64)
+}
+
+// applyToneFraction pushes the configured threshold onto a source that gates on it.
+//
+// Silently does nothing for a source that does not — the file source reads images that were written, not
+// photographed, so there is no blank screen to detect.
+func applyToneFraction(s Source, fraction float64) {
+	if g, ok := s.(toneGated); ok {
+		g.SetMinToneFraction(fraction)
+	}
 }

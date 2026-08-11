@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"image"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,6 +50,15 @@ type BrowserSource struct {
 	// lastSeen is when a frame last arrived, so the receiver can tell "the browser is posting and the display is
 	// blank" from "the browser has gone away".
 	lastSeen atomic.Int64
+
+	// minTone is the blank-screen threshold, adjustable while running because it is what an operator changes
+	// while aiming. Stored as bits so it can be swapped without a lock on the hot path.
+	minTone atomic.Uint64
+}
+
+// SetMinToneFraction adjusts the blank-screen threshold.
+func (s *BrowserSource) SetMinToneFraction(f float64) {
+	s.minTone.Store(math.Float64bits(f))
 }
 
 // NewBrowserSource returns a source fed by posted frames.
@@ -96,7 +106,7 @@ func (s *BrowserSource) Push(img image.Image, raw []byte) (accepted bool, err er
 	s.received.Add(1)
 	s.lastSeen.Store(time.Now().UnixMilli())
 
-	if !looksLikeAFrame(img) {
+	if !looksLikeAFrame(img, math.Float64frombits(s.minTone.Load())) {
 		s.idle.Add(1)
 		return false, nil
 	}

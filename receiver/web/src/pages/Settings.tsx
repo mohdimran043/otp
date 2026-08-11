@@ -5,6 +5,7 @@ import {
   IconButton,
   InputAdornment,
   Paper,
+  Slider,
   Stack,
   Table,
   TableBody,
@@ -43,6 +44,15 @@ export function Settings() {
   const config = useQuery({ queryKey: ['config'], queryFn: api.config })
   const keys = useQuery({ queryKey: ['keys'], queryFn: api.keys })
   const data = config.data
+
+  const gate = useQuery({ queryKey: ['capture-gate'], queryFn: api.captureGate })
+  const setGate = useMutation({
+    mutationFn: (fraction: number) => api.setCaptureGate(fraction),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ['capture-gate'] })
+      await client.invalidateQueries({ queryKey: ['config'] })
+    },
+  })
 
   const [keyLabel, setKeyLabel] = useState('')
   const [keyHex, setKeyHex] = useState('')
@@ -119,6 +129,63 @@ export function Settings() {
           </Grid>
         </Grid>
       )}
+
+      {/* Placed with the decoder rather than the camera because it decides what the decoder is even given. */}
+      <Paper variant="outlined" sx={{ p: 2 }}>
+        <Typography variant="subtitle1" sx={{ mb: 1 }}>
+          Blank-screen threshold
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          How much of a captured image must be dark, and how much bright, before the receiver tries to decode
+          it. It exists so a camera pointed at nothing does not spend the whole receiver discovering that, and
+          storing a picture of it each time.
+          <br />
+          <br />
+          <strong>Lower it while aiming a camera.</strong> A rejected image reaches neither the decoder nor
+          Decode failures, so if this is too high frames are posted, counted as accepted, and then vanish with
+          nothing to look at — indistinguishable from a decode failure. A black-and-white frame is the worst
+          case: two levels average to flat grey as the cells blur together, so a frame that does not fill the
+          view fails a test its own quiet zone would otherwise pass easily.
+          <br />
+          <br />
+          Takes effect on the next frame. Not persisted — a restart returns to the configured value, which is{' '}
+          <code>OTP_RECEIVER_CAPTURE_MIN_TONE_FRACTION</code>.
+        </Typography>
+        <ErrorNotice error={gate.error} />
+        <ErrorNotice error={setGate.error} />
+
+        <Stack direction="row" spacing={3} alignItems="center">
+          <Slider
+            sx={{ maxWidth: 420 }}
+            value={gate.data?.min_tone_fraction ?? 1 / 12}
+            onChange={(_, value) => setGate.mutate(Array.isArray(value) ? value[0]! : value)}
+            min={0}
+            max={0.2}
+            step={0.005}
+            marks={[
+              { value: 0, label: 'off' },
+              { value: 0.02, label: 'aiming' },
+              { value: 1 / 12, label: 'default' },
+              { value: 0.2, label: 'strict' },
+            ]}
+            valueLabelDisplay="auto"
+            valueLabelFormat={(v) => formatPercent(v)}
+            disabled={setGate.isPending}
+          />
+          <Stat
+            label="In force"
+            value={
+              gate.data === undefined
+                ? '—'
+                : gate.data.min_tone_fraction <= 0
+                  ? 'off'
+                  : formatPercent(gate.data.min_tone_fraction)
+            }
+            hint={gate.data?.note ?? ''}
+            accent={gate.data && gate.data.min_tone_fraction > 0.09 ? 'warning' : undefined}
+          />
+        </Stack>
+      </Paper>
 
       <Paper variant="outlined" sx={{ p: 2 }}>
         <Typography variant="subtitle1" sx={{ mb: 1 }}>

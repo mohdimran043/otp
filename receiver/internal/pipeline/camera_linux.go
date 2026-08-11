@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"image/png"
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -41,6 +42,9 @@ type CameraSource struct {
 
 	// seen counts frames in which a grid was found, so an operator can tell "waiting" from "misaimed".
 	seen atomic.Int64
+
+	// minTone is the blank-screen threshold, adjustable while the camera runs.
+	minTone atomic.Uint64
 
 	width, height int
 	format        string
@@ -99,7 +103,7 @@ func (s *CameraSource) Next(ctx context.Context) (Capture, error) {
 	// looking at a display which is not showing anything, and it is the state a receiver sits in while it waits
 	// for a transfer to start. Recording it would fill the failure log with thousands of images of a blank
 	// screen and bury the failures that mean something.
-	if !looksLikeAFrame(frame.Image) {
+	if !looksLikeAFrame(frame.Image, math.Float64frombits(s.minTone.Load())) {
 		s.idle.Add(1)
 		return Capture{}, ErrNoFrame
 	}
@@ -129,3 +133,8 @@ func (s *CameraSource) Close() error { return s.stream.Close() }
 // Exclusive reports that this source holds a device that cannot be opened twice, which decides the order a
 // source swap has to happen in.
 func (s *CameraSource) Exclusive() bool { return true }
+
+// SetMinToneFraction adjusts the blank-screen threshold.
+func (s *CameraSource) SetMinToneFraction(f float64) {
+	s.minTone.Store(math.Float64bits(f))
+}

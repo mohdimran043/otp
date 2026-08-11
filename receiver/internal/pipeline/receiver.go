@@ -224,6 +224,11 @@ func (r *Receiver) Run(ctx context.Context) error {
 					return
 				}
 
+				// The blank-screen threshold is pushed onto the source every read rather than fixed when the
+				// source opened. It is the one gate setting an operator adjusts while aiming a camera, and
+				// reopening the source to apply it would drop the camera the browser page is holding.
+				applyToneFraction(r.source, r.cfg.Current().Capture.MinToneFraction)
+
 				capture, err := r.source.Next(ctx)
 				switch {
 				case errors.Is(err, ErrNoFrame):

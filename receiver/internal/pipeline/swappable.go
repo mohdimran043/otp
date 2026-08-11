@@ -163,3 +163,14 @@ func (s *Swappable) Swap(cfg config.Capture) error {
 	}
 	return nil
 }
+
+// SetMinToneFraction forwards the blank-screen threshold to whatever source is open.
+//
+// Forwarded rather than remembered: a swap replaces the source, and the receiver pushes the current value on
+// every read, so the new source is configured on the next frame without this type having to track it.
+func (s *Swappable) SetMinToneFraction(f float64) {
+	s.mu.RLock()
+	current := s.current
+	s.mu.RUnlock()
+	applyToneFraction(current, f)
+}

@@ -96,6 +96,20 @@ type Capture struct {
 	// works from, so an installation still being tuned wants them.
 	RetainFrames bool `yaml:"retain_frames"`
 
+	// MinToneFraction is how much of a captured image must be dark, and how much must be light, before it is
+	// worth trying to decode: the cheap "is anything on that screen" test that keeps a waiting camera from
+	// filling the failure log. Reloadable, because it is the one knob that can silently hide everything.
+	//
+	// A rejected image reaches neither the decoder nor the failure log, so when this is set too high frames are
+	// posted, counted as accepted, and then vanish — indistinguishable from a decode failure, and with no
+	// evidence either way. Aiming a camera is exactly when that matters.
+	//
+	// The default twelfth suits a frame that fills the view. It does not suit a small or slightly soft one,
+	// least of all a binary frame: two levels average toward flat grey as the cells blur together, collapsing
+	// both tails at once. Lower it while aiming; zero turns the test off and leaves the decoder's own checksums
+	// as the only filter, which costs wasted decode attempts and nothing else.
+	MinToneFraction float64 `yaml:"min_tone_fraction"`
+
 	// Device, Format, Width, Height, and FPS configure the camera the "gocv" source opens.
 	//
 	// An empty Device means the default camera — the lowest-numbered device that actually reports a video
@@ -250,6 +264,9 @@ func Default() Config {
 			Dir:          "/var/lib/otp/shared/frames",
 			Consume:      true,
 			IdleInterval: 100 * time.Millisecond,
+			// A twelfth, unchanged from when this was a constant: the same behaviour for every deployment that
+			// does not ask for something else.
+			MinToneFraction: 1.0 / 12.0,
 		},
 		Decoder: Decoder{
 			MinFinderScore: 0.75,
@@ -544,6 +561,7 @@ func applyEnv(c *Config) error {
 	str("CAPTURE_DIR", &c.Capture.Dir)
 	boolean("CAPTURE_CONSUME", &c.Capture.Consume)
 	dur("CAPTURE_IDLE_INTERVAL", &c.Capture.IdleInterval)
+	float("CAPTURE_MIN_TONE_FRACTION", &c.Capture.MinToneFraction)
 	boolean("CAPTURE_RETAIN_FRAMES", &c.Capture.RetainFrames)
 	str("CAPTURE_SIMULATE", &c.Capture.Simulate)
 	str("PEER_SENDER_UI_URL", &c.Peer.SenderUIURL)
@@ -650,6 +668,30 @@ func (w *Watcher) SetCamera(device, format string, width, height int, fps float6
 	next.Capture.Width = width
 	next.Capture.Height = height
 	next.Capture.FPS = fps
+	w.current.Store(&next)
+	return next
+}
+
+// SetMinToneFraction applies the blank-screen threshold without a restart.
+//
+// A method for the same reason as SetCamera: the value comes from an operator adjusting a control while aiming a
+// camera, not from the configuration file, and the file is theirs to edit rather than this service's to rewrite.
+// Deliberately live-only — the configured value in .env or sender.yaml is what a restart comes back to, which is
+// the right shape for a debugging override. Unlike the sender's display sink, this setting takes effect on the
+// very next frame, so there is no restart for the change to be lost across.
+//
+// Clamped rather than validated, because a caller cannot usefully be told off here: this is reached from a
+// slider, and a negative value has an obvious meaning — turn the gate off.
+func (w *Watcher) SetMinToneFraction(fraction float64) Config {
+	if fraction < 0 {
+		fraction = 0
+	}
+	if fraction > 0.5 {
+		// Above a half is unsatisfiable: dark and light are disjoint, so both cannot exceed 50% of the samples.
+		fraction = 0.5
+	}
+	next := w.Current()
+	next.Capture.MinToneFraction = fraction
 	w.current.Store(&next)
 	return next
 }
