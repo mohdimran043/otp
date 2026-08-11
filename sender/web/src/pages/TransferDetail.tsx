@@ -1,10 +1,15 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Alert,
   AlertTitle,
   Box,
   Button,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   LinearProgress,
   Paper,
   Stack,
@@ -16,8 +21,10 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material'
-import { useQuery } from '@tanstack/react-query'
-import { useParams } from 'react-router-dom'
+import DeleteIcon from '@mui/icons-material/Delete'
+import PlayArrowIcon from '@mui/icons-material/PlayArrow'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate, useParams } from 'react-router-dom'
 
 import { api, eta, formatBytes, formatDuration, formatRate } from '../api/client'
 import { ErrorNotice } from '../components/ErrorNotice'
@@ -31,7 +38,10 @@ import { useUi } from '../store/ui'
 
 export function TransferDetail() {
   const { id = '' } = useParams()
+  const navigate = useNavigate()
+  const client = useQueryClient()
   const refreshMs = useUi((state) => state.refreshMs)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   const transfer = useQuery({
     queryKey: ['transfer', id],
@@ -62,6 +72,22 @@ export function TransferDetail() {
   const status = transfer.data
   const result = status?.result
 
+  const startTransfer = useMutation({
+    mutationFn: () => api.startTransfer(id),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['transfer', id] })
+      void client.invalidateQueries({ queryKey: ['transfers'] })
+    },
+  })
+
+  const deleteTransfer = useMutation({
+    mutationFn: () => api.deleteTransfer(id),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ['transfers'] })
+      navigate('/transfers')
+    },
+  })
+
   // The chunk map is the picture an operator actually wants during a transfer: which parts have arrived
   // and which have not, at a glance, rather than a count. Parity shards are drawn differently because a
   // missing one is not a gap in the file.
@@ -86,6 +112,17 @@ export function TransferDetail() {
         <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1 }}>
           {id}
         </Typography>
+        {status?.status === 'ready' && (
+          <Button
+            size="small"
+            variant="contained"
+            startIcon={<PlayArrowIcon />}
+            disabled={startTransfer.isPending}
+            onClick={() => startTransfer.mutate()}
+          >
+            {startTransfer.isPending ? 'Starting…' : 'Start'}
+          </Button>
+        )}
         {id && status && (
           <TransferControls
             transmissionId={id}
@@ -94,9 +131,51 @@ export function TransferDetail() {
             chunkCount={status.chunk_count}
           />
         )}
+        <Button
+          size="small"
+          variant="outlined"
+          color="error"
+          startIcon={<DeleteIcon />}
+          onClick={() => setConfirmingDelete(true)}
+        >
+          Delete
+        </Button>
       </Stack>
 
       <ErrorNotice error={transfer.error} />
+      <ErrorNotice error={startTransfer.error} />
+
+      <Dialog open={confirmingDelete} onClose={() => setConfirmingDelete(false)}>
+        <DialogTitle>Delete this transfer?</DialogTitle>
+        <DialogContent>
+          <ErrorNotice error={deleteTransfer.error} />
+          <DialogContentText component="div">
+            This removes the transfer entirely — the row, its chunks, and every frame the pipeline
+            wrote for it — rather than only marking it cancelled. There is no undo.
+            <br />
+            <br />
+            {status && ['preparing', 'transmitting', 'paused'].includes(status.status) ? (
+              <>
+                This transfer is currently <strong>{status.status}</strong>, so the server will refuse
+                this until it is cancelled first.
+              </>
+            ) : (
+              'It is safe to delete: nothing is actively using it right now.'
+            )}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmingDelete(false)}>Keep it</Button>
+          <Button
+            color="error"
+            variant="contained"
+            disabled={deleteTransfer.isPending}
+            onClick={() => deleteTransfer.mutate()}
+          >
+            {deleteTransfer.isPending ? 'Deleting…' : 'Delete the transfer'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {status?.error && (
         <Alert severity="error">

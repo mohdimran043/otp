@@ -165,6 +165,10 @@ export type DisplaySettingsPatch = Partial<{
   quiet_zone: number
   encoder: string
   bit_depth: number
+  // sink chooses the display channel: "file" (the shared directory) or "none" (camera-only,
+  // discarding the display's own write). It is not reloadable — the sink opens once at process
+  // start — so this takes effect on the next restart, same as the geometry fields above.
+  sink: string
 }>
 
 export interface TransferControl {
@@ -174,6 +178,17 @@ export interface TransferControl {
   chunk_count: number
   jobs_cancelled?: number
   note?: string
+}
+
+// KeyView is one saved encryption key, as the API reports it. The key itself never appears
+// here — only a fingerprint, the first 8 bytes of its SHA-256 in hex — because a page that can
+// display a key is a page that can leak one. A transfer picks a key by id (encryption_key_id)
+// instead of carrying its hex again.
+export interface KeyView {
+  id: number
+  label: string
+  fingerprint: string
+  created_at: string
 }
 
 export interface Job {
@@ -290,6 +305,27 @@ export const api = {
     request<TransferControl>(`/api/v1/transfers/${id}/cancel`, { method: 'POST' }),
   pause: (id: string) => request<TransferControl>(`/api/v1/transfers/${id}/pause`, { method: 'POST' }),
   resume: (id: string) => request<TransferControl>(`/api/v1/transfers/${id}/resume`, { method: 'POST' }),
+
+  // startTransfer begins displaying a transfer that was prepared with autostart=false and is
+  // sitting in "ready" waiting for an operator. 409 unless the transfer is actually ready.
+  startTransfer: (id: string) =>
+    request<TransferControl>(`/api/v1/transfers/${id}/start`, { method: 'POST' }),
+
+  // deleteTransfer removes a transfer entirely — the row and everything the pipeline wrote for
+  // it. 409 while it is preparing, transmitting, or paused: cancel it first.
+  deleteTransfer: (id: string) => request<void>(`/api/v1/transfers/${id}`, { method: 'DELETE' }),
+
+  // The saved-key keyring. Keys go in and fingerprints come out; the key itself is never
+  // readable back. A transfer names one by id (encryption_key_id) instead of pasting its hex
+  // into every request.
+  keys: () => request<{ keys: KeyView[] | null }>('/api/v1/keys').then((r) => r.keys ?? []),
+  addKey: (keyHex: string, label: string) =>
+    request<KeyView>('/api/v1/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key_hex: keyHex, label }),
+    }),
+  deleteKey: (id: number) => request<void>(`/api/v1/keys/${id}`, { method: 'DELETE' }),
 
   display: () => request<DisplayStatus>('/api/v1/display'),
 

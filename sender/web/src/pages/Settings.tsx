@@ -6,21 +6,36 @@ import {
   Chip,
   Divider,
   FormControl,
+  IconButton,
+  InputAdornment,
   InputLabel,
   MenuItem,
   Paper,
   Select,
   Slider,
   Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableRow,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from '@mui/material'
+import DeleteIcon from '@mui/icons-material/Delete'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, formatRate, type DisplaySettingsPatch } from '../api/client'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { Grid } from '../components/Grid'
 import { Stat } from '../components/Stat'
+
+function randomKeyHex(): string {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
 
 // The two settings that set the transfer rate, and they are not symmetrical.
 //
@@ -96,6 +111,7 @@ export function Settings() {
   const client = useQueryClient()
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, refetchInterval: 5000 })
   const profiles = useQuery({ queryKey: ['profiles'], queryFn: api.profiles })
+  const keys = useQuery({ queryKey: ['keys'], queryFn: api.keys })
   const data = settings.data
 
   const [fps, setFps] = useState<number | null>(null)
@@ -104,6 +120,33 @@ export function Settings() {
   const [refresh, setRefresh] = useState<number | null>(null)
   const [measuring, setMeasuring] = useState(false)
   const [note, setNote] = useState<string | null>(null)
+
+  const [keyLabel, setKeyLabel] = useState('')
+  const [keyHex, setKeyHex] = useState('')
+  const keyValid = /^[0-9a-fA-F]{64}$/.test(keyHex.trim())
+
+  const addKey = useMutation({
+    mutationFn: () => api.addKey(keyHex.trim(), keyLabel.trim()),
+    onSuccess: async () => {
+      setKeyLabel('')
+      setKeyHex('')
+      await client.invalidateQueries({ queryKey: ['keys'] })
+    },
+  })
+  const deleteKey = useMutation({
+    mutationFn: (id: number) => api.deleteKey(id),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ['keys'] })
+    },
+  })
+
+  const sink = useMutation({
+    mutationFn: (value: string) => api.updateSettings({ sink: value }),
+    onSuccess: () => {
+      setNote('Saved. The new channel takes hold on the next restart — this process keeps writing to the old one until then.')
+      void client.invalidateQueries({ queryKey: ['settings'] })
+    },
+  })
 
   // The form follows the server until the operator touches it.
   useEffect(() => {
@@ -354,6 +397,119 @@ export function Settings() {
               Apply geometry
             </Button>
           </Box>
+        </Stack>
+      </Paper>
+
+      <Paper variant="outlined" sx={{ p: 2 }}>
+        <Typography variant="subtitle1" sx={{ mb: 1 }}>
+          Transfer channel
+        </Typography>
+
+        {busy && (
+          <Alert severity="warning" variant="outlined" sx={{ mb: 2 }}>
+            {data?.transmitting} transfer(s) are in flight, so the channel cannot change: the
+            remaining frames would go somewhere the receiver is not watching.
+          </Alert>
+        )}
+
+        <Alert severity="info" variant="outlined" sx={{ mb: 2 }}>
+          This is not reloadable, unlike everything above it: the display opens its channel once at
+          startup and nothing here re-opens it. A change here takes hold on the next restart — this
+          process keeps writing to the current one until then.
+        </Alert>
+
+        <ToggleButtonGroup
+          exclusive
+          disabled={busy || sink.isPending}
+          value={data?.sink ?? 'file'}
+          onChange={(_, value) => value && sink.mutate(value)}
+        >
+          <ToggleButton value="file">Shared directory</ToggleButton>
+          <ToggleButton value="none">Camera</ToggleButton>
+        </ToggleButtonGroup>
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+          <strong>Shared directory</strong> writes each frame to the directory the receiver's file
+          camera reads — the loopback path most deployments actually use. <strong>Camera</strong>{' '}
+          discards that write so nothing is duplicated onto disk while a real camera watches the
+          physical display instead.
+        </Typography>
+
+        <ErrorNotice error={sink.error} />
+      </Paper>
+
+      <Paper variant="outlined" sx={{ p: 2 }}>
+        <Typography variant="subtitle1" sx={{ mb: 1 }}>
+          Encryption keys
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+          Saved here, a key can be picked by name from the "Send a file" form instead of being
+          pasted into every transfer — the key itself still never crosses the optical channel. A key
+          is never shown again once it is saved; only its fingerprint is.
+        </Typography>
+        <ErrorNotice error={keys.error} />
+
+        {(keys.data?.length ?? 0) === 0 ? (
+          <Alert severity="info" variant="outlined" sx={{ mb: 2 }}>
+            No keys saved yet.
+          </Alert>
+        ) : (
+          <Table size="small" sx={{ mb: 2 }}>
+            <TableBody>
+              {keys.data!.map((k) => (
+                <TableRow key={k.id}>
+                  <TableCell>{k.label || '(no label)'}</TableCell>
+                  <TableCell sx={{ fontFamily: 'monospace' }}>{k.fingerprint}</TableCell>
+                  <TableCell align="right">
+                    <IconButton
+                      size="small"
+                      aria-label={`delete ${k.label || k.fingerprint}`}
+                      disabled={deleteKey.isPending}
+                      onClick={() => deleteKey.mutate(k.id)}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+
+        <ErrorNotice error={addKey.error} />
+        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="flex-start">
+          <TextField
+            label="Label"
+            value={keyLabel}
+            onChange={(event) => setKeyLabel(event.target.value)}
+            size="small"
+          />
+          <TextField
+            label="Key (64 hex characters)"
+            value={keyHex}
+            onChange={(event) => setKeyHex(event.target.value)}
+            error={keyHex.length > 0 && !keyValid}
+            size="small"
+            sx={{ minWidth: 320 }}
+            slotProps={{
+              input: {
+                sx: { fontFamily: 'monospace' },
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <Button size="small" onClick={() => setKeyHex(randomKeyHex())}>
+                      Generate
+                    </Button>
+                  </InputAdornment>
+                ),
+              },
+            }}
+          />
+          <Button
+            variant="contained"
+            disabled={!keyValid || addKey.isPending}
+            onClick={() => addKey.mutate()}
+          >
+            Add key
+          </Button>
         </Stack>
       </Paper>
 
