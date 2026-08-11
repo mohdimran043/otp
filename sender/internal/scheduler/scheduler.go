@@ -221,6 +221,10 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 	}
 	nextManifest := 0
 
+	// When the last chunk was acknowledged, so the trailer below knows how long it has been showing the
+	// manifest to a receiver that has not yet said it managed to merge. Zero until that happens.
+	var lastAckAt time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -267,9 +271,36 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 		}
 
 		if len(pending) == 0 {
-			// Everything has been acknowledged. That is the only condition that ends a transmission
-			// successfully, and it is checked against the chunk rows rather than a counter so a
-			// duplicate acknowledgement cannot make it look complete early.
+			// Everything has been acknowledged — but that is not the same as the receiver being able to use it.
+			//
+			// It also needs the manifest, and the manifest is one frame in a cycle re-emitted every
+			// ManifestInterval frames. A small transfer is acknowledged long before the next one is due: five
+			// chunks take about two seconds at ten frames a second, against 6.4 seconds between manifests. So
+			// stopping here left the receiver holding every chunk and unable to merge, while the sender waited
+			// for a completion report that could never come. Over a camera, which necessarily starts watching
+			// after the display has begun, that was the normal outcome rather than an edge case.
+			//
+			// The manifest is the only thing the receiver can still be missing at this point, so it is what
+			// goes on the screen while waiting to be told the file arrived.
+			if lastAckAt.IsZero() {
+				lastAckAt = time.Now()
+			}
+			complete, err := s.store.Transmissions.Status(ctx, transmissionID)
+			if err != nil {
+				return stats, err
+			}
+			if afterLastAck(len(manifests) > 0, complete == store.TxCompleted,
+				time.Since(lastAckAt), cfg.Ack.Timeout) == showManifest {
+				if err := s.show(ctx, manifests[0], PriorityKeepAlive); err != nil {
+					return stats, err
+				}
+				stats.FramesShown++
+				stats.KeepAlives++
+				continue
+			}
+
+			// That is the only condition that ends a transmission successfully, and it is checked against the
+			// chunk rows rather than a counter so a duplicate acknowledgement cannot make it look complete early.
 			acked, err := s.store.Transmissions.RecountAcked(ctx, transmissionID)
 			if err != nil {
 				return stats, err

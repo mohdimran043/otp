@@ -579,7 +579,20 @@ func (r *Receiver) handleManifest(ctx context.Context, frame *protocol.Frame) er
 		zap.String("transmission", frame.Header.TransmissionID.String()),
 		zap.String("file", manifest.Filename),
 		zap.Uint32("chunks", manifest.ChunkCount))
-	return nil
+
+	// The manifest is the other way a transmission can become complete, and forgetting that was a bug that
+	// silently lost whole transfers.
+	//
+	// Completion used to be checked only from handleChunk, and only for a chunk that was newly inserted and not
+	// parity. But the manifest is one frame in a repeating cycle, so a receiver watching mid-stream regularly
+	// reads data frames first — and if the last one it needed arrived before the manifest did, every chunk was
+	// present, nothing was missing, and nothing ever merged. It could not recover either: the sender kept
+	// redisplaying, but a chunk already held is not inserted, so the check was never reached again.
+	//
+	// Checking here closes that. maybeComplete is guarded by r.finished and re-reads what is actually present,
+	// so calling it on a repeated manifest — which a live display will certainly deliver — costs a lookup and
+	// does nothing.
+	return r.maybeComplete(ctx, frame.Header.TransmissionID)
 }
 
 // keyring is every key this receiver holds: the configured one, then the loaded ones.
