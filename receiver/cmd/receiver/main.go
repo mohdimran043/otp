@@ -247,6 +247,17 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 			// BrowserActive is how the camera surface tells a browser source that is selected but
 			// silent from one a page is actually posting frames into: the same distinction Push
 			// resolves at call time, since the source can be swapped out from under either of them.
+			// BrowserStats surfaces what the browser source counted. Without it, an operator posting frames that
+			// the blank-screen gate rejects sees exactly what an operator whose camera is not running sees:
+			// nothing anywhere. The two need opposite responses.
+			BrowserStats: func() (int64, int64, int64) {
+				browser, ok := channel.Current().(*pipeline.BrowserSource)
+				if !ok {
+					return 0, 0, 0
+				}
+				return browser.Received(), browser.Idle(), browser.Dropped()
+			},
+
 			BrowserActive: func() bool {
 				browser, ok := channel.Current().(*pipeline.BrowserSource)
 				if !ok {

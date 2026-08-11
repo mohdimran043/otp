@@ -59,6 +59,13 @@ type Server struct {
 	// cannot take them, which the handler reports rather than accepting frames into nothing.
 	pushFrame func(image.Image, []byte) (bool, error)
 
+	// browserStats reports what the browser source has seen. It exists because none of it left the process
+	// before: the source counted every frame handed to it and every one the blank-screen gate turned away, and a
+	// reader of this API could not tell "posting hard and every frame rejected" from "not posting at all". Both
+	// showed flat session counters, no stored frames and an empty log, and three debugging sessions dead-ended on
+	// that ambiguity. The browser shows these numbers to its own user; the receiver could not see them.
+	browserStats func() (posted, gated, dropped int64)
+
 	// browserActive reports whether the browser capture source has heard from a page recently. Selecting
 	// "browser" as the source is not the same as a page actually posting frames to it — unlike the camera
 	// source, which opens hardware the moment it is selected, the browser source just sits and waits. Nil
@@ -102,6 +109,10 @@ type Options struct {
 	// BrowserActive reports whether the browser capture source has taken a frame recently. See the field
 	// of the same purpose on Server.
 	BrowserActive func() bool
+
+	// BrowserStats reports what the browser source has seen: frames handed to it, frames the blank-screen gate
+	// turned away, and frames dropped because the queue was full. Nil when this build has no way to ask.
+	BrowserStats func() (posted, gated, dropped int64)
 }
 
 // New returns a server.
@@ -119,6 +130,7 @@ func New(opts Options) *Server {
 		ingest:        opts.Ingest,
 		probe:         opts.Probe,
 		browserActive: opts.BrowserActive,
+		browserStats:  opts.BrowserStats,
 	}
 }
 

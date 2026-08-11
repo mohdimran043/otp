@@ -42,6 +42,17 @@ type camerasResponse struct {
 	// SourceUsesCamera is whether the active source opens a camera at all.
 	SourceUsesCamera bool `json:"source_uses_camera"`
 
+	// Posted, Gated and Dropped are what the browser source has seen this run: frames handed to it, frames the
+	// blank-screen test turned away before any decode was attempted, and frames discarded because the decode
+	// queue was full.
+	//
+	// Gated is the one worth watching. A frame it rejects reaches neither the decoder nor the failure log, so
+	// without this figure "posting hard and every frame rejected" is indistinguishable from "not posting at all"
+	// — and the two call for opposite responses: move the camera, or start it.
+	Posted  int64 `json:"posted"`
+	Gated   int64 `json:"gated"`
+	Dropped int64 `json:"dropped"`
+
 	// Streaming is whether a camera is open and running right now — which is what turns its light on. It is
 	// reported separately from the selection because the two came apart in practice: choosing a device
 	// configured a mode and left the source alone, so an operator saved their settings, saw a success, and
@@ -117,6 +128,12 @@ func (s *Server) listCameras(w http.ResponseWriter, r *http.Request) {
 		Streaming:        s.streaming(cfg.Capture.Source),
 		KnownSources:     pipeline.AvailableSources(),
 		Selection:        configured,
+	}
+
+	// Zeroes rather than omission when this build cannot ask, so a reader never has to wonder whether absent
+	// means none or means unknown.
+	if s.browserStats != nil {
+		response.Posted, response.Gated, response.Dropped = s.browserStats()
 	}
 
 	devices, err := camera.List()
