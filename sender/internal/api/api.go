@@ -186,6 +186,13 @@ type TransferRequest struct {
 	GridWidth  int `json:"grid_width,omitempty"`
 	GridHeight int `json:"grid_height,omitempty"`
 
+	// CellPixels overrides the configured cell size for this transfer alone. Zero means
+	// the configured default. Unlike quiet zone — a property of the panel and camera —
+	// cell size trades off against grid: a caller who wants a bigger grid than the
+	// configured cell size lets fit on their panel asks for a smaller cell here, rather
+	// than the deployment's default cell size being forced on every transfer.
+	CellPixels int `json:"cell_pixels,omitempty"`
+
 	// Resolved by parseTransferRequest; never read from the wire.
 	EncryptionID  uint8  `json:"-"`
 	EncryptionKey []byte `json:"-"`
@@ -292,7 +299,7 @@ func (s *Server) createTransfer(w http.ResponseWriter, r *http.Request) {
 		FECParityShards:  request.ParityShards,
 		GridWidth:        request.GridWidth,
 		GridHeight:       request.GridHeight,
-		CellPixels:       cfg.Optical.CellPixels,
+		CellPixels:       request.CellPixels,
 		QuietZone:        cfg.Optical.QuietZone,
 		Encrypted:        request.EncryptionID != protocol.EncryptionNone,
 		EncryptionID:     int(request.EncryptionID),
@@ -374,6 +381,7 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 		EncryptionKeyHex: strings.TrimSpace(r.FormValue("encryption_key_hex")),
 		GridWidth:        formInt(r, "grid_width", cfg.Optical.GridWidth),
 		GridHeight:       formInt(r, "grid_height", cfg.Optical.GridHeight),
+		CellPixels:       formInt(r, "cell_pixels", cfg.Optical.CellPixels),
 	}
 
 	if request.Encoder == "" {
@@ -493,14 +501,16 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 		request.EncryptionID = id
 	}
 
-	// Grid. Validated exactly as the settings endpoint validates geometry: the encoder
-	// must be able to carry something at this grid, and the rendered frame must fit a
-	// real panel. Cell size and quiet zone stay global — they are properties of the
-	// panel and camera, not of one file.
+	// Grid. Validated against the request's own cell size, not the configured default:
+	// a caller asking for a bigger grid than the default cell size lets fit on their
+	// panel supplies a smaller cell_pixels instead, and it is that combination — not
+	// the deployment's default — that has to fit. Quiet zone stays global; it is a
+	// property of the panel and camera, not of one file.
 	layout, err := protocol.NewLayoutQuiet(request.GridWidth, request.GridHeight,
-		cfg.Optical.CellPixels, cfg.Optical.QuietZone)
+		request.CellPixels, cfg.Optical.QuietZone)
 	if err != nil {
-		return request, fmt.Errorf("grid %dx%d: %w", request.GridWidth, request.GridHeight, err)
+		return request, fmt.Errorf("grid %dx%d at %d px/cell: %w",
+			request.GridWidth, request.GridHeight, request.CellPixels, err)
 	}
 	depth := request.BitDepth
 	if depth == 0 {
