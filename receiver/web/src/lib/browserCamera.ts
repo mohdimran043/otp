@@ -1,3 +1,4 @@
+import { videoConstraints } from './videoConstraints'
 // The browser's camera, owned outside React.
 //
 // It has to live here rather than in a component, and the reason is the bug this fixes: the stream was held by
@@ -179,16 +180,10 @@ export async function start(options: { deviceId?: string; rearFacing?: boolean; 
   try {
     await options.prepare()
 
-    // facingMode is what points a phone at the display rather than at its owner. Asked for as a preference
-    // rather than a requirement, because a laptop has no rear camera and demanding one would fail outright.
+    // See videoConstraints: the resolution asked for here decides which grids can be decoded at all, and it
+    // used to be pinned to 1080p — under which a 384 grid is unreadable at any framing.
     const constraints: MediaStreamConstraints = {
-      video: options.deviceId
-        ? { deviceId: { exact: options.deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
-        : {
-            facingMode: options.rearFacing ? { ideal: 'environment' } : undefined,
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
+      video: videoConstraints({ deviceId: options.deviceId, rearFacing: options.rearFacing }),
       audio: false,
     }
 
