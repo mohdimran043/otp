@@ -112,6 +112,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/transfers/{id}/pause", s.pauseTransfer)
 	mux.HandleFunc("POST /api/v1/transfers/{id}/resume", s.resumeTransfer)
 
+	// Removing one entirely: the row and every object the pipeline wrote for it, as opposed
+	// to cancel, which stops a transfer but keeps its history.
+	mux.HandleFunc("DELETE /api/v1/transfers/{id}", s.handleDeleteTransfer)
+
 	// The channel, as opposed to the queue: what is on the display now, for a camera to watch and for a
 	// receiver to follow.
 	mux.HandleFunc("GET /api/v1/display", s.getDisplay)
