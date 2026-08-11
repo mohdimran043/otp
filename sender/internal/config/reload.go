@@ -285,6 +285,9 @@ func differences(running, loaded Config) []string {
 	if !reflect.DeepEqual(comparable.Auth, running.Auth) {
 		out = append(out, "auth")
 	}
+	if !reflect.DeepEqual(comparable.Retention, running.Retention) {
+		out = append(out, "retention")
+	}
 	if !reflect.DeepEqual(comparable.Log, running.Log) {
 		out = append(out, "log (only level can be reloaded)")
 	}

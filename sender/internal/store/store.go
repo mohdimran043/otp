@@ -615,6 +615,34 @@ func (r *Transmissions) CountActive(ctx context.Context) (int, error) {
 	return count, err
 }
 
+// ListForRetention returns the identifiers of transmissions old enough, and never completed,
+// to be swept by the retention job.
+//
+// "Never completed" is the whole test, not "failed" or "cancelled" specifically: a transfer
+// stuck pending, preparing, transmitting, or paused has abandoned just as much storage as one
+// that failed outright, and the sender has no other mechanism that will ever revisit it.
+// Completed is the one status that means an operator got what they came for, so it is the one
+// status this sweep must never touch.
+func (r *Transmissions) ListForRetention(ctx context.Context, olderThan time.Time) ([]uuid.UUID, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id FROM transmissions WHERE created_at < $1 AND status <> $2`,
+		olderThan, TxCompleted)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // GetByNumber returns one frame of a transmission, addressed the way an auditor thinks of it.
 //
 // By frame number rather than by row id, because that is the number written into the frame's own header

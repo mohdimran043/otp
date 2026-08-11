@@ -226,6 +226,14 @@ func (c Config) Validate() error {
 		add("auth.token_ttl must be positive")
 	}
 
+	// Retention.
+	if c.Retention.Interval <= 0 {
+		add("retention.interval must be positive")
+	}
+	if c.Retention.MaxAge <= 0 {
+		add("retention.max_age must be positive")
+	}
+
 	// Logging, metrics, tracing.
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

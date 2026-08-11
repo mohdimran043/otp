@@ -69,6 +69,7 @@ func (p *Pipeline) Register(engine *jobs.Engine) {
 	engine.Register(jobs.HandlerFunc{JobType: TypeFEC, Fn: p.fecEncode})
 	engine.Register(jobs.HandlerFunc{JobType: TypeRender, Fn: p.render})
 	engine.Register(jobs.HandlerFunc{JobType: TypeFinalize, Fn: p.finalize})
+	engine.Register(jobs.HandlerFunc{JobType: TypeRetention, Fn: p.retention})
 }
 
 // Prepare enqueues the whole chain for a transmission and marks it as being prepared.
