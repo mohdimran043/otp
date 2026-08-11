@@ -175,10 +175,22 @@ OTP_SENDER_DISPLAY_SINK=none    # render and display only; nothing on disk
 Like the grid, the sink is read once at startup, so it **takes effect on the next restart** rather than live,
 and the change is refused outright while any transfer is in flight.
 
-**Set it in `.env`, not from the UI.** Settings → Transfer channel does exist and does what it says
-immediately, but the settings API applies changes to the running configuration only — nothing writes them
-down. So the toggle is lost on the very restart it needs in order to take effect, and the sink returns to
-whatever `.env` says. Until that is fixed, `.env` plus a restart is the only way to hold the change.
+Either **Settings → Transfer channel** or `.env` works: a change made in the UI is written down and laid back
+over the configuration on the next start, so it survives the restart it needs. Stored settings win over `.env`
+for the fields the settings page manages, which is what makes "I changed it in the UI" mean anything — the
+corollary being that editing such a field in `.env` no longer wins once the UI has set it.
+
+### Start the camera before the transfer
+
+**This ordering is not advice, it is a requirement**, and getting it wrong looks like a hang rather than a
+mistake. The manifest — the frame carrying the filename, the size and the hash — is displayed early and then,
+once every chunk has been acknowledged, the display parks and never shows it again. A camera that starts
+watching after that window decodes every chunk perfectly, acknowledges them all, and still cannot assemble
+anything, because it never learned what it was assembling. The sender sits at `transmitting` with everything
+acknowledged, indefinitely.
+
+So: open the receiver's Camera page and press **Start** first, confirm frames are being decoded, and only then
+create the transfer. Recovering from the wrong order means cancelling and sending again.
 
 ## Cameras
 
@@ -205,6 +217,15 @@ The indicator distinguishes *selected* from *actually running*. Selecting `camer
 immediately — it is exclusive, so being selected is being open. Selecting `browser` only means the receiver
 will accept frames if a page posts them, so it is reported as streaming when a page has posted within the
 last two seconds, and not merely because it is the chosen source.
+
+**The page tells you what it is decoding, out loud.** An operator aiming a camera at a monitor cannot watch the
+monitor they are aiming at, so the Camera page beeps: a low note when the manifest arrives, one higher beep for
+each chunk decoded, and a rising chime when the merged file verifies. Beeps mark *new* chunks rather than
+decoded frames — the display repeats a chunk until it is acknowledged, so a beep per frame would be a
+continuous drone meaning only "the camera is pointed at something". Silence means the display has nothing left
+to give. Alongside them, frames decoded and the decode rate are shown rather than sounded; a decode rate
+falling is a lens drifting out of focus, visible long before a chunk stops arriving. The speaker icon silences
+it.
 
 ## Encrypting a transfer
 
