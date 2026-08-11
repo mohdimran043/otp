@@ -194,6 +194,40 @@ func TestDeleteTransmissionLeavesCapturedFramesAlone(t *testing.T) {
 	require.Len(t, frames, 1, "captured_frames is the audit log, not the file; it must survive")
 }
 
+// TestDeleteTransmissionWithoutManifestStillDeletes reproduces a documented-normal case the
+// receiver's own pipeline describes: chunks can arrive before the manifest does, and are stored
+// and counted while it waits — so a transmission can have real decoded_chunks rows and real
+// chunks/<id>/* objects with no manifests row at all. A delete must still find and remove it
+// rather than 404 while quietly destroying those objects on the way there.
+func TestDeleteTransmissionWithoutManifestStillDeletes(t *testing.T) {
+	h := newDeleteHarness(t)
+	ctx := context.Background()
+	id := uuid.New()
+
+	chunkKey := "chunks/" + id.String() + "/00000000.bin"
+	require.NoError(t, objectstore.PutBytes(ctx, h.objects, chunkKey, []byte("chunk-0")))
+	_, err := h.store.Chunks.Insert(ctx, store.Chunk{
+		TransmissionID: id, ChunkNumber: 0, SizeBytes: 7, StoredPath: chunkKey,
+		SHA256: sum("chunk-0"),
+	})
+	require.NoError(t, err)
+
+	// No manifest row is written: this is the case a manifest-only existence check gets wrong.
+	_, err = h.store.Manifests.Get(ctx, id)
+	require.ErrorIs(t, err, store.ErrNotFound, "precondition: no manifest exists for this id")
+
+	response := h.delete(t, id)
+	require.Equal(t, http.StatusNoContent, response.Code, response.Body.String())
+
+	chunks, err := h.store.Chunks.List(ctx, id)
+	require.NoError(t, err)
+	require.Empty(t, chunks, "the decoded_chunks row must be gone")
+
+	objects, err := h.objects.List(ctx, "chunks/"+id.String()+"/")
+	require.NoError(t, err)
+	require.Empty(t, objects, "the chunk object must be gone")
+}
+
 func TestDeleteUnknownTransmissionIs404(t *testing.T) {
 	h := newDeleteHarness(t)
 	response := h.delete(t, uuid.New())

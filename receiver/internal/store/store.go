@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -802,16 +803,60 @@ func (r *DecoderKeys) Delete(ctx context.Context, id int64) error {
 // repository of its own rather than living on one of the narrower ones.
 type Transmissions struct{ pool *db.Pool }
 
-// deletedByTransmission lists every table keyed by a bare transmission_id, in the order they
-// are deleted. manifests is last and deliberate: it is the row DeleteCascade checks for
-// existence, so deleting it first would leave a half-finished cascade indistinguishable, on
-// retry, from a transmission that was never there.
+// deletedByTransmission lists every table keyed by a bare transmission_id. Order does not
+// matter for correctness — the deletes run inside one transaction, so it is all seven rows
+// gone or none of them — but manifests is listed last anyway, as the table a reader would
+// check first if they were only glancing at this list.
 //
 // captured_frames is not here. It is keyed by session_id, cascades from capture_sessions on
 // delete, and is the capture audit log rather than the file itself — a transmission's
 // deletion must not take a session's history of what the camera saw along with it.
 var deletedByTransmission = []string{
 	"decoded_chunks", "missing_chunks", "merged_files", "ack_state", "callbacks", "statistics", "manifests",
+}
+
+// existsQuery reports whether any of the seven tables has a row for a transmission. Built once
+// from deletedByTransmission rather than hand-written, so a table added to the deletion list is
+// automatically part of the existence check too.
+var existsQuery = buildExistsQuery(deletedByTransmission)
+
+func buildExistsQuery(tables []string) string {
+	clauses := make([]string, len(tables))
+	for i, table := range tables {
+		clauses[i] = fmt.Sprintf("EXISTS (SELECT 1 FROM %s WHERE transmission_id = $1)", table)
+	}
+	return "SELECT " + strings.Join(clauses, " OR ")
+}
+
+// rowScanner is the common surface of *db.Pool and pgx.Tx that existsAnywhere needs, so the
+// same query backs both a standalone check and one made inside DeleteCascade's transaction.
+type rowScanner interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// existsAnywhere reports whether a transmission has a row in any of the seven tables.
+//
+// This is deliberately not "does a manifest exist": chunks routinely arrive before the manifest
+// does and are stored and counted while the receiver waits for it (see pipeline.Receiver's
+// handling of early chunks), so decoded_chunks, missing_chunks, or ack_state can be the only
+// tables that know a transmission exists at all. Checking manifests alone would tell a caller
+// "no such transmission" about one that is mid-transfer and has real rows and real objects on
+// disk — which is exactly the bug this function exists to avoid.
+func existsAnywhere(ctx context.Context, q rowScanner, id uuid.UUID) (bool, error) {
+	var exists bool
+	err := q.QueryRow(ctx, existsQuery, id).Scan(&exists)
+	return exists, err
+}
+
+// Exists reports whether this receiver knows anything at all about a transmission.
+//
+// It exists so a caller — the delete handler, specifically — can decide whether a transmission
+// is known *before* doing anything irreversible, such as deleting the objects the transmission's
+// rows point at. Deciding that only inside DeleteCascade's own transaction would still leave a
+// caller that acts on the id first (or in parallel) with the wrong answer, and the delete
+// handler must never destroy an object on a path that ends in 404.
+func (r *Transmissions) Exists(ctx context.Context, id uuid.UUID) (bool, error) {
+	return existsAnywhere(ctx, r.pool, id)
 }
 
 // DeleteCascade removes every row a transmission owns, across the seven tables that carry its
@@ -823,11 +868,9 @@ var deletedByTransmission = []string{
 // manifest row and a decoded_chunks row for the same id belong together, so nothing but this
 // method can take them all out atomically.
 //
-// Existence is checked against manifests first, because a manifest is this receiver's record
-// that a transmission exists at all — the other six tables can be legitimately empty (no chunk
-// has arrived yet, no callback was ever due) without that meaning the id is unknown, so an
-// existence check against any of them would misreport a real, merely quiet, transmission as
-// not found.
+// Existence is checked with the same any-of-seven-tables query Exists uses, inside this
+// transaction, so a caller that skipped its own check (or lost a race with one) still gets a
+// correct ErrNotFound rather than silently deleting nothing.
 func (r *Transmissions) DeleteCascade(ctx context.Context, id uuid.UUID) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -835,13 +878,12 @@ func (r *Transmissions) DeleteCascade(ctx context.Context, id uuid.UUID) error {
 	}
 	defer tx.Rollback(context.WithoutCancel(ctx))
 
-	var exists bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM manifests WHERE transmission_id = $1)`, id).Scan(&exists); err != nil {
+	exists, err := existsAnywhere(ctx, tx, id)
+	if err != nil {
 		return err
 	}
 	if !exists {
-		return fmt.Errorf("%w: no manifest for %s", ErrNotFound, id)
+		return fmt.Errorf("%w: transmission %s", ErrNotFound, id)
 	}
 
 	for _, table := range deletedByTransmission {
