@@ -83,6 +83,15 @@ type Receiver struct {
 	// ingestSequence numbers frames arriving through Ingest, offset by ingestSequenceBase so
 	// they never collide with a capture source's own sequence numbers within a session.
 	ingestSequence atomic.Int64
+
+	// capturedSequence numbers every frame stored in this session, replacing whatever number the source gave it.
+	//
+	// A source numbers from zero, and swapping sources — which is what pressing Stop then Start on the camera
+	// page does — builds a new one, so numbering restarted inside a session that had already used those numbers.
+	// captured_frames is unique on (session, sequence) and its object key embeds the sequence, so every frame
+	// after a restart both collided with an existing row and overwrote an existing image. Numbering here, where
+	// the session lives, is what makes the sequence mean "the nth frame of this session" as the schema assumes.
+	capturedSequence atomic.Int64
 }
 
 // New returns a receiver.
@@ -443,6 +452,10 @@ type prepared struct {
 
 // prepare persists and decodes one captured frame. It is safe to run on many frames at once.
 func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
+	// Renumbered against the session before anything is written, so the number in the row and the number in the
+	// object key are unique within the session however many times the source has been restarted.
+	capture.Sequence = r.capturedSequence.Add(1)
+
 	// Persisted before decoding, always. A frame that cannot be read is the primary evidence for
 	// why a capture is going badly, and it is also the only thing a replay can work from.
 	key, sum, err := r.storeCapture(ctx, r.session, capture)
@@ -503,8 +516,15 @@ func (r *Receiver) apply(ctx context.Context, p prepared) error {
 
 	if decodeErr != nil {
 		record.DecodeError = decodeErr.Error()
+		record.CapturedAt = capture.CapturedAt
 		if err := r.store.Frames.Record(ctx, record); err != nil {
-			return err
+			// Unreachable now that sequences are allocated per session, and loud rather than fatal if it ever
+			// happens again: losing one frame's evidence is not worth failing the frame over, but losing it
+			// silently is what hid this for an hour.
+			if !errors.Is(err, store.ErrFrameNotRecorded) {
+				return err
+			}
+			r.log.Warn("a captured frame was not recorded", zap.Int64("sequence", record.Sequence), zap.Error(err))
 		}
 		if err := r.store.Sessions.Count(ctx, r.session, 1, 0, 1); err != nil {
 			return err
@@ -533,8 +553,12 @@ func (r *Receiver) apply(ctx context.Context, p prepared) error {
 		record.BitErrorRate = bandErrorRate(geometry)
 	}
 
+	record.CapturedAt = capture.CapturedAt
 	if err := r.store.Frames.Record(ctx, record); err != nil {
-		return err
+		if !errors.Is(err, store.ErrFrameNotRecorded) {
+			return err
+		}
+		r.log.Warn("a decoded frame was not recorded", zap.Int64("sequence", record.Sequence), zap.Error(err))
 	}
 	if err := r.store.Sessions.Count(ctx, r.session, 1, 1, 0); err != nil {
 		return err

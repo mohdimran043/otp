@@ -155,20 +155,46 @@ type CapturedFrame struct {
 type Frames struct{ pool *db.Pool }
 
 // Record writes a captured frame's row.
+// ErrFrameNotRecorded means a frame was not stored because its (session, sequence) already existed.
+//
+// It exists because the alternative was silence. Record inserted with ON CONFLICT DO NOTHING and returned nil
+// whether or not a row appeared, and a capture source numbers frames from zero — so pressing Stop then Start on
+// the camera page restarts numbering inside the same session, every subsequent frame collided, and every one was
+// thrown away while Record reported success. The session counters climbed past 478 while the rows stayed at 138,
+// which left Decode failures permanently blind and made every image fetched for diagnosis an hour stale.
+//
+// Distinguishable rather than a bare error so a caller can decide: a genuine duplicate read is not worth failing
+// a frame over, but it must be visible.
+var ErrFrameNotRecorded = errors.New("store: the frame was not recorded")
+
 func (r *Frames) Record(ctx context.Context, f CapturedFrame) error {
 	if f.ID == uuid.Nil {
 		f.ID = uuid.New()
 	}
-	_, err := r.pool.Exec(ctx, `
+	// captured_at is passed explicitly when the caller has it, so ordering by time reflects when the frame was
+	// photographed rather than when the row happened to be written. COALESCE keeps the old behaviour for callers
+	// that leave it zero.
+	var capturedAt any
+	if !f.CapturedAt.IsZero() {
+		capturedAt = f.CapturedAt
+	}
+	tag, err := r.pool.Exec(ctx, `
 		INSERT INTO captured_frames (id, session_id, sequence, stored_path, sha256, decoded,
 			decode_error, transmission_id, frame_number, chunk_number, is_manifest, is_parity,
-			bit_error_rate, finder_score, timing_score, contrast)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			bit_error_rate, finder_score, timing_score, contrast, captured_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+			COALESCE($17::timestamptz, now()))
 		ON CONFLICT (session_id, sequence) DO NOTHING`,
 		f.ID, f.SessionID, f.Sequence, f.StoredPath, f.SHA256, f.Decoded, f.DecodeError,
 		f.TransmissionID, f.FrameNumber, f.ChunkNumber, f.IsManifest, f.IsParity,
-		f.BitErrorRate, f.FinderScore, f.TimingScore, f.Contrast)
-	return err
+		f.BitErrorRate, f.FinderScore, f.TimingScore, f.Contrast, capturedAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: session %s already has sequence %d", ErrFrameNotRecorded, f.SessionID, f.Sequence)
+	}
+	return nil
 }
 
 // Failed returns the frames of a session that could not be read, which is the evidence an
@@ -211,12 +237,14 @@ func (r *Frames) Failed(ctx context.Context, sessionID uuid.UUID, limit int) ([]
 		       transmission_id, frame_number, chunk_number, is_manifest, is_parity,
 		       bit_error_rate, finder_score, timing_score, contrast, captured_at
 		FROM captured_frames WHERE session_id = $1 AND NOT decoded
-		-- Newest first, and that is the whole point of the page this feeds. "Why is my camera not reading
-		-- this" is a question about the last few seconds, but ordering ascending under a limit answered it with
-		-- the first failures of the session: once more had accumulated than the limit, the page froze on
-		-- ancient history. Observed 3,861 failures deep, still showing frames 1 to 24 from twenty minutes
-		-- earlier while an operator moved the camera and watched nothing change.
-		ORDER BY sequence DESC LIMIT $2`, sessionID, page(limit))
+		-- Newest first by *time*, which is the whole point of the page this feeds. "Why is my camera not
+		-- reading this" is a question about the last few seconds.
+		--
+		-- Ordering ascending answered it with the first failures of the session, so once more had accumulated
+		-- than the limit the page froze on ancient history. Ordering by sequence descending was no better: a
+		-- capture source numbers from zero, so a restart leaves the newest frames holding the *lowest* numbers
+		-- and the page shows whatever preceded the restart. Only captured_at means what it says.
+		ORDER BY captured_at DESC LIMIT $2`, sessionID, page(limit))
 	if err != nil {
 		return nil, err
 	}
