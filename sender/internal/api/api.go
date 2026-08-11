@@ -111,6 +111,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/transfers/{id}/cancel", s.cancelTransfer)
 	mux.HandleFunc("POST /api/v1/transfers/{id}/pause", s.pauseTransfer)
 	mux.HandleFunc("POST /api/v1/transfers/{id}/resume", s.resumeTransfer)
+	mux.HandleFunc("POST /api/v1/transfers/{id}/start", s.startTransfer)
 
 	// Removing one entirely: the row and every object the pipeline wrote for it, as opposed
 	// to cancel, which stops a transfer but keeps its history.
