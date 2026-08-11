@@ -5,6 +5,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import { BrowserCamera } from '../components/BrowserCamera'
 import { CameraPicker } from '../components/CameraPicker'
+import { ScanFeedback } from '../components/ScanFeedback'
+import { unlock } from '../lib/beep'
 
 // The camera, on its own page.
 //
@@ -77,6 +79,10 @@ export function Camera() {
       <BrowserCamera
         taking={cameras.data?.source === 'browser'}
         onStart={async () => {
+          // Started from inside the click, because a browser will not begin audio outside a user gesture. Left
+          // until the first beep, that beep would simply be dropped and the feature would look broken when it
+          // was only waiting to be allowed.
+          unlock()
           await api.selectCamera({ device: '', source: 'browser' })
           await client.invalidateQueries({ queryKey: ['cameras'] })
           await client.invalidateQueries({ queryKey: ['config'] })
@@ -87,6 +93,10 @@ export function Camera() {
           await client.invalidateQueries({ queryKey: ['config'] })
         }}
       />
+
+      {/* Below the camera controls, because it is what happens once the camera is running: an operator holding
+          a phone or a laptop at a monitor needs to hear what is being decoded, not read it. */}
+      <ScanFeedback />
 
       <CameraPicker />
     </Stack>
