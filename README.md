@@ -172,8 +172,13 @@ OTP_SENDER_DISPLAY_SINK=file    # write PNGs into DISPLAY_DIR
 OTP_SENDER_DISPLAY_SINK=none    # render and display only; nothing on disk
 ```
 
-Like the grid, the sink is read once at startup, so the toggle **takes effect on the next restart** rather
-than live — the UI says so, and refuses the change while any transfer is in flight.
+Like the grid, the sink is read once at startup, so it **takes effect on the next restart** rather than live,
+and the change is refused outright while any transfer is in flight.
+
+**Set it in `.env`, not from the UI.** Settings → Transfer channel does exist and does what it says
+immediately, but the settings API applies changes to the running configuration only — nothing writes them
+down. So the toggle is lost on the very restart it needs in order to take effect, and the sink returns to
+whatever `.env` says. Until that is fixed, `.env` plus a restart is the only way to hold the change.
 
 ## Cameras
 
@@ -340,10 +345,12 @@ The sender's lives in the `sender-minio` volume with the `otp-sender` bucket, th
 
 Both compose files already run MinIO and create the bucket **whether or not the backend is ever switched**,
 so turning it on is one variable and a restart rather than new infrastructure. Nothing publishes MinIO's
-ports, so the console is not reachable from the host by default; look at a bucket from inside the stack:
+ports, so the console is not reachable from the host by default; look at a bucket from inside the stack.
+`minio-init` is a one-shot that has already exited by the time you want to look, so this runs a fresh
+throwaway copy of it rather than `exec`ing into the dead one:
 
 ```bash
-docker compose exec minio-init mc ls --recursive local/otp-sender/
+docker compose run --rm --entrypoint sh minio-init -c 'mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null && mc ls --recursive local/otp-sender/'
 ```
 
 Versions are pinned, and the two pins do not match on purpose: `minio/minio:RELEASE.2024-11-07T00-52-20Z`
