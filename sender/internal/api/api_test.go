@@ -84,6 +84,25 @@ func TestParseTransferRequestEncryptionAndGrid(t *testing.T) {
 			// NewLayoutQuiet's own 48..4096 cell bound — so this reaches the
 			// panel-size check specifically, not the earlier grid-bounds check.
 			"grid_width": "600", "grid_height": "600"}, wantErr: "larger than any panel"},
+		{name: "smaller cell fits a bigger grid on the same panel", fields: map[string]string{
+			// (512+4)*2 = 1032 px: a 512 grid that would be 4128 px at the
+			// configured 8 px/cell fits comfortably at 2 px/cell instead — this is
+			// the whole point of a per-transfer cell size.
+			"cell_pixels": "2", "grid_width": "512", "grid_height": "512"},
+			check: func(t *testing.T, req TransferRequest) {
+				require.Equal(t, 2, req.CellPixels)
+			}},
+		{name: "requested cell size still renders larger than any panel", fields: map[string]string{
+			// (1024+4)*8 = 8224 px: the request's own cell size is what gets
+			// checked against maxImagePixels, not the configured default.
+			"cell_pixels": "8", "grid_width": "1024", "grid_height": "1024"},
+			wantErr: "larger than any panel"},
+		{name: "one pixel per cell fits a 1024 grid", fields: map[string]string{
+			// (1024+4)*1 = 1028 px.
+			"cell_pixels": "1", "grid_width": "1024", "grid_height": "1024"},
+			check: func(t *testing.T, req TransferRequest) {
+				require.Equal(t, 1, req.CellPixels)
+			}},
 	}
 
 	for _, tc := range cases {

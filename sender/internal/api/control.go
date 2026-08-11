@@ -213,3 +213,46 @@ func (s *Server) resumeTransfer(w http.ResponseWriter, r *http.Request) {
 			"shown again.", transfer.AckedChunks, transfer.ChunkCount),
 	})
 }
+
+// startTransfer begins displaying a manually-prepared ready transfer. Unlike resume, which starts
+// a paused transfer again, this starts one that was prepared with autostart=false and has been
+// waiting for an operator to begin its display. The transfer is already in the ready state; all
+// that's left is to call the display loop.
+func (s *Server) startTransfer(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.fail(w, http.StatusBadRequest, "the transfer id is not a UUID", err)
+		return
+	}
+	ctx := r.Context()
+
+	transfer, err := s.store.Transmissions.Get(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.fail(w, http.StatusNotFound, "no such transfer", err)
+			return
+		}
+		s.fail(w, http.StatusInternalServerError, "could not read the transfer", err)
+		return
+	}
+	if transfer.Status != store.TxReady {
+		s.fail(w, http.StatusConflict, fmt.Sprintf(
+			"only a ready transfer can be started; this one is %s", transfer.Status), nil)
+		return
+	}
+
+	// The transfer is already ready, so no status change is needed. Call the display loop directly
+	// to begin displaying it. The loop will move the status to transmitting as it starts rendering.
+	if s.transmit != nil {
+		s.transmit(ctx, id)
+	}
+
+	s.log.Info("transfer started", zap.String("transmission", id.String()))
+	s.respond(w, http.StatusOK, controlResponse{
+		TransmissionID: id.String(),
+		Status:         string(store.TxReady),
+		AckedChunks:    transfer.AckedChunks,
+		ChunkCount:     transfer.ChunkCount,
+		Note:           "Displaying now.",
+	})
+}

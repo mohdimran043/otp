@@ -72,6 +72,33 @@ type camerasResponse struct {
 // liveCameraSource is the capture source that opens a real camera.
 const liveCameraSource = "camera"
 
+// browserCameraSource is the capture source fed by a browser page holding a camera. It matches
+// pipeline.BrowserSource.Name(), duplicated here rather than imported so that this package keeps
+// deciding what a source name means without reaching into the pipeline for a constant.
+const browserCameraSource = "browser"
+
+// streaming reports whether the active source is actually producing frames right now, rather than
+// merely being the one selected.
+//
+// The two known camera sources differ in exactly the way that matters here. Selecting "camera" opens
+// the device immediately — it is exclusive, so being selected is being open, and it was always safe to
+// treat one as the other. Selecting "browser" does nothing of the sort: it only means the receiver will
+// take frames if a page posts them, and a browser tab that never pressed Start (or that navigated away)
+// leaves the source selected and silent. Reporting that as "streaming" is the bug this fixes — an
+// operator watching the indicator light would see it lit for a camera that was never turned on. So the
+// browser source is asked whether it has heard from a page recently, and only the camera source is
+// assumed to be live purely from being selected.
+func (s *Server) streaming(source string) bool {
+	switch source {
+	case liveCameraSource:
+		return true
+	case browserCameraSource:
+		return s.browserActive != nil && s.browserActive()
+	default:
+		return false
+	}
+}
+
 // listCameras reports the capture devices attached to this machine.
 func (s *Server) listCameras(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Current()
@@ -87,7 +114,7 @@ func (s *Server) listCameras(w http.ResponseWriter, r *http.Request) {
 		Supported:        camera.Available(),
 		Source:           cfg.Capture.Source,
 		SourceUsesCamera: cfg.Capture.Source == liveCameraSource,
-		Streaming:        cfg.Capture.Source == liveCameraSource,
+		Streaming:        s.streaming(cfg.Capture.Source),
 		KnownSources:     pipeline.AvailableSources(),
 		Selection:        configured,
 	}

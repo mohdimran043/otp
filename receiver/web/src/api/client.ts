@@ -250,6 +250,10 @@ export const api = {
     }),
   deleteKey: (id: number) => request<void>(`/api/v1/keys/${id}`, { method: 'DELETE' }),
 
+  // Removing a transmission entirely — its manifest, chunks, merged file and acknowledgements — rather
+  // than merely hiding it. There is no undo: the object store rows this deletes are gone with it.
+  deleteTransmission: (id: string) => request<void>(`/api/v1/transmissions/${id}`, { method: 'DELETE' }),
+
   // importFrames replays a downloaded frame archive (a zip of frame PNGs, or the single
   // composite PNG a one-chunk transfer produces) into the running pipeline. No Content-Type is
   // set here — the browser fills in the multipart boundary itself, and overriding it would

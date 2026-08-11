@@ -537,6 +537,8 @@ func applyEnv(c *Config) error {
 	str("MINIO_ACCESS_KEY", &c.Storage.MinIO.AccessKey)
 	str("MINIO_SECRET_KEY", &c.Storage.MinIO.SecretKey)
 	str("MINIO_BUCKET", &c.Storage.MinIO.Bucket)
+	boolean("MINIO_USE_SSL", &c.Storage.MinIO.UseSSL)
+	str("MINIO_REGION", &c.Storage.MinIO.Region)
 
 	str("CAPTURE_SOURCE", &c.Capture.Source)
 	str("CAPTURE_DIR", &c.Capture.Dir)

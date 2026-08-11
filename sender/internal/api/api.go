@@ -111,6 +111,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/transfers/{id}/cancel", s.cancelTransfer)
 	mux.HandleFunc("POST /api/v1/transfers/{id}/pause", s.pauseTransfer)
 	mux.HandleFunc("POST /api/v1/transfers/{id}/resume", s.resumeTransfer)
+	mux.HandleFunc("POST /api/v1/transfers/{id}/start", s.startTransfer)
+
+	// Removing one entirely: the row and every object the pipeline wrote for it, as opposed
+	// to cancel, which stops a transfer but keeps its history.
+	mux.HandleFunc("DELETE /api/v1/transfers/{id}", s.handleDeleteTransfer)
 
 	// The channel, as opposed to the queue: what is on the display now, for a camera to watch and for a
 	// receiver to follow.
@@ -123,6 +128,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/settings", s.updateSettings)
 
 	mux.HandleFunc("GET /api/v1/profiles", s.listProfiles)
+
+	// Saved encryption keys: keys go in and fingerprints come out, never the key itself. A
+	// transfer picks one of these by id (encryption_key_id) as an alternative to pasting its
+	// hex into every request.
+	mux.HandleFunc("GET /api/v1/keys", s.listKeys)
+	mux.HandleFunc("POST /api/v1/keys", s.addKey)
+	mux.HandleFunc("DELETE /api/v1/keys/{id}", s.deleteKey)
+
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
@@ -161,10 +174,24 @@ type TransferRequest struct {
 	Encryption       string `json:"encryption,omitempty"`
 	EncryptionKeyHex string `json:"encryption_key_hex,omitempty"`
 
+	// EncryptionKeyID names a key already saved through the /api/v1/keys API, as an
+	// alternative to EncryptionKeyHex: exactly one of the two may be supplied alongside a
+	// concrete cipher. It carries only the id — parseTransferRequest resolves it against
+	// SenderKeys and fills in EncryptionKey, so the key material itself never has to cross
+	// the wire again once it has been saved once.
+	EncryptionKeyID int64 `json:"encryption_key_id,omitempty"`
+
 	// GridWidth and GridHeight override the configured frame geometry for this transfer
 	// alone. Zero means the configured default.
 	GridWidth  int `json:"grid_width,omitempty"`
 	GridHeight int `json:"grid_height,omitempty"`
+
+	// CellPixels overrides the configured cell size for this transfer alone. Zero means
+	// the configured default. Unlike quiet zone — a property of the panel and camera —
+	// cell size trades off against grid: a caller who wants a bigger grid than the
+	// configured cell size lets fit on their panel asks for a smaller cell here, rather
+	// than the deployment's default cell size being forced on every transfer.
+	CellPixels int `json:"cell_pixels,omitempty"`
 
 	// Resolved by parseTransferRequest; never read from the wire.
 	EncryptionID  uint8  `json:"-"`
@@ -272,7 +299,7 @@ func (s *Server) createTransfer(w http.ResponseWriter, r *http.Request) {
 		FECParityShards:  request.ParityShards,
 		GridWidth:        request.GridWidth,
 		GridHeight:       request.GridHeight,
-		CellPixels:       cfg.Optical.CellPixels,
+		CellPixels:       request.CellPixels,
 		QuietZone:        cfg.Optical.QuietZone,
 		Encrypted:        request.EncryptionID != protocol.EncryptionNone,
 		EncryptionID:     int(request.EncryptionID),
@@ -354,6 +381,7 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 		EncryptionKeyHex: strings.TrimSpace(r.FormValue("encryption_key_hex")),
 		GridWidth:        formInt(r, "grid_width", cfg.Optical.GridWidth),
 		GridHeight:       formInt(r, "grid_height", cfg.Optical.GridHeight),
+		CellPixels:       formInt(r, "cell_pixels", cfg.Optical.CellPixels),
 	}
 
 	if request.Encoder == "" {
@@ -417,39 +445,72 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 	// feature": encrypt under the global key if one is configured. An explicit "none"
 	// always means none — and a key alongside it is refused rather than ignored,
 	// because a caller who supplied a key believes the transfer is confidential.
+	//
+	// A key may be supplied two ways — hex directly, or the id of one already saved
+	// through /api/v1/keys — and exactly one of the two is accepted alongside a concrete
+	// cipher: both together cannot be honoured without silently picking one, and neither
+	// is the existing "cipher without a key" refusal below.
 	keyHex := request.EncryptionKeyHex
+	keyIDRaw := strings.TrimSpace(r.FormValue("encryption_key_id"))
+	hasKeyID := keyIDRaw != ""
+	var keyID int64
+	if hasKeyID {
+		id, err := strconv.ParseInt(keyIDRaw, 10, 64)
+		if err != nil {
+			return request, fmt.Errorf("encryption_key_id %q is not a number", keyIDRaw)
+		}
+		keyID = id
+		request.EncryptionKeyID = id
+	}
+	hasKey := keyHex != "" || hasKeyID
+
 	switch {
-	case request.Encryption == "" && keyHex == "" && cfg.Optical.EncryptionKeyHex != "":
+	case request.Encryption == "" && !hasKey && cfg.Optical.EncryptionKeyHex != "":
 		request.EncryptionID = protocol.EncryptionAES256GCM
 		request.EncryptionKey = cfg.EncryptionKey()
-	case request.Encryption == "" && keyHex != "":
-		return request, fmt.Errorf("encryption_key_hex was supplied without an encryption type")
+	case request.Encryption == "" && hasKey:
+		return request, fmt.Errorf("a key was supplied without an encryption type")
 	default:
 		id, err := protocol.EncryptionByName(request.Encryption)
 		if err != nil {
 			return request, err
 		}
-		if id == protocol.EncryptionNone && keyHex != "" {
+		if id == protocol.EncryptionNone && hasKey {
 			return request, fmt.Errorf("encryption is \"none\" but a key was supplied; refusing to guess which was meant")
 		}
 		if id != protocol.EncryptionNone {
-			key, err := hex.DecodeString(keyHex)
-			if err != nil || len(key) != protocol.KeySize {
+			switch {
+			case keyHex != "" && hasKeyID:
+				return request, fmt.Errorf("encryption_key_hex and encryption_key_id are mutually exclusive; supply exactly one")
+			case hasKeyID:
+				saved, err := s.store.SenderKeys.Get(r.Context(), keyID)
+				if err != nil {
+					return request, fmt.Errorf("encryption_key_id %d does not name a saved key", keyID)
+				}
+				request.EncryptionKey = saved.Key
+			case keyHex != "":
+				key, err := hex.DecodeString(keyHex)
+				if err != nil || len(key) != protocol.KeySize {
+					return request, fmt.Errorf("encryption %q requires a 64-hex-character key (32 bytes)", request.Encryption)
+				}
+				request.EncryptionKey = key
+			default:
 				return request, fmt.Errorf("encryption %q requires a 64-hex-character key (32 bytes)", request.Encryption)
 			}
-			request.EncryptionKey = key
 		}
 		request.EncryptionID = id
 	}
 
-	// Grid. Validated exactly as the settings endpoint validates geometry: the encoder
-	// must be able to carry something at this grid, and the rendered frame must fit a
-	// real panel. Cell size and quiet zone stay global — they are properties of the
-	// panel and camera, not of one file.
+	// Grid. Validated against the request's own cell size, not the configured default:
+	// a caller asking for a bigger grid than the default cell size lets fit on their
+	// panel supplies a smaller cell_pixels instead, and it is that combination — not
+	// the deployment's default — that has to fit. Quiet zone stays global; it is a
+	// property of the panel and camera, not of one file.
 	layout, err := protocol.NewLayoutQuiet(request.GridWidth, request.GridHeight,
-		cfg.Optical.CellPixels, cfg.Optical.QuietZone)
+		request.CellPixels, cfg.Optical.QuietZone)
 	if err != nil {
-		return request, fmt.Errorf("grid %dx%d: %w", request.GridWidth, request.GridHeight, err)
+		return request, fmt.Errorf("grid %dx%d at %d px/cell: %w",
+			request.GridWidth, request.GridHeight, request.CellPixels, err)
 	}
 	depth := request.BitDepth
 	if depth == 0 {

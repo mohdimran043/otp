@@ -24,18 +24,19 @@ import (
 
 // Config is the sender's complete configuration.
 type Config struct {
-	Server   Server   `yaml:"server"`
-	Database Database `yaml:"database"`
-	Storage  Storage  `yaml:"storage"`
-	Broker   Broker   `yaml:"broker"`
-	Jobs     Jobs     `yaml:"jobs"`
-	Optical  Optical  `yaml:"optical"`
-	Display  Display  `yaml:"display"`
-	Ack      Ack      `yaml:"ack"`
-	Auth     Auth     `yaml:"auth"`
-	Log      Log      `yaml:"log"`
-	Metrics  Metrics  `yaml:"metrics"`
-	Tracing  Tracing  `yaml:"tracing"`
+	Server    Server    `yaml:"server"`
+	Database  Database  `yaml:"database"`
+	Storage   Storage   `yaml:"storage"`
+	Broker    Broker    `yaml:"broker"`
+	Jobs      Jobs      `yaml:"jobs"`
+	Optical   Optical   `yaml:"optical"`
+	Display   Display   `yaml:"display"`
+	Ack       Ack       `yaml:"ack"`
+	Auth      Auth      `yaml:"auth"`
+	Retention Retention `yaml:"retention"`
+	Log       Log       `yaml:"log"`
+	Metrics   Metrics   `yaml:"metrics"`
+	Tracing   Tracing   `yaml:"tracing"`
 }
 
 // Server is the HTTP listener.
@@ -188,7 +189,12 @@ type FEC struct {
 
 // Display configures the optical output.
 type Display struct {
-	// Sink is "file", or "opengl" in a build that includes it.
+	// Sink is "file", "none" for camera-only mode, or "opengl" in a build that includes it.
+	//
+	// "none" writes nothing to the shared directory: the receiver watches the physical display with
+	// its own camera instead of reading files off a volume. It is not reloadable — the sink is opened
+	// once at process startup — so changing it here or through the settings API takes effect on the
+	// next restart.
 	Sink string `yaml:"sink"`
 
 	// Dir is the file sink's output directory: the shared volume the receiver's file
@@ -234,6 +240,22 @@ type Ack struct {
 	// is failed. A chunk that will not arrive after this many tries is a fault an
 	// operator needs to see, not something more attempts will fix.
 	MaxRetries int `yaml:"max_retries"`
+}
+
+// Retention configures the sweep that deletes transfers which never completed.
+//
+// A transfer stuck at "pending" or "failed" still holds every chunk and frame it ever wrote,
+// and nothing else in the sender ever revisits it — the pipeline moves forward or stops, it
+// does not clean up after itself. Left alone, that is a slow, silent leak of storage for
+// uploads nobody is coming back for. The sweep is what bounds it: anything older than MaxAge
+// that never reached "completed" is reaped the same way an operator's DELETE request would
+// reap it, on a fixed interval, without anyone having to ask.
+type Retention struct {
+	// Interval is how often the sweep runs.
+	Interval time.Duration `yaml:"interval"`
+
+	// MaxAge is how long a transfer may sit unfinished before it is deleted.
+	MaxAge time.Duration `yaml:"max_age"`
 }
 
 // Auth configures authentication.
@@ -363,6 +385,10 @@ func Default() Config {
 		Auth: Auth{
 			TokenTTL:       12 * time.Hour,
 			BootstrapAdmin: "admin",
+		},
+		Retention: Retention{
+			Interval: time.Hour,
+			MaxAge:   24 * time.Hour,
 		},
 		Log: Log{
 			Level:  "info",
@@ -586,6 +612,9 @@ func applyEnv(c *Config) error {
 	dur("TOKEN_TTL", &c.Auth.TokenTTL)
 	str("BOOTSTRAP_ADMIN", &c.Auth.BootstrapAdmin)
 	str("BOOTSTRAP_PASSWORD", &c.Auth.BootstrapPass)
+
+	dur("RETENTION_INTERVAL", &c.Retention.Interval)
+	dur("RETENTION_MAX_AGE", &c.Retention.MaxAge)
 
 	str("LOG_LEVEL", &c.Log.Level)
 	str("LOG_FORMAT", &c.Log.Format)

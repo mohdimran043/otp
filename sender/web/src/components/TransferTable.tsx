@@ -1,4 +1,5 @@
 import {
+  IconButton,
   LinearProgress,
   Link,
   Stack,
@@ -7,8 +8,10 @@ import {
   TableCell,
   TableHead,
   TableRow,
+  Tooltip,
   Typography,
 } from '@mui/material'
+import DeleteIcon from '@mui/icons-material/Delete'
 import { Link as RouterLink } from 'react-router-dom'
 
 import { formatBytes, type Transmission } from '../api/client'
@@ -19,7 +22,16 @@ import { StatusChip } from './StatusChip'
 // Progress is drawn from acknowledged chunks rather than frames displayed, because that is what has
 // actually arrived: a bar driven by frames would run ahead and then appear to go backwards as
 // retransmissions were counted.
-export function TransferTable({ transfers }: { transfers: Transmission[] }) {
+//
+// onDelete is optional because this table is also embedded in the Dashboard's summary panels,
+// where a delete action does not belong — passing it on is what turns the extra column on, rather
+// than every caller having to opt out.
+interface Props {
+  transfers: Transmission[]
+  onDelete?: (transfer: Transmission) => void
+}
+
+export function TransferTable({ transfers, onDelete }: Props) {
   return (
     <Table size="small">
       <TableHead>
@@ -31,6 +43,7 @@ export function TransferTable({ transfers }: { transfers: Transmission[] }) {
           <TableCell>Profile</TableCell>
           <TableCell sx={{ width: 220 }}>Acknowledged</TableCell>
           <TableCell align="right">Resent</TableCell>
+          {onDelete && <TableCell align="right" sx={{ width: 48 }} />}
         </TableRow>
       </TableHead>
       <TableBody>
@@ -68,6 +81,15 @@ export function TransferTable({ transfers }: { transfers: Transmission[] }) {
                 </Stack>
               </TableCell>
               <TableCell align="right">{transfer.retransmits}</TableCell>
+              {onDelete && (
+                <TableCell align="right">
+                  <Tooltip title="Delete this transfer">
+                    <IconButton size="small" onClick={() => onDelete(transfer)}>
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </TableCell>
+              )}
             </TableRow>
           )
         })}

@@ -132,6 +132,26 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 	line.Register(engine)
 	acks := ackwatch.New(st, watcher, log.Logger)
 
+	// The retention sweep is self-scheduling once it is running — see pipeline.retention —
+	// but something has to enqueue the first one. This is that something. It checks for an
+	// already-pending retention job first so a routine restart does not pile up duplicate
+	// sweeps, but enqueuing unconditionally would cost nothing worse than one harmless extra
+	// pass: reap.Transfer is idempotent, so two sweeps finding the same candidate is not a bug.
+	if pending, err := js.List(ctx, jobs.Filter{
+		Types:  []string{pipeline.TypeRetention},
+		Status: []jobs.Status{jobs.StatusPending, jobs.StatusRunning},
+		Limit:  1,
+	}); err != nil {
+		log.Warn("could not check for a pending retention job", zap.Error(err))
+	} else if len(pending) == 0 {
+		if _, err := js.Enqueue(ctx, jobs.Spec{
+			Type:     pipeline.TypeRetention,
+			RunAfter: time.Now().Add(cfg.Retention.Interval),
+		}, cfg.Jobs.MaxAttempts); err != nil {
+			log.Warn("could not seed the retention job", zap.Error(err))
+		}
+	}
+
 	// Open returns the channel already wrapped, so "what is on the screen right now" has one answer rather
 	// than one per scheduler, and the display sequence is assigned in one place. Wrapping it again here
 	// would assign the sequence twice and publish a number that did not match the frame on the channel.

@@ -41,6 +41,18 @@ services:
       # arrive, are verified, and can be downloaded from the UI.
       OTP_RECEIVER_CALLBACK_ALLOWED_HOSTS: ${OTP_RECEIVER_CALLBACK_ALLOWED_HOSTS:-}
       OTP_RECEIVER_LOG_LEVEL: ${OTP_RECEIVER_LOG_LEVEL:-info}
+
+      # Object storage instead of the local directory above, for a receiver running as more than one
+      # instance. Filesystem remains the default: nothing here changes a deployment that never sets
+      # OTP_RECEIVER_STORAGE_BACKEND, and the minio and minio-init services below sit idle either way —
+      # compose starts them, but nothing depends on the receiver ever pointing at them.
+      OTP_RECEIVER_STORAGE_BACKEND: ${OTP_RECEIVER_STORAGE_BACKEND:-filesystem}
+      OTP_RECEIVER_MINIO_ENDPOINT: ${OTP_RECEIVER_MINIO_ENDPOINT:-minio:9000}
+      OTP_RECEIVER_MINIO_ACCESS_KEY: ${OTP_RECEIVER_MINIO_ACCESS_KEY:-otpreceiver}
+      OTP_RECEIVER_MINIO_SECRET_KEY: ${OTP_RECEIVER_MINIO_SECRET_KEY:-otpreceiver-dev-secret}
+      OTP_RECEIVER_MINIO_BUCKET: ${OTP_RECEIVER_MINIO_BUCKET:-otp-receiver}
+      OTP_RECEIVER_MINIO_USE_SSL: ${OTP_RECEIVER_MINIO_USE_SSL:-false}
+      OTP_RECEIVER_MINIO_REGION: ${OTP_RECEIVER_MINIO_REGION:-us-east-1}
     volumes:
       - receiver-storage:/var/lib/otp/receiver
       # Bind-mounted rather than a named volume, because this is the one path an operator has to be able to
@@ -49,6 +61,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      minio-init:
+        # Not service_healthy: minio-init is a one-shot that sets an alias and makes a bucket, and
+        # completing is the whole of its job. Gating on that rather than on a healthcheck against minio
+        # itself means the receiver only starts once the bucket it might be told to use actually exists —
+        # whether or not this deployment ever asks for the minio backend.
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       # Readiness rather than liveness, because this is what a load balancer should gate on: the process
@@ -74,6 +92,44 @@ services:
       retries: 12
     restart: unless-stopped
 
+  # The object storage backend, present whether or not this deployment uses it. Pinned to a
+  # specific release rather than "latest": an object store an operator did not choose to upgrade
+  # should not upgrade itself under them the next time the stack is brought up.
+  minio:
+    # There is no minio/minio release tagged 2024-11-17: minio and mc are versioned and released
+    # independently, and the November release nearest that mc pin is this one.
+    image: minio/minio:RELEASE.2024-11-07T00-52-20Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${OTP_RECEIVER_MINIO_ACCESS_KEY:-otpreceiver}
+      MINIO_ROOT_PASSWORD: ${OTP_RECEIVER_MINIO_SECRET_KEY:-otpreceiver-dev-secret}
+    volumes:
+      - receiver-minio:/data
+    restart: unless-stopped
+
+  # A one-shot, not a healthcheck on minio itself. minio has nothing to authenticate an
+  # unauthenticated probe against — an alias has to be set with real credentials before "is it
+  # ready" can even be asked — so the thing worth waiting on is this container succeeding at that,
+  # and then at making the bucket the receiver expects, rather than the server merely answering.
+  # It exits once both are done, which is what the receiver's depends_on below waits for.
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-17T19-35-25Z
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${OTP_RECEIVER_MINIO_ACCESS_KEY:-otpreceiver}
+      MINIO_ROOT_PASSWORD: ${OTP_RECEIVER_MINIO_SECRET_KEY:-otpreceiver-dev-secret}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do
+          echo "waiting for minio"
+          sleep 1
+        done
+        mc mb -p local/otp-receiver
+
 volumes:
   receiver-storage:
   receiver-postgres:
+  receiver-minio:

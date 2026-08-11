@@ -47,11 +47,17 @@ From `shared/encoding`. **Capacity depends only on the grid, not the cell size**
 same bytes at 4 px cells as at 8 px. Cell size buys the camera's ability to read it, and costs screen
 area.
 
-The grid is chosen per transfer now, not once for a whole deployment — the New Transfer form offers the
-presets below plus "Auto — fit my screen," computed in the browser. Cell size is not part of that choice;
-it stays a deployment-wide setting under Settings, because it is a camera/panel property rather than a
-per-transfer one. The tables in this document describe what a grid carries and costs, whichever transfer
-picks it.
+**Both the grid and the cell size are chosen per transfer**, not once for a whole deployment. The New
+Transfer form offers the presets below — grids to 1024×1024, cells of 1, 2, 3, 4, 6 or 8 px — and "Auto —
+fit my screen" for either, computed in the browser from the panel it is open on. The values in `.env` are
+the default for any transfer that does not choose. The tables in this document describe what a grid carries
+and costs, whichever transfer picks it.
+
+Because capacity depends on the grid alone, the two choices are close to independent: **the grid decides
+how much a frame carries, the cell size decides whether the camera can read it.** Fixing one and leaving the
+other on Auto sizes the other to the screen. Leaving both on Auto searches every combination that fits and
+prefers the larger cell first, then the larger grid — the blur budget is what fails first, so a pixel of
+cell is worth more than a row of grid.
 
 **Encryption subtracts 28 bytes from every frame's payload capacity** — a 12-byte nonce and a 16-byte
 authentication tag (`protocol.EncryptionOverhead`), because a chunk is sized to fit in exactly one frame
@@ -104,6 +110,35 @@ Note the last column. `gzip` and `lz4` make already-compressed data **larger** �
 of a zip, a JPEG, or an MP4 gains nothing from compression and loses a little. The rates in this document
 are payload bytes and therefore what you get on incompressible input; anything that compresses moves
 faster than the table says.
+
+## Error correction: how much parity you actually get
+
+`data_shards: 32` / `parity_shards: 8` reads like 25% overhead. It is a floor, not the figure, and the gap
+comes from coding being **per block** rather than over the whole file:
+
+```
+blocks         = ⌈data chunks ÷ data_shards⌉
+parity chunks  = blocks × parity_shards
+```
+
+Every block gets a full `parity_shards`, including the last one — which holds only the remainder. So the
+overhead depends on how the chunk count divides:
+
+| Data chunks | Blocks | Parity | Overhead | Why |
+|---|---|---|---|---|
+| 64 | 2 | 16 | 25.0% | divides exactly — the nominal figure |
+| **66** | **3** | **24** | **36.4%** | a 2-shard tail block still gets 8 parity |
+| 96 | 3 | 24 | 25.0% | exact again |
+| 97 | 4 | 32 | 33.0% | a 1-shard tail block gets 8 parity — 800% on that block |
+
+**This is worth understanding, not engineering around.** The tail block is where a transfer that gets cut
+short loses its chunks, and a short final block is exactly the case where losing two would otherwise be
+unrecoverable. But if you are sizing storage or a time budget, use the formula rather than the ratio: a file
+landing just past a block boundary costs noticeably more than the nominal 25%.
+
+Reducing `parity_shards` is the cheap lever on a clean channel — the shared-directory case loses nothing at
+all, so parity there is pure cost. Raising `data_shards` widens the blocks and so reduces the tail penalty,
+at the price of a codec that needs more of each block present to reconstruct anything.
 
 ## The ceiling nobody can configure around
 
@@ -191,22 +226,27 @@ display:
 Or as environment variables:
 
 ```bash
-OTP_SENDER_OPTICAL_ENCODER=color16
-OTP_SENDER_OPTICAL_COMPRESSION=zstd
-OTP_SENDER_OPTICAL_LEVEL=9
-OTP_SENDER_OPTICAL_GRID_WIDTH=384
-OTP_SENDER_OPTICAL_GRID_HEIGHT=384
-OTP_SENDER_OPTICAL_CELL_PIXELS=5
+OTP_SENDER_ENCODER=color16
+OTP_SENDER_COMPRESSION=zstd
+OTP_SENDER_COMPRESSION_LEVEL=9
+OTP_SENDER_GRID_WIDTH=384
+OTP_SENDER_GRID_HEIGHT=384
+OTP_SENDER_CELL_PIXELS=5
 OTP_SENDER_DISPLAY_FPS=25
 ```
 
-The frame rate can also be changed at any moment from **Settings** in the sender UI, including
-mid-transfer, which is when you want it. The geometry above is the deployment's default and cell size
-throughout — every new transfer starts from it unless the New Transfer form picks a different grid for
-itself, which it can do per transfer (128×128 up to 512×512, or "Auto — fit my screen"). What neither the
-per-transfer choice nor the Settings default can do is change once a transfer exists: the grid is written
-into every frame header and the chunk size is derived from it, so it is fixed at creation and the Settings
-page refuses to change the deployment default while any transfer is in flight, for the same reason.
+There is no `OPTICAL_` in those names even though the YAML nests them under `optical:` — the environment
+mapping is flat, and a variable that does not match is not an error, it is simply never read. A misspelt
+name leaves the default in place silently, so check `/api/v1/config` rather than assuming it took.
+
+The frame rate can also be changed at any moment from **Settings** in the sender UI, including mid-transfer,
+which is when you want it. The geometry above is only the deployment's **default**: every new transfer starts
+from it, and the New Transfer form can override both the grid and the cell size per transfer (128×128 up to
+1024×1024, cells of 1–8 px, or "Auto — fit my screen" for either).
+
+What nothing can do is change either one once a transfer exists. The grid is written into every frame header
+and the chunk size is derived from it, so both are fixed at creation — which is also why the Settings page
+refuses to change the deployment default while any transfer is in flight.
 
 ### Receiver
 
@@ -218,8 +258,10 @@ OTP_RECEIVER_DECODER_MIN_FINDER_SCORE=0.75
 OTP_RECEIVER_CALLBACK_ALLOWED_HOSTS=intake.example.com
 ```
 
-Choose the camera from **Settings** in the receiver UI. With nothing configured it takes the
-lowest-numbered device that actually declares video capture, in its largest mode.
+Choose the camera from the **Camera** tab in the receiver UI — its own page, because opening it is what asks
+the browser for permission, and a browser will not label a device list until permission has been granted
+once. With nothing configured it takes the lowest-numbered device that actually declares video capture, in
+its largest mode.
 
 ### What the hardware has to be
 
@@ -254,6 +296,15 @@ same bytes as `@8px` — the only thing a smaller cell saves is screen area, and
 the margin the camera needs. Use 4 px cells when frames travel over HTTP and no camera is involved;
 use 8 px when there is a lens.
 
+The 1-and-2-pixel cells and the 1024×1024 grid exist for that first case, and the honest statement of what
+they are is worth being precise about. **`1024×1024 @1px` is byte-exact over a shared directory** — a
+transfer round-trips identically, which is what makes it the right choice for the file channel and for the
+frame-export path, where a "cell" is a pixel in a PNG nobody photographs. It is **not camera-proven**:
+against the simulated optics it decodes 0 times out of 5, and that is the expected result rather than a
+defect, because one pixel per cell leaves no blur budget at all to spend. For anything with a lens in it,
+stay with the measured configurations above — 384×384 @5px, or 512×512 @4px if the camera is 4K. The UI
+offers the small cells without steering you away from them, so the judgement is yours to make.
+
 **`color16` over marginal optics.** Four bits per cell means sixteen levels to tell apart, and
 `TestOpticalEnvelope` in `shared/encoding` maps where each encoding gives out: `color8` survives the
 worst channel tested, `color16` needs a controlled installation. Over the HTTP transport there are no
@@ -278,3 +329,34 @@ A transfer that is going wrong — the wrong file, or a frame rate that turns ou
 stopped from its own page rather than by restarting the sender. **Pause** keeps every acknowledgement, so
 resuming shows only what is still outstanding; **Stop** ends it for good. Either takes effect within one
 frame interval, because the display loop re-reads the transfer's status on every frame.
+
+Neither reclaims storage. A stopped transfer still holds every chunk, shard and rendered frame it produced,
+and on the geometry above that is roughly the compressed size again in frame PNGs. **Delete** is what
+reclaims, and it refuses while a transfer is `preparing`, `transmitting` or `paused` — cancel first. An
+hourly sweep also deletes anything older than `OTP_SENDER_RETENTION_MAX_AGE` (24h by default) that never
+reached `completed`, which includes a transfer still transmitting; raise it past the longest transfer you
+expect to run.
+
+## Where the bytes are stored
+
+Storage is not a throughput constraint at these rates, but it is a capacity one: a transfer costs its
+compressed size in chunks plus every rendered frame as a PNG, and nothing removes either until a delete or
+the retention sweep does.
+
+Both sides take `filesystem` (a local directory) or `minio` (S3-compatible), chosen per side:
+
+```bash
+OTP_SENDER_STORAGE_BACKEND=filesystem     # or minio
+OTP_RECEIVER_STORAGE_BACKEND=filesystem   # or minio
+```
+
+Filesystem is the faster of the two and the right default for a single-instance deployment — object storage
+adds a network round trip per object where a directory adds a syscall. Reach for `minio` when a side runs as
+more than one instance, which is the multi-channel case: four receivers decoding disjoint chunk ranges of one
+file need somewhere all of them can write.
+
+Each stack runs its **own** MinIO — `otp-sender` and `otp-receiver` buckets in separate volumes, never one
+shared instance, because the two applications share a protocol and a directory and nothing else. Both compose
+files create their bucket whether or not the backend is switched, so enabling it is one variable and a
+restart. The backends are separate namespaces and nothing migrates between them: a side flipped after it has
+run will not find what it wrote before.

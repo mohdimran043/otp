@@ -178,8 +178,10 @@ func (c Config) Validate() error {
 		}
 	case "opengl":
 		// Availability is a build-tag matter, reported by the sink itself at startup.
+	case "none":
+		// The discard sink needs nothing: camera-only mode watches the physical display instead.
 	default:
-		add("display.sink %q is not one of file, opengl", c.Display.Sink)
+		add("display.sink %q is not one of file, opengl, none", c.Display.Sink)
 	}
 	if c.Display.FPS <= 0 {
 		add("display.fps must be positive")
@@ -224,6 +226,14 @@ func (c Config) Validate() error {
 	}
 	if c.Auth.TokenTTL <= 0 {
 		add("auth.token_ttl must be positive")
+	}
+
+	// Retention.
+	if c.Retention.Interval <= 0 {
+		add("retention.interval must be positive")
+	}
+	if c.Retention.MaxAge <= 0 {
+		add("retention.max_age must be positive")
 	}
 
 	// Logging, metrics, tracing.

@@ -49,6 +49,9 @@ func TestDefaultsAreUsableOnceSecretsAreSupplied(t *testing.T) {
 
 	require.Equal(t, 100*time.Millisecond, cfg.FrameInterval(), "ten frames a second")
 	require.Nil(t, cfg.EncryptionKey(), "payloads travel in the clear unless a key is set")
+
+	require.Equal(t, time.Hour, cfg.Retention.Interval, "the sweep runs hourly by default")
+	require.Equal(t, 24*time.Hour, cfg.Retention.MaxAge, "a transfer gets a day to complete before it is reaped")
 }
 
 // TestMissingFileIsNotAnError covers the container deployment, which configures everything
@@ -92,6 +95,8 @@ display:
 	t.Setenv("OTP_SENDER_CORS_ORIGINS", "https://a.example, https://b.example")
 	t.Setenv("OTP_SENDER_DB_MIGRATE_ON_START", "false")
 	t.Setenv("OTP_SENDER_ACK_TIMEOUT", "45s")
+	t.Setenv("OTP_SENDER_RETENTION_INTERVAL", "30m")
+	t.Setenv("OTP_SENDER_RETENTION_MAX_AGE", "48h")
 
 	cfg, err = config.Load(path)
 	require.NoError(t, err)
@@ -101,6 +106,8 @@ display:
 	require.Equal(t, []string{"https://a.example", "https://b.example"}, cfg.Server.CORSOrigins)
 	require.False(t, cfg.Database.MigrateOnStart)
 	require.Equal(t, 45*time.Second, cfg.Ack.Timeout)
+	require.Equal(t, 30*time.Minute, cfg.Retention.Interval)
+	require.Equal(t, 48*time.Hour, cfg.Retention.MaxAge)
 }
 
 func TestMalformedEnvironmentValuesAreReported(t *testing.T) {
@@ -114,6 +121,35 @@ func TestMalformedEnvironmentValuesAreReported(t *testing.T) {
 	t.Setenv("OTP_SENDER_ACK_TIMEOUT", "half an hour")
 	_, err = config.Load(path)
 	require.ErrorContains(t, err, "OTP_SENDER_ACK_TIMEOUT")
+
+	t.Setenv("OTP_SENDER_ACK_TIMEOUT", "45s")
+	t.Setenv("OTP_SENDER_RETENTION_MAX_AGE", "a fortnight")
+	_, err = config.Load(path)
+	require.ErrorContains(t, err, "OTP_SENDER_RETENTION_MAX_AGE")
+}
+
+// TestRetentionDurationsMustBePositive covers the sweep's two durations the same way every
+// other duration in this configuration is checked: a zero or negative value is not a fast
+// retry or an instant sweep, it is a value that makes the underlying arithmetic (now minus
+// MaxAge, now plus Interval) meaningless, and the ticker or interval built from it would
+// misbehave in ways an operator would only discover once transfers started vanishing early or
+// the sweep started spinning.
+func TestRetentionDurationsMustBePositive(t *testing.T) {
+	cfg := config.Default()
+	cfg.Ack.Secret = "an acknowledgement secret"
+	cfg.Auth.JWTSecret = "a jwt secret long enough to sign with"
+
+	cfg.Retention.Interval = 0
+	err := cfg.Validate()
+	require.ErrorContains(t, err, "retention.interval must be positive")
+
+	cfg.Retention.Interval = time.Hour
+	cfg.Retention.MaxAge = -time.Second
+	err = cfg.Validate()
+	require.ErrorContains(t, err, "retention.max_age must be positive")
+
+	cfg.Retention.MaxAge = 24 * time.Hour
+	require.NoError(t, cfg.Validate())
 }
 
 // TestSecretsHaveNoDefault is a security test. A default signing secret is not a secret,

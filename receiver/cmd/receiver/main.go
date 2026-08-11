@@ -28,6 +28,11 @@ import (
 	"github.com/opticaltransport/otp/receiver/internal/store"
 )
 
+// browserActiveWindow is how long a silent browser source is still called "streaming". The client posts at
+// 10 frames a second while it is running, so anything comfortably wider than one tick tells a page that has
+// gone quiet from one that is merely between frames.
+const browserActiveWindow = 2 * time.Second
+
 func main() {
 	var (
 		configPath = flag.String("config", os.Getenv("OTP_RECEIVER_CONFIG"), "path to the configuration file")
@@ -209,8 +214,12 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 		Handler: api.New(api.Options{
 			Store:   st,
 			Objects: objects,
-			Config:  watcher,
-			Log:     log.Logger,
+			// The acknowledgement channel's own store, so deleting a transmission can clean up
+			// its acks/<id>/ objects too — the one thing here rooted at a different volume than
+			// Objects.
+			Acks:   acks,
+			Config: watcher,
+			Log:    log.Logger,
 			// The API reports on whichever session is running, so a dashboard needs no session id to ask
 			// about the live capture.
 			Session: func() uuid.UUID { return receiver.Session() },
@@ -234,6 +243,17 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 						channel.Name())
 				}
 				return browser.Push(img, raw)
+			},
+			// BrowserActive is how the camera surface tells a browser source that is selected but
+			// silent from one a page is actually posting frames into: the same distinction Push
+			// resolves at call time, since the source can be swapped out from under either of them.
+			BrowserActive: func() bool {
+				browser, ok := channel.Current().(*pipeline.BrowserSource)
+				if !ok {
+					return false
+				}
+				last := browser.LastSeen()
+				return !last.IsZero() && time.Since(last) < browserActiveWindow
 			},
 			// Imports replay a frame archive into the live pipeline, exactly as though a camera had
 			// seen each frame. Ingest is a method value on the running receiver, so it needs no

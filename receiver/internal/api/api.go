@@ -35,8 +35,13 @@ import (
 type Server struct {
 	store   *store.Store
 	objects objectstore.Store
-	cfg     *config.Watcher
-	log     *zap.Logger
+	// acks is the acknowledgement channel's own store, rooted at a different volume than
+	// objects. The API otherwise never touches it — acknowledgements are the pipeline's
+	// business — but deleting a transmission means removing its acks/<id>/ objects too, and
+	// only this server can be handed both stores at once.
+	acks objectstore.Store
+	cfg  *config.Watcher
+	log  *zap.Logger
 
 	// session reports the capture session currently running, so the dashboard can show live figures
 	// without being told which session to look at.
@@ -53,6 +58,12 @@ type Server struct {
 	// pushFrame hands a frame captured by a browser to the running source. Nil when this build or deployment
 	// cannot take them, which the handler reports rather than accepting frames into nothing.
 	pushFrame func(image.Image, []byte) (bool, error)
+
+	// browserActive reports whether the browser capture source has heard from a page recently. Selecting
+	// "browser" as the source is not the same as a page actually posting frames to it — unlike the camera
+	// source, which opens hardware the moment it is selected, the browser source just sits and waits. Nil
+	// when this build has no way to ask, which is treated as "no".
+	browserActive func() bool
 
 	// ingest runs one uploaded frame image through the live pipeline: store, decode, apply — the same
 	// path a captured frame takes, so acknowledgements, merge, and delivery all fire as normal. Nil when
@@ -77,6 +88,9 @@ type Server struct {
 type Options struct {
 	Store   *store.Store
 	Objects objectstore.Store
+	// Acks is the acknowledgement channel's store, separate from Objects because it is rooted
+	// at its own volume. Nil is fine for any handler that never deletes a transmission.
+	Acks    objectstore.Store
 	Config  *config.Watcher
 	Log     *zap.Logger
 	Session func() uuid.UUID
@@ -85,21 +99,26 @@ type Options struct {
 	Push    func(image.Image, []byte) (bool, error)
 	Ingest  func(context.Context, image.Image, []byte) (pipeline.IngestResult, error)
 	Probe   func(image.Image) bool
+	// BrowserActive reports whether the browser capture source has taken a frame recently. See the field
+	// of the same purpose on Server.
+	BrowserActive func() bool
 }
 
 // New returns a server.
 func New(opts Options) *Server {
 	return &Server{
-		store:        opts.Store,
-		objects:      opts.Objects,
-		cfg:          opts.Config,
-		log:          opts.Log.Named("api"),
-		session:      opts.Session,
-		capture:      opts.Behind,
-		switchSource: opts.Switch,
-		pushFrame:    opts.Push,
-		ingest:       opts.Ingest,
-		probe:        opts.Probe,
+		store:         opts.Store,
+		objects:       opts.Objects,
+		acks:          opts.Acks,
+		cfg:           opts.Config,
+		log:           opts.Log.Named("api"),
+		session:       opts.Session,
+		capture:       opts.Behind,
+		switchSource:  opts.Switch,
+		pushFrame:     opts.Push,
+		ingest:        opts.Ingest,
+		probe:         opts.Probe,
+		browserActive: opts.BrowserActive,
 	}
 }
 
@@ -116,6 +135,9 @@ func (s *Server) Routes() http.Handler {
 	// Where the file was sent and whether it got there. The receiver is the only side that knows: the URL
 	// crossed the optical channel in the manifest, and the delivery was made from here.
 	mux.HandleFunc("GET /api/v1/transmissions/{id}/deliveries", s.listDeliveries)
+	// Removing one entirely: its rows across every table that carries its id, and every object
+	// its layout named — chunks, the merged file, and its acknowledgements.
+	mux.HandleFunc("DELETE /api/v1/transmissions/{id}", s.handleDeleteTransmission)
 	mux.HandleFunc("GET /api/v1/frames/failed", s.listFailedFrames)
 	// The newest captures, decoded or not: what a live page needs to show frames arriving.
 	mux.HandleFunc("GET /api/v1/frames/recent", s.listRecentFrames)

@@ -41,10 +41,16 @@ curl -X POST http://localhost:8080/api/v1/transfers \
 Both sides need one directory in common — an NFS mount, a SAN, or a synced share. Frames go one way
 through it; acknowledgements come back the other.
 
-The web UI's New Transfer form offers more per transfer than the curl example does: an encryption choice,
-and a grid — presets from 128×128 to 512×512, or **"Auto — fit my screen,"** the default, computed in your
-browser from the panel it is actually open on. Cell size is not part of that choice; it stays a global
-setting under **Settings**, because it depends on the camera/panel pairing rather than on any one transfer.
+The form asks for a file and nothing else. Everything the curl example cannot express — the callback,
+encoding, compression, error correction, encryption, and the geometry — is behind **Advanced**, closed by
+default, because the defaults are the measured ones and most transfers should not touch them.
+
+Inside it, **grid and cell size are both per transfer**: presets from 128×128 to 1024×1024, cells of 1 to 8
+pixels, and either can be left on **"Auto — fit my screen,"** computed in your browser from the panel it is
+actually open on. Fixing one auto-sizes the other; leaving both on Auto searches every combination that fits
+and prefers the larger cell, then the larger grid — a bigger cell is worth more to a camera than a bigger
+grid, because it is the blur budget that fails first. The deployment-wide values in `.env` remain the
+default for any transfer that does not choose.
 
 ## Transfer speed
 
@@ -77,6 +83,31 @@ describe what each grid carries, whichever transfer picks it.
 
 **Prefer fewer, larger frames.** Twice the throughput at less than two-thirds the frame rate — every frame
 costs the same fixed overhead whatever it carries, so larger frames amortise it.
+
+### One transfer, all the arithmetic
+
+An 8.6 MB file at `512×512` / `color8` / `zstd` / Reed–Solomon 32+8 — the defaults, on the largest grid that
+a 4K panel and a 4K camera can carry:
+
+| | | |
+|---|---|---|
+| The file | **8 612 637 B** | as uploaded |
+| Compressed | **6 232 607 B** | zstd, 72.4% of the original — 27.6% never has to cross |
+| Per frame | **94 860 B** | 512×512 at three bits a cell, from the table above |
+| Data chunks | **66** | `⌈6 232 607 ÷ 94 860⌉` — 65 full, and a last one of 66 707 B |
+| FEC blocks | **3** | `⌈66 ÷ 32⌉` — coding runs per block, not over the whole file |
+| Parity chunks | **24** | 3 blocks × 8 parity each |
+| **Frames displayed** | **91** | 90 chunks + 1 manifest |
+
+The parity figure is the one that surprises people: 24 for 66, not the 16 or 17 that 32+8 suggests. Coding
+is per block, and the last block holds only the 2 shards that were left over — yet it still gets a full 8
+parity shards, 400% redundancy on the tail. That is not waste to engineer away. Shards near the end of a
+file are the ones a transfer that gets cut short loses, and a short final block is exactly the case where
+losing two chunks would otherwise be unrecoverable.
+
+At 25 fps one pass over all 91 frames takes 3.6 seconds. A pass is not the transfer, though — each chunk
+keeps being redisplayed until its acknowledgement arrives, so what the panel actually spends its time on is
+whatever the receiver has not yet confirmed.
 
 ### The ceiling: the receiver, not the display
 
@@ -114,16 +145,35 @@ built** ([overview](docs/optical-transport-overview.pdf), §8).
 | URL | What it shows |
 |---|---|
 | `<sender>/display?camera=1` | **Point the camera here.** Full screen, black surround, nothing else |
-| `<sender>/settings` | Frame rate and cell size (grid dimensions are chosen per transfer, in New Transfer). The panel's refresh rate is measured in your browser |
-| `<sender>/transfers/<id>` | Chunk map, the file as sent, every frame as an image, Pause / Stop |
+| `<sender>/settings` | Frame rate, the deployment's default geometry, saved encryption keys, and the channel toggle. The panel's refresh rate is measured in your browser |
+| `<sender>/transfers/<id>` | Chunk map, the file as sent, every frame as an image, Start / Pause / Stop / Delete, Download frames |
 | `<receiver>/` | Live capture — frames arriving as thumbnails, labelled by chunk |
-| `<receiver>/transmissions/<id>` | The file itself, both hashes side by side, where it was delivered |
-| `<receiver>/settings` | Start / stop the camera, choose which one |
+| `<receiver>/camera` | **Start the camera here.** Opening this page is what asks the browser for permission |
+| `<receiver>/transmissions/<id>` | The file itself, both hashes side by side, where it was delivered, Delete |
+| `<receiver>/settings` | Decoder statistics, the decryption keyring, the callback allowlist |
 
 Two details on the display page are load-bearing rather than cosmetic: **scaling is whole multiples only**
 and **smoothing is off**. The decoder takes the median of each cell's pixels, so fractional scaling blends
 cells into their neighbours, and the browser's default filter is a blur — which is exactly what the optical
 budget reserves for the lens.
+
+## The channel: a directory, or actual light
+
+By default the sender writes every rendered frame into the shared directory as a PNG, which is what lets a
+receiver reading that directory work with no camera at all. It is the right default for development and for
+the offline round trip below — but in a deployment where the channel really is optical, it is a second,
+invisible path carrying the same bytes, and the air gap it was meant to prove is not being tested.
+
+**Settings → Transfer channel** turns it off. On *camera only*, frames are still rendered, still counted,
+still displayed — and written nowhere. The only way to receive them is to point a camera at the screen.
+
+```
+OTP_SENDER_DISPLAY_SINK=file    # write PNGs into DISPLAY_DIR
+OTP_SENDER_DISPLAY_SINK=none    # render and display only; nothing on disk
+```
+
+Like the grid, the sink is read once at startup, so the toggle **takes effect on the next restart** rather
+than live — the UI says so, and refuses the change while any transfer is in flight.
 
 ## Cameras
 
@@ -138,6 +188,18 @@ Three ways to capture, all feeding the same pipeline:
 
 A camera configures itself: the lowest-numbered device that actually declares video capture, in its largest
 mode. It keeps watching, so one plugged in later is noticed — but it never overrides a choice you made.
+
+**The camera has its own page**, `<receiver>/camera`, and opening it is what asks for permission. That is
+deliberate: a browser only prompts when `getUserMedia` is called, and it will not tell you a camera's name
+until permission has been granted once — so a page that never asks shows an unlabelled device list and no
+prompt. Choosing the camera used to live in Settings, where the only thing that asked was a Start button
+most operators never reached. Granting access to hardware deserves the page it is on. Capture itself still
+waits for **Start**; opening the page asks, it does not begin.
+
+The indicator distinguishes *selected* from *actually running*. Selecting `camera` opens the device
+immediately — it is exclusive, so being selected is being open. Selecting `browser` only means the receiver
+will accept frames if a page posts them, so it is reported as streaming when a page has posted within the
+last two seconds, and not merely because it is the chosen source.
 
 ## Encrypting a transfer
 
@@ -180,6 +242,64 @@ camera are, through the same code path. An encrypted archive needs its key loade
 keyring first — importing before that produces the same acknowledged-but-unreadable failure a camera would
 produce pointed at the same encrypted screen.
 
+### Preparing a transfer without sending it
+
+A transfer normally begins displaying the moment it is ready. Turning off **"Start displaying immediately"**
+in the New Transfer form (or `autostart=false` on the API) stops it at `ready` instead: the file is
+compressed, chunked, coded and rendered, and then nothing is drawn until someone says so.
+
+That is what makes the round trip above practical, and it is useful on its own. Preparing at 09:00 and
+displaying at 02:00 needs no scheduler. A transfer can be prepared, its frames downloaded, and the camera
+never involved. And a large file's expensive part — the rendering — happens while you are watching, not
+while the panel is unattended.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/transfers -F "file=@report.tar" -F "autostart=false"
+curl -X POST http://localhost:8080/api/v1/transfers/<id>/start   # when you are ready
+```
+
+**Start** appears on the transfer's page for exactly as long as it is `ready`. Starting anything else is
+refused — a transfer already displaying, or finished, has nothing to start.
+
+## Deleting what you sent
+
+Cancelling a transfer stops it. It does not reclaim anything — the chunks, the coded shards and every
+rendered frame are still there, and a sender that has run for a month holds every frame of every transfer
+anyone ever started. **Delete** is the one that reclaims, on the transfer's page or the row in the list:
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/transfers/<id>        # sender
+curl -X DELETE http://localhost:8081/api/v1/transmissions/<id>    # receiver
+```
+
+Both sides delete objects first and rows last, deliberately. Objects gone with the rows still present is a
+state a retry repairs, because the rows still name what needs cleaning up; rows gone with objects still
+present is a leak nothing will ever find again, because nothing left in the database points at them.
+
+**The sender refuses while a transfer is in flight** — `preparing`, `transmitting` or `paused` all return
+409 `cancel it first`, because deleting the frames out from under the display loop is not something an
+operator means to do by accident. The receiver has no such state and so no such guard: a transmission there
+is either finished, or one whose frames are still arriving, and deleting that only means the next chunk to
+decode starts a fresh row from nothing.
+
+### The 24-hour sweep
+
+A transfer that never finished is worse than a large one — nothing in the sender ever revisits it, and the
+pipeline moves forward or stops rather than cleaning up after itself. So an hourly sweep deletes anything
+older than a day that never reached `completed`, by exactly the code path a manual delete uses:
+
+```
+OTP_SENDER_RETENTION_INTERVAL=1h
+OTP_SENDER_RETENTION_MAX_AGE=24h
+```
+
+`completed` is the one status it will never touch, however old. Everything else is fair game, and **that
+includes a transfer still transmitting** — "never completed" is the whole test, on the reasoning that a
+transfer stuck mid-flight for a day has abandoned just as much storage as one that failed outright. Note the
+asymmetry with the paragraph above: the sweep will reap a `transmitting` transfer that a manual DELETE would
+refuse. At the measured 1.45 MB/s that needs a transfer over ~125 GB to matter, but if you legitimately send
+files that take longer than a day, raise `MAX_AGE` past the longest transfer you expect.
+
 ## Running 24/7
 
 Streaming frames continuously does not wear the camera out. A sensor reads out
@@ -202,6 +322,39 @@ as on its first. What actually deserves attention in a permanent installation:
   decline in finder scores is a lens drifting or dust accumulating — the platform's
   earliest warning, visible on the receiver's front page.
 
+## Object storage
+
+Both sides store uploads, chunks, rendered frames and merged files through one small interface, and either
+can be backed by a local directory or by S3-compatible object storage. Filesystem is the default and needs
+nothing:
+
+```
+OTP_SENDER_STORAGE_BACKEND=filesystem     # or minio
+OTP_RECEIVER_STORAGE_BACKEND=filesystem   # or minio
+```
+
+**Each stack runs its own MinIO.** Not one shared instance — the two applications share a protocol and a
+directory and nothing else, and giving them one object store would be a dependency the design does not have.
+The sender's lives in the `sender-minio` volume with the `otp-sender` bucket, the receiver's in
+`receiver-minio` with `otp-receiver`, and neither can see the other's.
+
+Both compose files already run MinIO and create the bucket **whether or not the backend is ever switched**,
+so turning it on is one variable and a restart rather than new infrastructure. Nothing publishes MinIO's
+ports, so the console is not reachable from the host by default; look at a bucket from inside the stack:
+
+```bash
+docker compose exec minio-init mc ls --recursive local/otp-sender/
+```
+
+Versions are pinned, and the two pins do not match on purpose: `minio/minio:RELEASE.2024-11-07T00-52-20Z`
+and `minio/mc:RELEASE.2024-11-17T19-35-25Z`. The server and the client are versioned and released
+independently, and there is no server release tagged 2024-11-17 — the November release nearest that client
+pin is the one above.
+
+**Switching backends does not migrate anything.** The two are separate namespaces, so a sender flipped from
+`filesystem` to `minio` will not find the frames it wrote before the switch. Do it on a quiet deployment, or
+accept that older transfers lose their objects while their rows remain.
+
 ## Testing
 
 ```bash
@@ -220,8 +373,8 @@ unit tests below are what remains true either way.
 | Suite | Covers |
 |---|---|
 | [`shared`](shared) | Protocol, five encodings against simulated optics, five compressors, four error-correcting codes, RFC 6330 conformance |
-| [`sender`](sender) | Configuration, migrations, the job engine under concurrency, object stores, the pipeline |
-| [`receiver`](receiver) | Camera enumeration, capture sources, decoding, object stores |
+| [`sender`](sender) | Configuration, migrations, the job engine under concurrency, object stores, the pipeline, deletion and the retention sweep |
+| [`receiver`](receiver) | Camera enumeration, capture sources, decoding, object stores, deletion, the capture-source indicator |
 
 ## How it is put together
 
@@ -245,9 +398,12 @@ which is what lets either be restarted, upgraded or replaced while the other kee
 
 ## Security notes
 
-- **Neither API authenticates yet.** Anyone who can reach the sender can upload a file or change the
-  geometry; anyone who can reach the receiver can start a camera. Put authentication in front of them
-  before exposing either.
+- **Neither API authenticates yet, and both now have destructive endpoints.** Anyone who can reach the
+  sender can upload a file, change the geometry, or `DELETE` a transfer and every frame it produced; anyone
+  who can reach the receiver can start a camera or `DELETE` a received transmission, including a merged file
+  that has not been downloaded yet. There is no undo and no soft delete on either side. This was always the
+  case for the geometry; deletion makes the consequence of leaving these open considerably worse. Put
+  authentication in front of them before exposing either.
 - **Both secrets have no defaults.** A default signing secret is not a secret, and the acknowledgement
   channel is the one input the sender takes from outside itself.
 - **Callback URLs are allowlisted, redirects not followed.** The URL crosses the gap from outside the
