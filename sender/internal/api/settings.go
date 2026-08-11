@@ -276,6 +276,24 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.Encoder != nil {
 		next.Optical.Encoder = *request.Encoder
+
+		// The depth follows the encoding when the request does not name one.
+		//
+		// Each encoding accepts its own set — binary one bit a cell, color8 three, color16 four, grayscale two or
+		// three — and the depth used to be applied independently, so a depth left over from the previous encoding
+		// was carried into the new one and validation refused the whole change with a message naming a field the
+		// operator never touched: "optical.bit_depth 1 is not one the color8 encoder offers ([3])". Choosing an
+		// encoding from a list should not require knowing its depths, and with settings now persisted a stale
+		// depth survives a restart, so the deployment stayed wedged until someone sent both fields together.
+		//
+		// Only when the request is silent about depth. A depth named explicitly is the operator saying something
+		// specific, and is left to validation to accept or refuse on its own terms — papering over a genuine
+		// mistake by substituting something that happens to work would be worse than the error.
+		if request.BitDepth == nil {
+			if enc, err := encoding.ByName(next.Optical.Encoder); err == nil {
+				next.Optical.BitDepth = int(enc.DefaultBitDepth())
+			}
+		}
 	}
 	if request.BitDepth != nil {
 		next.Optical.BitDepth = *request.BitDepth
