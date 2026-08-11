@@ -34,6 +34,7 @@ type Store struct {
 	Sessions      *Sessions
 	Callbacks     *Callbacks
 	Stats         *Stats
+	SenderKeys    *SenderKeys
 }
 
 // New returns a store over a connection pool.
@@ -47,6 +48,7 @@ func New(pool *db.Pool) *Store {
 		Sessions:      &Sessions{pool: pool},
 		Callbacks:     &Callbacks{pool: pool},
 		Stats:         &Stats{pool: pool},
+		SenderKeys:    &SenderKeys{pool: pool},
 	}
 }
 
@@ -889,6 +891,73 @@ func (r *Stats) Series(ctx context.Context, metric string, transmissionID *uuid.
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// SenderKey is an encryption key the operator has saved, so a transfer can be created against
+// one that already exists rather than pasting its hex in again every time.
+type SenderKey struct {
+	ID        int64     `json:"id"`
+	Key       []byte    `json:"-"`
+	Label     string    `json:"label"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// SenderKeys is the saved-key repository.
+type SenderKeys struct{ pool *db.Pool }
+
+// List returns every saved key, oldest first — the order they were added, which is the order
+// an operator would expect to see them in.
+func (r *SenderKeys) List(ctx context.Context) ([]SenderKey, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, key, label, created_at FROM sender_keys ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []SenderKey
+	for rows.Next() {
+		var k SenderKey
+		if err := rows.Scan(&k.ID, &k.Key, &k.Label, &k.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// Add saves a new key.
+func (r *SenderKeys) Add(ctx context.Context, key []byte, label string) (SenderKey, error) {
+	var k SenderKey
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO sender_keys (key, label) VALUES ($1, $2)
+		RETURNING id, key, label, created_at`,
+		key, label).Scan(&k.ID, &k.Key, &k.Label, &k.CreatedAt)
+	return k, err
+}
+
+// Get returns one saved key, for a transfer request that names it by id.
+func (r *SenderKeys) Get(ctx context.Context, id int64) (SenderKey, error) {
+	var k SenderKey
+	err := r.pool.QueryRow(ctx,
+		`SELECT id, key, label, created_at FROM sender_keys WHERE id = $1`, id).Scan(
+		&k.ID, &k.Key, &k.Label, &k.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SenderKey{}, fmt.Errorf("%w: sender key %d", ErrNotFound, id)
+	}
+	return k, err
+}
+
+// Delete removes a saved key.
+func (r *SenderKeys) Delete(ctx context.Context, id int64) error {
+	tag, err := r.pool.Exec(ctx, `DELETE FROM sender_keys WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: sender key %d", ErrNotFound, id)
+	}
+	return nil
 }
 
 // page bounds a limit, so a caller cannot ask for the whole table by accident.
