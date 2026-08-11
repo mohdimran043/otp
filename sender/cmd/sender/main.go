@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -103,6 +104,18 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 		}
 	}
 
+	st := store.New(pool)
+
+	// Settings the operator changed through the UI, laid over the file and the environment before anything
+	// reads the configuration.
+	//
+	// This is what makes those changes mean anything across a restart. The settings API used to apply them to
+	// the running configuration and store nothing, which the reloadable settings survived and the display sink
+	// did not: the sink is opened once, here, so choosing "camera" as the transfer channel took effect on the
+	// next restart — and the restart re-read the file and the environment and discarded the choice. The
+	// control could not work. It has to happen after the migrations, because it reads a table they create.
+	cfg = withStoredSettings(ctx, st, cfg, log)
+
 	objects, err := objectstore.Open(ctx, cfg.Storage)
 	if err != nil {
 		return err
@@ -125,7 +138,6 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 			zap.Int("window", next.Display.WindowSize))
 	})
 
-	st := store.New(pool)
 	js := jobs.NewStore(pool)
 	engine := jobs.NewEngine(js, watcher, log.Logger)
 	line := pipeline.New(st, js, objects, watcher, log.Logger)
@@ -268,4 +280,50 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 	// problem: the sink renames into place, so the receiver sees a complete frame or none.
 	displays.Wait()
 	return nil
+}
+
+// withStoredSettings lays the operator's stored display settings over a freshly loaded configuration.
+//
+// Every failure here is a warning and a fall back to the un-overlaid configuration, never a refusal to start.
+// That is deliberate. The stored settings are a convenience — the UI remembering what it was told — and a
+// sender that will not boot because one row holds a value it cannot parse is far worse than one that boots on
+// the configured defaults and says so. The three ways it can go wrong are all handled the same way: the table
+// is missing because migrations have not been run, a value will not parse, or the overlaid result does not
+// validate as a whole.
+//
+// Note the deliberate gap: this runs at startup only. If sender.yaml is edited while the process is running,
+// the watcher reloads the file and the stored overlay is not reapplied, so a reloadable setting like the frame
+// rate would revert until the next restart. The sink is unaffected either way, being read only here.
+func withStoredSettings(ctx context.Context, st *store.Store, cfg config.Config, log *logging.Logger) config.Config {
+	stored, err := st.DisplaySettings.All(ctx)
+	if err != nil {
+		log.Warn("could not read stored display settings; continuing on the configured values",
+			zap.Error(err))
+		return cfg
+	}
+	if len(stored) == 0 {
+		return cfg
+	}
+
+	overlaid, err := cfg.WithOverrides(stored)
+	if err != nil {
+		log.Warn("a stored display setting could not be read; continuing on the configured values",
+			zap.Error(err))
+		return cfg
+	}
+	if err := overlaid.Validate(); err != nil {
+		log.Warn("the stored display settings do not make a valid configuration; continuing on the configured values",
+			zap.Error(err))
+		return cfg
+	}
+
+	keys := make([]string, 0, len(stored))
+	for key := range stored {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	log.Info("applied stored display settings", zap.Strings("settings", keys),
+		zap.String("sink", overlaid.Display.Sink))
+
+	return overlaid
 }

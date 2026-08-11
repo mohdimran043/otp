@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 
 	"go.uber.org/zap"
 
@@ -97,6 +98,50 @@ func (r settingsRequest) touchesGeometry() bool {
 // touchesChannel reports whether this change alters where a frame goes rather than what it looks like.
 func (r settingsRequest) touchesChannel() bool {
 	return r.Sink != nil
+}
+
+// stored is this change as the keys to persist, carrying only the fields the request actually named.
+//
+// Sparse for a reason: storing all eleven fields whenever any one of them changed would pin the whole
+// configuration on the first edit, and an operator who later changed the frame rate in sender.yaml would find
+// it ignored because a months-old sink change had frozen everything alongside it. Keys match
+// config.SettingKeys, and a test compares the two lists so they cannot drift apart.
+func (r settingsRequest) stored() map[string]string {
+	out := map[string]string{}
+	if r.FPS != nil {
+		out["fps"] = strconv.FormatFloat(*r.FPS, 'f', -1, 64)
+	}
+	if r.Brightness != nil {
+		out["brightness"] = strconv.FormatFloat(*r.Brightness, 'f', -1, 64)
+	}
+	if r.Gamma != nil {
+		out["gamma"] = strconv.FormatFloat(*r.Gamma, 'f', -1, 64)
+	}
+	if r.WindowSize != nil {
+		out["window_size"] = strconv.Itoa(*r.WindowSize)
+	}
+	if r.GridWidth != nil {
+		out["grid_width"] = strconv.Itoa(*r.GridWidth)
+	}
+	if r.GridHeight != nil {
+		out["grid_height"] = strconv.Itoa(*r.GridHeight)
+	}
+	if r.CellPixels != nil {
+		out["cell_pixels"] = strconv.Itoa(*r.CellPixels)
+	}
+	if r.QuietZone != nil {
+		out["quiet_zone"] = strconv.Itoa(*r.QuietZone)
+	}
+	if r.Encoder != nil {
+		out["encoder"] = *r.Encoder
+	}
+	if r.BitDepth != nil {
+		out["bit_depth"] = strconv.Itoa(*r.BitDepth)
+	}
+	if r.Sink != nil {
+		out["sink"] = *r.Sink
+	}
+	return out
 }
 
 // maxFPS is the highest frame rate that may be configured.
@@ -256,6 +301,17 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusUnprocessableEntity, fmt.Sprintf(
 			"that geometry renders a %d×%d pixel frame, which is larger than any panel: reduce the grid or "+
 				"the cell size", layout.ImageWidth(), layout.ImageHeight()), nil)
+		return
+	}
+
+	// Stored before it is applied, and the request fails if the store fails.
+	//
+	// Applying without storing is what made the transfer-channel toggle useless: the change reached the
+	// running configuration and nothing else, so the display sink — read only at startup — was discarded by
+	// the very restart it needed to take effect. Ordering it this way means the response can never report a
+	// change that will not come back, which is the failure an operator has no way to detect.
+	if err := s.store.DisplaySettings.Set(r.Context(), request.stored()); err != nil {
+		s.fail(w, http.StatusInternalServerError, "the settings could not be saved", err)
 		return
 	}
 

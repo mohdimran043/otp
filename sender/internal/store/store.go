@@ -35,6 +35,9 @@ type Store struct {
 	Callbacks     *Callbacks
 	Stats         *Stats
 	SenderKeys    *SenderKeys
+
+	// DisplaySettings is what an operator changed through the UI, kept so it survives a restart.
+	DisplaySettings *DisplaySettings
 }
 
 // New returns a store over a connection pool.
@@ -49,6 +52,8 @@ func New(pool *db.Pool) *Store {
 		Callbacks:     &Callbacks{pool: pool},
 		Stats:         &Stats{pool: pool},
 		SenderKeys:    &SenderKeys{pool: pool},
+
+		DisplaySettings: &DisplaySettings{pool: pool},
 	}
 }
 
@@ -958,6 +963,68 @@ func (r *SenderKeys) Delete(ctx context.Context, id int64) error {
 		return fmt.Errorf("%w: sender key %d", ErrNotFound, id)
 	}
 	return nil
+}
+
+// DisplaySettings holds the display settings an operator changed through the UI.
+//
+// It exists because applying them was not enough. The settings API mutated the running configuration and
+// wrote nothing down, which the reloadable settings tolerated and the display sink did not: the sink is read
+// once at startup, so a change took effect on the next restart, and the restart re-read the file and the
+// environment and discarded it. The transfer-channel toggle could not work.
+//
+// Sparse by construction — one row per setting actually changed, keyed by the setting's name. Anything absent
+// keeps following sender.yaml and the environment, so the first edit through the UI does not pin every other
+// field to whatever it happened to be at the time.
+type DisplaySettings struct{ pool *db.Pool }
+
+// All returns every stored setting, ready to lay over a freshly loaded configuration.
+//
+// An empty map is the normal state, not an error: it means nobody has changed anything and the file and the
+// environment are the whole story.
+func (r *DisplaySettings) All(ctx context.Context) (map[string]string, error) {
+	rows, err := r.pool.Query(ctx, `SELECT key, value FROM display_settings`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		out[key] = value
+	}
+	return out, rows.Err()
+}
+
+// Set stores the given settings, leaving every other stored setting alone.
+//
+// One statement rather than a loop, which makes it atomic without a transaction to manage: a change touching
+// several settings at once — a geometry change is three — either lands whole or not at all, and half a
+// geometry is a configuration nobody asked for.
+//
+// Upsert, because the key is the identity: an operator changing the same setting twice should leave one row
+// holding the newer value rather than two rows disagreeing.
+func (r *DisplaySettings) Set(ctx context.Context, settings map[string]string) error {
+	if len(settings) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(settings))
+	values := make([]string, 0, len(settings))
+	for key, value := range settings {
+		keys = append(keys, key)
+		values = append(values, value)
+	}
+
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO display_settings (key, value, updated_at)
+		 SELECT k, v, now() FROM unnest($1::text[], $2::text[]) AS t(k, v)
+		 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+		keys, values)
+	return err
 }
 
 // page bounds a limit, so a caller cannot ask for the whole table by accident.
