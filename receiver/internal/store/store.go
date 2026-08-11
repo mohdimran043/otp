@@ -211,7 +211,12 @@ func (r *Frames) Failed(ctx context.Context, sessionID uuid.UUID, limit int) ([]
 		       transmission_id, frame_number, chunk_number, is_manifest, is_parity,
 		       bit_error_rate, finder_score, timing_score, contrast, captured_at
 		FROM captured_frames WHERE session_id = $1 AND NOT decoded
-		ORDER BY sequence LIMIT $2`, sessionID, page(limit))
+		-- Newest first, and that is the whole point of the page this feeds. "Why is my camera not reading
+		-- this" is a question about the last few seconds, but ordering ascending under a limit answered it with
+		-- the first failures of the session: once more had accumulated than the limit, the page froze on
+		-- ancient history. Observed 3,861 failures deep, still showing frames 1 to 24 from twenty minutes
+		-- earlier while an operator moved the camera and watched nothing change.
+		ORDER BY sequence DESC LIMIT $2`, sessionID, page(limit))
 	if err != nil {
 		return nil, err
 	}
