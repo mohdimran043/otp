@@ -20,6 +20,7 @@ import VideocamIcon from '@mui/icons-material/Videocam'
 import VideocamOffIcon from '@mui/icons-material/VideocamOff'
 
 import * as camera from '../lib/browserCamera'
+import { previewAspect } from '../lib/previewBox'
 
 // Capturing with this browser's camera.
 //
@@ -149,7 +150,13 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
         )}
 
         {/* The preview is the honest confirmation: an indicator light can be believed, but seeing what the lens
-            sees is how an operator knows it is pointed at the display. */}
+            sees is how an operator knows it is pointed at the display.
+ 
+            Its shape follows the stream rather than being fixed at 16/9. A phone streams portrait, and a 9:16
+            stream letterboxed into a 16:9 box is a sliver between black bars — the whole frame is technically
+            visible and far too small to frame against, which is exactly when an operator needs it most. It also
+            fills the available width on a phone instead of stopping at 520px, since on a phone that cap was most
+            of the screen going unused. */}
         <Box
           sx={{
             position: 'relative',
@@ -157,8 +164,9 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
             borderRadius: 1,
             overflow: 'hidden',
             width: '100%',
-            maxWidth: 520,
-            aspectRatio: '16 / 9',
+            maxWidth: { xs: '100%', sm: 640 },
+            mx: 'auto',
+            aspectRatio: previewAspect(state.width, state.height),
             display: 'grid',
             placeItems: 'center',
           }}
@@ -175,12 +183,39 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
               display: state.running ? 'block' : 'none',
             }}
           />
+
+          {/* A framing guide, because "is the whole pattern inside the shot" is the question the preview exists
+              to answer and it is surprisingly hard to judge by eye. The decoder needs all four corner finder
+              patterns, so a frame touching any edge cannot be read at all. Fit the pattern inside this box and
+              it has the margin it needs. */}
+          {state.running && (
+            <Box
+              aria-hidden
+              sx={{
+                position: 'absolute',
+                inset: '12%',
+                border: '2px dashed',
+                borderColor: 'rgba(255,255,255,0.45)',
+                borderRadius: 1,
+                pointerEvents: 'none',
+              }}
+            />
+          )}
+
           {!state.running && (
             <Typography variant="body2" color="text.secondary">
               no camera running
             </Typography>
           )}
         </Box>
+
+        {state.running && (
+          <Typography variant="caption" color="text.secondary">
+            Posting {state.width}x{state.height} — this preview is exactly what is being sent. Fit the whole
+            pattern inside the dashed guide: the decoder needs all four corners, so anything touching an edge
+            cannot be read.
+          </Typography>
+        )}
 
         {state.running && (
           <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
