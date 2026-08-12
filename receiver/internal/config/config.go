@@ -18,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/opticaltransport/otp/receiver/ai/soft"
 	"github.com/opticaltransport/otp/shared/protocol"
 )
 
@@ -207,6 +208,47 @@ type Decoder struct {
 
 	// EncryptionKeyHex decrypts payloads, and must match the sender's. Sixty-four hex characters.
 	EncryptionKeyHex string `yaml:"encryption_key_hex"`
+
+	// Recovery configures the soft-decision retry applied to a frame whose geometry resolved and
+	// whose payload did not verify.
+	//
+	// On by default. It costs nothing on a healthy channel — a frame that decodes never reaches it
+	// — and on a marginal one it is the difference between a frame that missed its checksum by
+	// three cells being recovered and being discarded outright.
+	Recovery Recovery `yaml:"recovery"`
+}
+
+// Recovery bounds the soft-decision search. See receiver/ai/soft for what it does.
+type Recovery struct {
+	Enabled bool `yaml:"enabled"`
+
+	// MaxCells is how many of the least confident cells may be corrected; the search space is
+	// 2^MaxCells. MaxCandidates caps the corrections actually tried.
+	MaxCells      int `yaml:"max_cells"`
+	MaxCandidates int `yaml:"max_candidates"`
+
+	// Budget is the wall-clock ceiling on one frame's search, and it is the setting that keeps this
+	// safe across the sender's whole grid range.
+	//
+	// A candidate hashes the entire payload, so its cost grows with the grid: exhausting the
+	// candidate cap costs about 50 ms at grid 80 and would cost seconds at grid 1024. An operator
+	// who raises the grid should not have to discover that they have also lengthened every failed
+	// decode by two orders of magnitude, so the bound is expressed in time rather than in attempts.
+	//
+	// It is not an absolute ceiling. Sampling the payload region has to happen before any candidate
+	// can be tried, and at a large grid that sampling alone exceeds any sane budget — so a floor of
+	// candidates always runs once the read is done rather than paying for it and returning nothing.
+	// See receiver/ai/soft for the measurements.
+	Budget time.Duration `yaml:"budget"`
+}
+
+// Options converts the configuration into the search's own bounds.
+func (r Recovery) Options() soft.Options {
+	return soft.Options{
+		MaxCells:      r.MaxCells,
+		MaxCandidates: r.MaxCandidates,
+		Budget:        r.Budget,
+	}
 }
 
 // ExpectedLayout is the sender's grid as configured, or nil when it has not been named.
@@ -319,6 +361,12 @@ func Default() Config {
 		Decoder: Decoder{
 			MinFinderScore: 0.75,
 			MinTimingScore: 0.6,
+			Recovery: Recovery{
+				Enabled:       true,
+				MaxCells:      12,
+				MaxCandidates: 4096,
+				Budget:        50 * time.Millisecond,
+			},
 		},
 		Ack: Ack{
 			Dir: "/var/lib/otp/shared",
@@ -451,6 +499,23 @@ func (c Config) Validate() error {
 	} {
 		if value < 0 || value > 1 {
 			add("%s %v must be between 0 and 1", name, value)
+		}
+	}
+	if c.Decoder.Recovery.Enabled {
+		// Twenty is already 2^20 subsets, far past any budget; the cap is here so a typo cannot ask
+		// for a search that would never finish.
+		if c.Decoder.Recovery.MaxCells < 1 || c.Decoder.Recovery.MaxCells > 20 {
+			add("decoder.recovery.max_cells %d is outside 1..20; the search space is 2^n",
+				c.Decoder.Recovery.MaxCells)
+		}
+		if c.Decoder.Recovery.MaxCandidates < 1 {
+			add("decoder.recovery.max_candidates %d must be at least 1",
+				c.Decoder.Recovery.MaxCandidates)
+		}
+		// Zero is valid and means no time bound, leaving max_candidates as the only limit. Negative
+		// is not: it would silently disable the search on the first candidate.
+		if c.Decoder.Recovery.Budget < 0 {
+			add("decoder.recovery.budget %s cannot be negative", c.Decoder.Recovery.Budget)
 		}
 	}
 	if c.Decoder.EncryptionKeyHex != "" {
@@ -626,6 +691,10 @@ func applyEnv(c *Config) error {
 	integer("DECODER_EXPECTED_CELL_PIXELS", &c.Decoder.ExpectedCellPixels)
 	float("DECODER_MIN_FINDER_SCORE", &c.Decoder.MinFinderScore)
 	float("DECODER_MIN_TIMING_SCORE", &c.Decoder.MinTimingScore)
+	boolean("DECODER_RECOVERY_ENABLED", &c.Decoder.Recovery.Enabled)
+	integer("DECODER_RECOVERY_MAX_CELLS", &c.Decoder.Recovery.MaxCells)
+	integer("DECODER_RECOVERY_MAX_CANDIDATES", &c.Decoder.Recovery.MaxCandidates)
+	dur("DECODER_RECOVERY_BUDGET", &c.Decoder.Recovery.Budget)
 	str("ENCRYPTION_KEY_HEX", &c.Decoder.EncryptionKeyHex)
 
 	str("ACK_DIR", &c.Ack.Dir)
@@ -688,6 +757,9 @@ func (w *Watcher) Reload() error {
 	next.Capture.IdleInterval = loaded.Capture.IdleInterval
 	next.Decoder.MinFinderScore = loaded.Decoder.MinFinderScore
 	next.Decoder.MinTimingScore = loaded.Decoder.MinTimingScore
+	// Reloadable for the same reason the floors are: these are what an operator adjusts while
+	// watching a marginal camera, and needing a restart to try a wider search defeats the point.
+	next.Decoder.Recovery = loaded.Decoder.Recovery
 	w.current.Store(&next)
 	return nil
 }

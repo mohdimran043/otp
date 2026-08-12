@@ -21,6 +21,8 @@ import (
 	"github.com/opticaltransport/otp/shared/fec"
 	"github.com/opticaltransport/otp/shared/protocol"
 
+	"github.com/opticaltransport/otp/receiver/ai/classify"
+	"github.com/opticaltransport/otp/receiver/ai/soft"
 	"github.com/opticaltransport/otp/receiver/internal/config"
 	"github.com/opticaltransport/otp/receiver/internal/objectstore"
 	"github.com/opticaltransport/otp/receiver/internal/store"
@@ -105,6 +107,9 @@ type Receiver struct {
 	// after a restart both collided with an existing row and overwrote an existing image. Numbering here, where
 	// the session lives, is what makes the sequence mean "the nth frame of this session" as the schema assumes.
 	capturedSequence atomic.Int64
+
+	// recovery counts what the soft-decision retry did this session. See recovery.go.
+	recovery recoveryCounters
 }
 
 // New returns a receiver.
@@ -189,6 +194,10 @@ func (r *Receiver) RotateSession(ctx context.Context) (uuid.UUID, error) {
 	// Published before the old one is closed, so no frame is ever attributed to a session that has ended.
 	r.session.Store(&next.ID)
 	r.capturedSequence.Store(0)
+	// Session-scoped for the same reason the decode counters are: a lifetime figure reads healthy
+	// all afternoon once any transfer has succeeded, which is the opposite of useful to someone
+	// aiming a camera right now.
+	r.recovery.reset()
 
 	// The aiming display describes a camera that is no longer running. Cleared rather than left, so
 	// that pressing Start shows "looking for the frame" instead of the verdict on the last frame of
@@ -603,15 +612,42 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 	if decodeErr == nil && geometry != nil {
 		switch {
 		case finder < cfg.Decoder.MinFinderScore:
-			decodeErr = fmt.Errorf("fiducial match %.2f is below the %.2f floor",
-				finder, cfg.Decoder.MinFinderScore)
+			decodeErr = fmt.Errorf("%w: fiducial match %.2f is below the %.2f floor",
+				classify.ErrBelowFloors, finder, cfg.Decoder.MinFinderScore)
 			frame = nil
 		case timing < cfg.Decoder.MinTimingScore:
-			decodeErr = fmt.Errorf("timing match %.2f is below the %.2f floor",
-				timing, cfg.Decoder.MinTimingScore)
+			decodeErr = fmt.Errorf("%w: timing match %.2f is below the %.2f floor",
+				classify.ErrBelowFloors, timing, cfg.Decoder.MinTimingScore)
 			frame = nil
 		}
 	}
+
+	// A frame that located and then failed is the one case worth retrying: the geometry was right,
+	// both bands read, and only some number of individual cell decisions were wrong.
+	//
+	// Retried here rather than inside decodeFrame so that Decodable keeps its current cost and
+	// meaning — the import splitter uses it as a cheap probe over both halves of a composite, and
+	// making that probe search would turn a rare operator action into a slow one.
+	//
+	// Placed after the confidence floors, so a frame held back for a low fiducial score is a
+	// recovery candidate too. Its payload may well be intact; the floors are a judgement about how
+	// much to trust the read, and a footer that verifies is a better answer than either.
+	if decodeErr != nil && geometry != nil && cfg.Decoder.Recovery.Enabled &&
+		classify.Recoverable(classify.Of(decodeErr)) {
+		r.recovery.attempted.Add(1)
+		if res, rerr := soft.Recover(geometry, capture.Image, cfg.Decoder.Recovery.Options()); rerr == nil {
+			r.recovery.recovered.Add(1)
+			r.recovery.candidates.Add(uint64(res.Candidates))
+			r.log.Info("recovered a frame the decoder rejected",
+				zap.Int("flips", res.Flips),
+				zap.Int("candidates", res.Candidates),
+				zap.Float64("worst_margin", res.WorstMargin),
+				zap.Duration("took", res.Elapsed),
+				zap.String("bucket", string(classify.Of(decodeErr))))
+			frame, decodeErr = res.Frame, nil
+		}
+	}
+	r.recovery.count(classify.Of(decodeErr))
 
 	return prepared{
 		capture: capture, key: key, sum: sum,
