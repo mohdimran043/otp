@@ -121,13 +121,22 @@ func Recoverable(b Bucket) bool {
 	}
 }
 
-// Clipped is the fraction of sampled pixels saturated in at least one channel.
+// Clipped is the fraction of sampled pixels saturated in *every* channel.
 //
-// One channel rather than all three: a red cell clipped in red has lost the information that
-// distinguished it from white, whatever the other channels say, and colour8 puts every symbol at a
-// corner of the RGB cube precisely so that channels can be read independently.
+// All three channels rather than any one, and this was wrong the first time in a way worth recording,
+// because the wrong version looked more principled. The argument for "any one channel" is that a red
+// cell clipped in red has lost what distinguished it from white. True — but colour8 places every symbol
+// at a corner of the RGB cube, so a perfectly exposed colour frame has a fully saturated channel in
+// seven cells out of eight *by design*. Measured on a real capture that decoded all 31 of its frames,
+// the any-channel version reported 0.628 clipped. A metric that calls a flawless frame two-thirds
+// blown out is not measuring exposure, and anything thresholding on it — the sidecar refuses above 0.5 —
+// would have refused every colour frame ever captured.
 //
-// Sampled every eighth pixel in each direction, matching looksLikeAFrame, because clipping is a
+// All-channel saturation still counts the white symbol, which is one corner of eight, so a well-exposed
+// colour8 frame sits near 0.125 rather than at zero. What it no longer does is confuse the modulation
+// for a fault. For grayscale, where only the top level saturates, it reads lower still.
+//
+// Sampled every eighth pixel in each direction, matching looksLikeAFrame, because exposure is a
 // large-area property and a frame's bands are thousands of pixels across.
 func Clipped(img image.Image) float64 {
 	if img == nil {
@@ -139,7 +148,7 @@ func Clipped(img image.Image) float64 {
 	for y := b.Min.Y; y < b.Max.Y; y += step {
 		for x := b.Min.X; x < b.Max.X; x += step {
 			r, g, bl, _ := img.At(x, y).RGBA()
-			if r>>8 >= 255 || g>>8 >= 255 || bl>>8 >= 255 {
+			if r>>8 >= 250 && g>>8 >= 250 && bl>>8 >= 250 {
 				clipped++
 			}
 			total++

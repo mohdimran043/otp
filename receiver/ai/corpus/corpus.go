@@ -370,3 +370,10 @@ func max64(a, b float64) float64 {
 	}
 	return b
 }
+
+// BucketKey converts a bucket name back to its type, for callers that collected the names as strings.
+//
+// A trivial conversion, exported because a report that sorts bucket names to print them in a stable
+// order needs to look their counts back up, and a raw type conversion at the call site reads as though
+// the caller knows something about the type that it does not.
+func BucketKey(name string) classify.Bucket { return classify.Bucket(name) }

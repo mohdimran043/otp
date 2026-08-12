@@ -62,9 +62,12 @@ func TestClipped(t *testing.T) {
 	require.InDelta(t, 1.0, classify.Clipped(flat(color.RGBA{R: 255, G: 255, B: 255, A: 255})), 0.01)
 	require.InDelta(t, 0.0, classify.Clipped(flat(color.RGBA{R: 128, G: 128, B: 128, A: 255})), 0.01)
 
-	// One saturated channel is enough: a red cell clipped in red has lost what distinguished it
-	// from white, whatever the other two channels say.
-	require.InDelta(t, 1.0, classify.Clipped(flat(color.RGBA{R: 255, G: 0, B: 0, A: 255})), 0.01)
+	// A fully saturated red is NOT clipping, and getting this wrong cost a real measurement. Colour8
+	// puts every symbol at a corner of the RGB cube, so seven symbols in eight saturate a channel by
+	// design. Counting those made a capture that decoded all 31 of its frames read as 0.628 clipped —
+	// and the sidecar, which refuses above 0.5, would have declined every colour frame ever captured.
+	require.InDelta(t, 0.0, classify.Clipped(flat(color.RGBA{R: 255, G: 0, B: 0, A: 255})), 0.01)
+	require.InDelta(t, 0.0, classify.Clipped(flat(color.RGBA{R: 0, G: 255, B: 255, A: 255})), 0.01)
 }
 
 func TestClippedHandlesNil(t *testing.T) {

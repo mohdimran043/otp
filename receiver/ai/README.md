@@ -149,96 +149,105 @@ occur under synthetic degradation at any locatable geometry. Degradation here is
 or hundreds.
 
 
-## The real corpus: recovery recovers nothing, and geometry explains everything
+## The real corpus: recovery earns its place, and cell size dominates everything
 
-Measured 2026-08-12 against 180 stored captures from a real handheld session (`48cb6970`, 1210 frames,
-1080x1920 JPEG from a phone camera) — 150 frames the receiver had recorded as `payload_crc` failures plus
-30 it had decoded, replayed through the same `encoding.Decode` and the same engine the receiver runs:
+Measured 2026-08-12 against five real browser-capture sessions, 35 frames each, sampled **uniformly**
+(every Nth frame) so the decode rates are the sessions' own. Replayed through the same
+`encoding.Decode` and the same engine the receiver runs.
 
 ```
-frames 180   engine go (margin-ordered-subset/1)
-decoded first pass  30 (16.7%)
-recovered by engine 0 (+0.0 points -> 16.7%)
+session    frames   decoded  recovered  clipped  marginal geometry
+17bd0315       35   31( 89%)          0    0.167      0.0% 128x128@8px (31/35)
+43a3f881       35    7( 20%)          3    0.066      5.4% 80x80@8px   (17/35)
+657df846       35    0(  0%)          0    0.024      0.0% none resolved
+af0d182a       35    4( 11%)          7    0.000      2.5% 96x96@8px   (30/35)
+f6ee85f3       35    1(  3%)          0    0.000      6.6% 128x128@1px (31/35)
 
-first-pass buckets:
-  decoded                 30
-  payload_crc            150
-
-by geometry:
-  layout           frames  decoded  recovered    finder marginal/frame
-  128x128@1px         154     4(  3%)          0     0.998     1001 of 12096 (8.3%)
-  80x80@8px            26    26(100%)          0     0.988       30 of 2340 (1.3%)
-
-mean clipped fraction 0.006
-decode 39.6s total, recovery 50.0s total
+per session, by geometry:
+  17bd0315   128x128@8px   31 frames   31 decoded (100%)   0 recovered  finder 1.000  marginal   0 of 12096
+  43a3f881   80x80@8px     17 frames    7 decoded ( 41%)   3 recovered  finder 1.000  marginal 119 of  2202
+  af0d182a   96x96@8px     30 frames    4 decoded ( 13%)   7 recovered  finder 0.991  marginal 129 of  5076
+  f6ee85f3   128x128@1px   31 frames    1 decoded (  3%)   0 recovered  finder 0.996  marginal 743 of 11316
+  657df846   -             35 frames  no geometry resolved on any frame
 ```
 
-Three things follow, and the third is the one that matters.
+**Recovery works on real captures.** On `af0d182a` it took 4 decoded frames to 11 — 11% to 31%, nearly
+tripling the session's yield — and on `43a3f881` 7 to 10. Across all 175 frames, 43 decoded first pass
+and 53 after recovery: **+5.7 percentage points**, entirely from frames that would otherwise have been
+retransmitted or lost.
 
-**1. Real failures are in recovery's target bucket, and recovery still cannot fix them.** Every failure
-was `payload_crc` at a finder score of 0.998 — geometry essentially perfect, both bands read, only the
-payload wrong. That is exactly the bucket this layer was built for, and it recovered **0 of 150**. The
-reason is the marginal-cell count: these frames carry around a thousand ambiguous cells each, and the
-search corrects twelve. The best frame in the sample had 292. Even it was 24 times beyond reach.
+**The operating window is narrow and it is set by marginal-cell density.** At 2.5% marginal
+(`af0d182a`) the search rescued 7 of 26 `payload_crc` frames. At 6.6% (`f6ee85f3`) it rescued 0 of 28.
+Somewhere between those lies the edge, and the practical reading is that recovery pays while ambiguity
+stays under roughly 3% of the payload and stops paying above about 5%.
 
-**2. The search's operating window is empty here.** At 80x80 every frame decoded on the first pass with
-about 30 marginal cells — already more than the twelve the search covers, but read correctly anyway. At
-128x128 there were a thousand. So the corpus contains no frames in the band where a bounded search helps:
-below it they decode unaided, above it they are out of range. That band may exist at some intermediate
-geometry, but nothing in this corpus lands in it.
+**Cell size dominates, and grid size barely matters.** The best real result is `128x128@8px`: **31 of 31
+frames decoded, zero marginal cells, 4536 payload bytes per frame.** That is five times the payload of
+80x80@8px at a *better* decode rate. Against it, `128x128@1px` — the same grid, one pixel a cell —
+managed 1 frame in 31. Eight pixels a cell is the whole difference; the grid is nearly free.
 
-**3. Geometry explains the whole decode rate.** 100% at 80x80@8px against 3% at 128x128@1px, from the same
-camera in the same session. A single pixel per cell on the sender's display cannot survive a camera at any
-distance, and that is a configuration decision, not a processing problem. **This is worth 30x more than
-any recovery layer, and it costs nothing to change.**
+`657df846` (4569 frames in the full session, none decoded) resolved no geometry on any sampled frame:
+35 of 35 `no_quad`. Nothing in this layer addresses that, and nothing should — a camera that never sees
+four fiducials is not aimed at the screen.
 
-A caveat on what was measured. For real captures there is no ground truth payload, so the figures above
-count *marginal* cells — cells read with a margin under a quarter of the palette separation — not cells
-read *wrongly*. A marginal cell may still be correct, and at 80x80 all 30 of them were. What can be said
-without ground truth is bounded but sufficient: the search exhaustively tried every correction over the
-twelve least confident cells of each frame and none verified, so more than twelve cells were wrong, or
-the wrong ones were not among the twelve least confident. With a thousand cells ambiguous, it is the
-former.
+### A correction to an earlier reading, and why it happened
+
+An earlier run of this same harness reported recovery rescuing **0 of 150** real failures and concluded
+the layer was not earning its place. That run sampled 150 `payload_crc` failures from one session — and
+picked them from `128x128@1px`, the worst geometry in the corpus, where ambiguity runs at 8%. A
+stratified sample from the worst configuration is not a measurement of the layer; it is a measurement of
+that configuration. The uniform multi-session sample above is the honest one.
+
+### A correction to the clipping metric
+
+`classify.Clipped` originally counted pixels saturated in *any* channel, on the argument that a red cell
+clipped in red has lost what distinguished it from white. That argument is wrong here, and the wrong
+version looked more principled than the right one. Colour8 places every symbol at a corner of the RGB
+cube, so seven symbols in eight saturate a channel **by design** — the metric reported 0.628 for the
+capture that decoded all 31 of its frames. Anything thresholding on it would have misfired; the sidecar
+refuses above 0.5, so it would have declined every colour frame ever captured. It now requires all three
+channels, which reads 0.167 on that same session — close to the 0.125 expected from white being one
+corner of eight.
 
 ### Reproducing it
 
 ```bash
-OTP_CORPUS_DIR=/path/to/captures OTP_CORPUS_GRID=80 OTP_CORPUS_CELL=8 \
+# one session
+OTP_CORPUS_DIR=/path/to/captures OTP_CORPUS_GRID=128 OTP_CORPUS_CELL=8 \
   go test ./ai/corpus/ -run TestCorpusReplay -v -count=1 -timeout 900s
+
+# several, one subdirectory per session
+OTP_CORPUS_SESSIONS=/path/to/sessions \
+  go test ./ai/corpus/ -run TestCorpusSessions -v -count=1 -timeout 2400s
 ```
 
-Captures come from the receiver's own object store, which persists every frame before deciding whether it
-could read it. Pull a session out with `mc cp` against the `otp-receiver` bucket under
-`captures/<session>/`. Stored objects are keyed `.png` but hold whatever the camera posted — a browser
+Captures come from the receiver's own object store, which persists every frame before deciding whether
+it could read it. Pull a session with `mc cp` against the `otp-receiver` bucket under
+`captures/<session>/`. Sample **uniformly**; a stratified sample gives a decode rate that is an artefact
+of the stratification. Stored objects are keyed `.png` but hold whatever the camera posted — a browser
 posts JPEG — so decode by content, not by extension.
 
 ## What that implies, stated plainly
 
-Recovery is correct and it is cheap, and on the evidence now in hand it is **not earning its place on
-this channel**. It is proven to work when a frame has a few wrong cells — byte-exact at every grid from
-80 to 1024 — and measured against 150 real failures it recovered none, because real failures carry
-hundreds to a thousand ambiguous cells rather than a few.
+Recovery is correct, cheap, and on real captures it earns a measurable +5.7 points. It is also narrow:
+it pays while payload ambiguity is under roughly 3% and stops paying above about 5%. Keep it on; it
+costs nothing when frames decode.
 
-That is a statement about this corpus, not a proof about all cameras. But it is the corpus this
-deployment produces, and it agrees with the synthetic sweep and with the earlier channel measurements:
-at 5.9 px/cell the mean distance to the nearest palette entry was 53 against a margin of 86, which is a
-whole frame sitting on the decision boundary.
+But it is second-order next to the configuration finding:
 
-Consequences for what to build next:
-
-- **A GPU enhancement sidecar is not the indicated next step.** It would attack `no_quad` — the
-  largest bucket at high density — but `no_quad` at 1–2 px per cell is missing information, not
-  missing contrast, and no restoration network adds samples that were never captured.
-- **The indicated next step is in-frame error correction.** A 2.6% symbol error rate is squarely in
-  reach of parity spent *within* the frame; the existing FEC operates across chunks, so a frame that
-  misses its CRC is lost whole no matter how few or many cells were wrong. That is a protocol change
-  and out of scope here, but it is where the measured evidence points.
-- **The cheapest win available is a configuration change, and it is large.** 80x80@8px decoded 100% of
-  its frames in the same session where 128x128@1px decoded 3%. Before any further engineering, stop
-  offering one- and two-pixel cells for a camera channel, or bound them the way `COLOUR_GRID_CEILING`
-  already bounds colour density for the Auto chooser.
-- **The real corpus is now measured, and `ai/corpus` keeps it measurable.** Re-run it after any change
-  that claims to improve recovery; a claim without a number from it is not a claim.
+- **Eight pixels a cell, and the grid is nearly free.** `128x128@8px` decoded 31 of 31 with zero marginal
+  cells and 4536 bytes a frame. `128x128@1px` decoded 1 of 31. The sender still offers 1- and 2-pixel
+  cells, and `COLOUR_GRID_CEILING = 96` bounds the wrong axis — it caps the grid for the Auto chooser
+  when what needs bounding is cell size. Fixing that is worth far more than any further recovery work
+  and costs nothing.
+- **A GPU enhancement sidecar remains hard to justify.** The largest remaining bucket is `no_quad`, and
+  at one pixel a cell that is missing samples rather than missing contrast. No restoration network adds
+  samples that were never captured. The engine seam is in place if the evidence changes.
+- **In-frame parity is still the way to widen the window.** Recovery corrects twelve cells; parity spent
+  within the frame would address the 2-5% band wholesale, where today a frame missing its CRC is lost
+  whole however few cells were wrong.
+- **`ai/corpus` keeps this measurable.** Re-run it after any change claiming to improve recovery. A claim
+  without a number from it is not a claim.
 
 ## Configuration
 
