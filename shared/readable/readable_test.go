@@ -112,3 +112,30 @@ func TestDegenerateInputsDoNotPanic(t *testing.T) {
 	require.False(t, readable.Assess(-5, 2, 3, 1080, 1920).Readable)
 	require.Zero(t, readable.Assess(128, 2, 3, 0, 1920).ModulePixels)
 }
+
+// TestTheMarginalBandIsNotCalledImpossible is the case that made the previous message untrustworthy: 128
+// cells on a 1080 capture was reported as "cannot be read" and then acknowledged 24 chunks of 74.
+//
+// Measured on that session: 463 frames captured, 10 decoded on the first pass and 6 more recovered — 3.5%
+// usable. That is not zero, and the wording has to reflect it.
+func TestTheMarginalBandIsNotCalledImpossible(t *testing.T) {
+	a := readable.Assess(128, 2, 3, 1080, 1920)
+
+	require.False(t, a.Readable)
+	require.True(t, a.Marginal, "8.2 px/cell against a requirement of 10 is marginal, not hopeless")
+	require.False(t, a.Hopeless)
+
+	msg := a.Explain(128, 3)
+	require.Contains(t, msg, "marginal")
+	require.NotContains(t, msg, "cannot be read",
+		"a geometry that acknowledged 24 chunks must not be described as unreadable")
+	require.Contains(t, msg, "few frames in a hundred")
+}
+
+// TestTheHopelessBandStillSaysSo keeps the strong wording where it is earned.
+func TestTheHopelessBandStillSaysSo(t *testing.T) {
+	a := readable.Assess(512, 2, 3, 1080, 1920)
+	require.True(t, a.Hopeless, "2.1 px/cell is below any band that decodes")
+	require.False(t, a.Marginal)
+	require.Contains(t, a.Explain(512, 3), "cannot be read")
+}

@@ -93,6 +93,12 @@ export interface AlignmentView {
   max_grid_for_capture: number
   /** True when turning the camera ninety degrees would be enough on its own — the cheapest fix there is. */
   rotation_helps: boolean
+  /**
+   * A grid a little short of what the encoding wants, which decodes a few frames in a hundred rather than
+   * none. Shown amber rather than red: painting it red while chunks are being acknowledged is what made the
+   * previous message untrustworthy.
+   */
+  geometry_marginal: boolean
   /** 0 for square-on, rising as the camera moves off-axis. */
   perspective: number
   finder_score: number

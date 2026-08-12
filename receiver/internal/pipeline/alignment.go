@@ -60,6 +60,11 @@ type Alignment struct {
 	// MaxGridForCapture is the largest grid this capture could resolve at this encoding.
 	MaxGridForCapture int `json:"max_grid_for_capture"`
 
+	// GeometryMarginal is a grid a little below what the encoding wants: it decodes a few frames in a
+	// hundred rather than none. Distinguished from hopeless because the page must not paint a geometry red
+	// and call it unreadable while the operator watches chunks being acknowledged.
+	GeometryMarginal bool `json:"geometry_marginal"`
+
 	// RotationHelps is true when turning the camera ninety degrees would be enough on its own. Surfaced
 	// separately because it is the cheapest fix available — a wrist movement, no reconfiguration, no
 	// second transfer — and worth saying before any advice that costs more.
@@ -251,6 +256,7 @@ func measureAlignment(img image.Image, g *protocol.Geometry, decoded bool) Align
 	a.AchievableModulePixels = cap.ModulePixels
 	a.RotatedModulePixels = cap.Rotated
 	a.RotationHelps = cap.RotationHelps
+	a.GeometryMarginal = cap.Marginal
 	a.MaxGridForCapture = cap.MaxGrid
 
 	switch {

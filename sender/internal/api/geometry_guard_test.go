@@ -26,7 +26,13 @@ func TestTheGridThatFailedTwiceIsRefused(t *testing.T) {
 
 	err := validateGeometryForCamera(req, guardConfig(), uint8(req.BitDepth))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "cannot be read by this camera")
+
+	// "marginal", not "cannot be read". This geometry decoded 10 frames of 463 on the first pass with 6 more
+	// recovered by the engine, and acknowledged 24 chunks of 74 — so it is refused because it will not
+	// finish, not because nothing gets through. Claiming the latter while an operator watches chunks arrive
+	// is what made the earlier wording untrustworthy, and the assertion is here so it cannot come back.
+	require.Contains(t, err.Error(), "marginal")
+	require.NotContains(t, err.Error(), "cannot be read")
 	require.Contains(t, err.Error(), "sideways", "rotation is the cheapest fix and must be offered")
 }
 

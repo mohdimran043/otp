@@ -113,7 +113,14 @@ export function AlignmentGuide({
 }) {
   if (!alignment) return null
 
-  const { colour, label, Icon } = presentation[alignment.status] ?? presentation.searching
+  const base = presentation[alignment.status] ?? presentation.searching
+  // A marginal grid is softened from red to amber and renamed, because red plus "too dense" while chunks are
+  // being acknowledged is precisely the message that stopped being believed. Amber says "this will be slow",
+  // which is what a few frames in a hundred actually means.
+  const { colour, label, Icon } =
+    alignment.status === 'too_dense' && alignment.geometry_marginal
+      ? { ...base, colour: '#fb8c00', label: 'Grid marginal' }
+      : base
   // Only worth mentioning once it is actually costing frames. A number that is always on screen is one nobody
   // reads, and a little shake that the gate absorbs without dropping anything is not a problem to report.
   const shaky = blurred > 0 && steadiness > 0 && steadiness < 0.85

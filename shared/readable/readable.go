@@ -34,6 +34,19 @@ const (
 	// decoded at all.
 	ColourPixels = 10.0
 
+	// MarginalFraction is where "reliable" ends and "occasionally" begins, as a fraction of Required.
+	//
+	// The distinction exists because collapsing it was measurably misleading. Below Required a frame does
+	// not stop decoding, it decodes *rarely*: the figures this model is built from are 12 pixels a cell
+	// decoding every frame, 8.5 decoding about one in a hundred, and 5.9 never decoding at all. A geometry
+	// at 8.2 was reported as "cannot be read by this camera" and then acknowledged 24 chunks of 74, which
+	// is not what "cannot" means — and an operator who is told a thing is impossible and then watches it
+	// half-work stops trusting the rest of the advice.
+	//
+	// Eight tenths puts the colour boundary at 8 pixels a cell, which matches where the measurements turn
+	// from "one in a hundred" toward "never".
+	MarginalFraction = 0.8
+
 	// MaxUsefulPixels is where more resolution starts to hurt. Past about this, a sensor resolves the
 	// display's own pixel structure — the subpixel stripes of an LCD — and a cell stops being one colour.
 	// Closer is not better.
@@ -60,8 +73,18 @@ type Assessment struct {
 	// Required is what the encoding needs.
 	Required float64
 
-	// Readable reports whether ModulePixels reaches Required.
+	// Readable reports whether ModulePixels reaches Required — decoding reliably, not occasionally.
 	Readable bool
+
+	// Marginal reports a geometry below Required but not hopeless: it will decode a small percentage of
+	// frames, so a transfer may crawl to completion on a short file and will time out on a long one.
+	//
+	// Kept apart from Readable because the two need opposite words. "Cannot be read" is wrong here, and
+	// saying it once costs the credibility of every other message.
+	Marginal bool
+
+	// Hopeless is below even the marginal band: no frames at all, in the measurements this rests on.
+	Hopeless bool
 
 	// RotationHelps is true when turning the camera would be enough on its own. It is worth reporting
 	// separately because it is the cheapest fix there is — a wrist movement, no reconfiguration, no
@@ -98,6 +121,8 @@ func Assess(gridWidth, quietZone int, bitDepth uint8, captureW, captureH int) As
 	a.ModulePixels = short / cells
 	a.Rotated = long / cells
 	a.Readable = a.ModulePixels >= a.Required
+	a.Marginal = !a.Readable && a.ModulePixels >= a.Required*MarginalFraction
+	a.Hopeless = a.ModulePixels < a.Required*MarginalFraction
 	a.RotationHelps = !a.Readable && a.Rotated >= a.Required
 
 	a.MaxGrid = int(short/a.Required) - 2*quietZone
@@ -119,28 +144,42 @@ func (a Assessment) Explain(gridWidth int, bitDepth uint8) string {
 				"encoding needs.", gridWidth, a.ModulePixels, a.Required)
 	}
 
-	msg := fmt.Sprintf(
-		"A %d-cell grid cannot be read by this camera: cells reach only %.1f pixels even with the frame "+
-			"filling the view, and this encoding needs about %.0f. A frame is square, so its width is "+
-			"bounded by the short side of the picture — moving closer cannot change the figure.",
-		gridWidth, a.ModulePixels, a.Required)
+	// Two different sentences, because they describe two different situations and the wrong one is worse
+	// than no advice. A marginal geometry does decode — a few frames in a hundred — and telling someone it
+	// cannot be read, when they can watch chunks arriving, teaches them to ignore the message.
+	var opening string
+	if a.Marginal {
+		opening = fmt.Sprintf(
+			"A %d-cell grid is marginal on this camera: cells reach about %.1f pixels where this encoding "+
+				"wants %.0f, so a few frames in a hundred will read and the rest will not. A short file may "+
+				"crawl to the end; a long one will exhaust its retransmissions first.",
+			gridWidth, a.ModulePixels, a.Required)
+	} else {
+		opening = fmt.Sprintf(
+			"A %d-cell grid cannot be read by this camera: cells reach only %.1f pixels even with the frame "+
+				"filling the view, against the %.0f this encoding needs, which is below the point where any "+
+				"frames decode at all.",
+			gridWidth, a.ModulePixels, a.Required)
+	}
+
+	opening += " A frame is square, so its width is bounded by the short side of the picture — moving " +
+		"closer cannot change the figure."
 
 	switch {
 	case a.RotationHelps:
-		msg += fmt.Sprintf(
+		return opening + fmt.Sprintf(
 			" Turn the camera sideways and cells become %.1f pixels, which is enough on its own — that is "+
 				"the whole fix, and it costs nothing.", a.Rotated)
 	case a.BinaryWouldWork && bitDepth > 1:
-		msg += fmt.Sprintf(
+		return opening + fmt.Sprintf(
 			" At one bit a cell this grid would read, since binary needs about %.0f pixels rather than "+
 				"%.0f — the same grid, a third of the payload. Otherwise use %d cells or fewer.",
 			BinaryPixels, a.Required, max(a.MaxGrid, 0))
 	default:
-		msg += fmt.Sprintf(" Use %d cells or fewer", max(a.MaxGrid, 0))
+		msg := opening + fmt.Sprintf(" Use %d cells or fewer", max(a.MaxGrid, 0))
 		if a.MaxGridRotated > a.MaxGrid {
 			msg += fmt.Sprintf(", or %d with the camera sideways", a.MaxGridRotated)
 		}
-		msg += "."
+		return msg + "."
 	}
-	return msg
 }
