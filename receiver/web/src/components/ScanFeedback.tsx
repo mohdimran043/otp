@@ -7,6 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api, formatPercent } from '../api/client'
 import { play } from '../lib/beep'
 import { type DecodeSample, recentDecode } from '../lib/decodeRate'
+import { dominantFailure, recoveryShare } from '../lib/recoveryBuckets'
 import { type ScanState, scanEvents } from '../lib/scanEvents'
 import { Stat } from './Stat'
 import { useUi } from '../store/ui'
@@ -41,6 +42,17 @@ export function ScanFeedback() {
 
   const session = useQuery({ queryKey: ['session'], queryFn: api.session, refetchInterval: pollMs })
   const candidateId = session.data?.transmission_id
+
+  // Recovery figures, and the stage most frames are failing at.
+  //
+  // The dominant stage is what makes this actionable rather than merely informative: the same recovered count
+  // means "move the camera" when the failures are no_quad and "lower the density" when they are payload_crc,
+  // and those are opposite actions. See lib/recoveryBuckets.
+  const recovery = session.data?.recovery
+  const recovered = recoveryShare(recovery?.recovered ?? 0, recovery?.attempted ?? 0)
+  const failure = dominantFailure(recovery?.buckets)
+  // Candidates per recovery, which climbs as a camera drifts even while the recovered count holds up.
+  const perRecovery = recovery?.recovered ? Math.round(recovery.candidates / recovery.recovered) : 0
 
   const transmission = useQuery({
     queryKey: ['transmission', candidateId],
@@ -188,6 +200,26 @@ export function ScanFeedback() {
           value={(session.data?.frames_decoded ?? 0).toLocaleString()}
           hint="frames decoded since this capture source started — history, not now"
         />
+        {/* Recovery is shown only once it has been tried. A permanent "Recovered 0" on a healthy channel
+            would read as a fault, when in fact it means every frame decoded first time. */}
+        {recovery && recovery.attempted > 0 && (
+          <Stat
+            label="Recovered"
+            value={recovery.recovered.toLocaleString()}
+            hint={`of ${recovery.attempted.toLocaleString()} frames retried${
+              recovered === null ? '' : ` (${formatPercent(recovered)})`
+            }, ${perRecovery} candidates each`}
+            accent={recovered !== null && recovered > 0 ? 'success' : undefined}
+          />
+        )}
+        {failure && (
+          <Stat
+            label="Failing at"
+            value={failure.label}
+            hint={`${failure.count.toLocaleString()} frames${failure.action ? ` — ${failure.action}` : ''}`}
+            accent="warning"
+          />
+        )}
       </Stack>
     </Paper>
   )

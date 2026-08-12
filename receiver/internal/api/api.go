@@ -77,6 +77,9 @@ type Server struct {
 	// that arrives seconds later and says nothing about which way to move.
 	alignment func() (pipeline.Alignment, bool)
 
+	// recovery reports what the soft-decision retry has done this session. See Options.Recovery.
+	recovery func() pipeline.RecoveryStats
+
 	// ingest runs one uploaded frame image through the live pipeline: store, decode, apply — the same
 	// path a captured frame takes, so acknowledgements, merge, and delivery all fire as normal. Nil when
 	// this build or deployment cannot take imports.
@@ -122,6 +125,11 @@ type Options struct {
 	// Alignment reports how the camera was pointed for the most recent frame, for the aiming display on
 	// the camera page. The bool is false before any frame has been decoded.
 	Alignment func() (pipeline.Alignment, bool)
+
+	// Recovery reports what the soft-decision retry has done this session. Nil when this build has no
+	// way to ask, which the session view reports as an absent object rather than as zeroes — "not
+	// wired up" and "attempted nothing" are different facts about a receiver.
+	Recovery func() pipeline.RecoveryStats
 }
 
 // New returns a server.
@@ -141,6 +149,7 @@ func New(opts Options) *Server {
 		browserActive: opts.BrowserActive,
 		browserStats:  opts.BrowserStats,
 		alignment:     opts.Alignment,
+		recovery:      opts.Recovery,
 	}
 }
 
@@ -230,6 +239,12 @@ type SessionView struct {
 	DecodeRate     float64    `json:"decode_rate"`
 	StartedAt      time.Time  `json:"started_at"`
 	Uptime         float64    `json:"uptime_seconds"`
+
+	// Recovery is what the soft-decision retry did this session, and how frames finished by stage.
+	//
+	// Omitted rather than zeroed when the build cannot report it: an operator reading "0 attempted"
+	// would conclude the channel is healthy, when the truth may be that nothing is asking.
+	Recovery *pipeline.RecoveryStats `json:"recovery,omitempty"`
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
@@ -262,6 +277,12 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 		source = configured
 	}
 
+	var recovery *pipeline.RecoveryStats
+	if s.recovery != nil {
+		stats := s.recovery()
+		recovery = &stats
+	}
+
 	s.respond(w, http.StatusOK, SessionView{
 		ID:             session.ID,
 		Status:         session.Status,
@@ -273,6 +294,7 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 		DecodeRate:     rate,
 		StartedAt:      session.StartedAt,
 		Uptime:         time.Since(session.StartedAt).Seconds(),
+		Recovery:       recovery,
 	})
 }
 

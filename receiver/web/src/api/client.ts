@@ -16,6 +16,21 @@ export interface SessionView {
   decode_rate: number
   started_at: string
   uptime_seconds: number
+  // Absent when the build cannot report it, which is deliberately different from all-zeroes: "nothing is
+  // asking" and "nothing was recoverable" would otherwise look identical.
+  recovery?: RecoveryStats
+}
+
+// What the soft-decision retry managed, and how frames finished by the stage they failed at.
+export interface RecoveryStats {
+  attempted: number
+  recovered: number
+  // Total corrections tried across all attempts. Rising per-recovery is the earliest sign a camera is
+  // drifting, visible while the recovered count still looks healthy.
+  candidates: number
+  // Keyed by stage: decoded, no_quad, descriptor_crc, header_crc, footer_crc, payload_crc, below_floors,
+  // degenerate_geometry, unsupported_version, other.
+  buckets: Record<string, number>
 }
 
 export interface MergedView {

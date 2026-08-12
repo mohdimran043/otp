@@ -269,6 +269,10 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 			// Alignment is how the camera was pointed for the last frame, which is what turns aiming
 			// one at a display from guesswork into a direction to move in.
 			Alignment: receiver.Alignment,
+			// Recovery is what the soft-decision retry managed, and the bucket breakdown of how
+			// frames finished. The counts alone would say whether the layer is working; the
+			// buckets are what say what to do about it.
+			Recovery: receiver.RecoveryStats,
 			// Imports replay a frame archive into the live pipeline, exactly as though a camera had
 			// seen each frame. Ingest is a method value on the running receiver, so it needs no
 			// wrapping — its signature already matches what the API package wants.
