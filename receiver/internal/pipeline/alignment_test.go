@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/opticaltransport/otp/shared/protocol"
+	"github.com/opticaltransport/otp/shared/readable"
 )
 
 // frameAt builds a geometry whose fiducials sit on a square of the given side, centred in a
@@ -122,7 +123,7 @@ func TestAlignmentDemandsLargerCellsForColour(t *testing.T) {
 	g.Header.BitDepth = 3
 	colour := measureAlignment(capture(), g, false)
 	assert.Equal(t, StatusTooFar, colour.Status, "the same framing is too far for a colour payload")
-	assert.Equal(t, colourModulePixels, colour.RequiredModulePixels)
+	assert.Equal(t, readable.ColourPixels, colour.RequiredModulePixels)
 	assert.Contains(t, colour.Advice, "Colour needs")
 }
 
@@ -139,7 +140,7 @@ func TestAlignmentDemandsBackingOffWhenTooClose(t *testing.T) {
 	g.ModuleSize = 11.2
 	inBand := measureAlignment(capture(), g, true)
 	assert.Equal(t, StatusGood, inBand.Status, "11.2 px a cell is inside the colour band")
-	assert.Equal(t, maxColourModulePixels, inBand.MaxModulePixels)
+	assert.Equal(t, readable.MaxUsefulPixels, inBand.MaxModulePixels)
 
 	g.ModuleSize = 13.6
 	tooClose := measureAlignment(capture(), g, false)

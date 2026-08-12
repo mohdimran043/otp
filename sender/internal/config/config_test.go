@@ -47,7 +47,11 @@ func TestDefaultsAreUsableOnceSecretsAreSupplied(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 128, layout.GridWidth)
 
-	require.Equal(t, 100*time.Millisecond, cfg.FrameInterval(), "ten frames a second")
+	// Two frames a second, not ten. A camera channel needs each frame photographed cleanly at least once
+	// rather than needing frames quickly, and the receiver posts about ten images a second — so this rate
+	// decides how many attempts each unique frame gets. At ten it was roughly one, and a single shake or
+	// rolling-shutter tear lost the frame outright.
+	require.Equal(t, 500*time.Millisecond, cfg.FrameInterval(), "two frames a second")
 	require.Nil(t, cfg.EncryptionKey(), "payloads travel in the clear unless a key is set")
 
 	require.Equal(t, time.Hour, cfg.Retention.Interval, "the sweep runs hourly by default")

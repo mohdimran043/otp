@@ -234,6 +234,19 @@ type Display struct {
 
 	// FPS is how many frames a second are displayed. Reloadable, because it is the
 	// main knob an operator turns when the receiver reports it is falling behind.
+	//
+	// Two, not ten, and the default mattered more than it looks. A camera channel does not need frames
+	// fast, it needs each frame photographed *cleanly at least once*, and those are opposite requirements.
+	// The receiver's browser source posts about ten images a second, so the display rate decides how many
+	// attempts each unique frame gets: at 10 fps roughly one, at 2 fps five, at 1 fps ten. Every attempt is
+	// an independent chance of catching the frame between hand movements, in focus, and mid-refresh rather
+	// than mid-tear.
+	//
+	// Ten was the old default and it is close to unusable for a camera: one shot per frame means one shake
+	// or one rolling-shutter tear loses that frame outright, and at a dense geometry — where a clean shot is
+	// already rare — almost nothing gets through. Lowering it costs raw throughput and buys decode rate,
+	// which is the better side of the trade whenever the decode rate is the thing failing. Drop to 1 for a
+	// marginal geometry.
 	FPS float64 `yaml:"fps"`
 
 	// Brightness and Gamma adjust the rendered frame for the panel in use. Both
@@ -406,7 +419,7 @@ func Default() Config {
 		Display: Display{
 			Sink:       "none",
 			Dir:        "/var/lib/otp/shared/frames",
-			FPS:        10,
+			FPS:        2,
 			Brightness: 0,
 			Gamma:      1.0,
 			WindowSize: 64,
