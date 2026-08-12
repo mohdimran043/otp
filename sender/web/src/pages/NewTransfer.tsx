@@ -32,7 +32,19 @@ import { useUi } from '../store/ui'
 // actually run this, but it has not been shown to survive a real camera capturing a real
 // panel. The cell-size control and the note below it exist so that distinction is visible
 // rather than assumed.
-const GRID_PRESETS = [128, 192, 256, 384, 512, 1024]
+//
+// 80 and 96 are at the other end, and they exist for the opposite reason: a colour payload
+// photographed off a panel needs pixels per cell far more than it needs cells. Each cell is
+// matched against eight palette entries rather than put on one side of a threshold, so its
+// accuracy comes from how many camera pixels were averaged to read it — and that is exactly what
+// a denser grid spends. Measured handheld against a 1080p capture: at 128 a frame filling 94% of
+// the view gives 8.6 px per cell and 232 consecutive frames located perfectly and failed their
+// payload CRC; at 80 the same framing gives about 14, which is twice the samples per cell.
+//
+// 72 is the floor and is deliberately not offered. The header and footer bands are a fixed number
+// of rows, so below about 72 they consume the grid and what is left carries too few bytes to be
+// worth a frame.
+const GRID_PRESETS = [80, 96, 128, 192, 256, 384, 512, 1024]
 const CELL_PRESETS = [1, 2, 3, 4, 6, 8]
 
 // The quiet zone used for this estimate is a guess, not a fetch — the real one lives in the
@@ -44,6 +56,25 @@ function frameEdgePx(grid: number, cell: number): number {
   return (grid + 2 * ASSUMED_QUIET_ZONE) * cell
 }
 
+// COLOUR_GRID_CEILING is the largest grid Auto will choose for a colour payload.
+//
+// A colour cell is matched against a palette rather than thresholded, so reading one is a
+// measurement, and its accuracy comes from how many camera pixels were averaged over it. Measured on
+// a 1080p handheld capture: 11 px per cell decoded every frame, 8.5 decoded about one in a hundred,
+// 5.9 never decoded at all. A 1080p camera framing a panel generously resolves roughly 900 px across
+// the grid, so 80 cells lands near 11 and 128 lands near 8.5 — which is why Auto used to pick a grid
+// that could not be read, on a screen where it looked perfectly sharp.
+//
+// It bounds Auto only. Choosing 128 or more deliberately is still allowed and still right for a
+// file-loopback channel or a camera with more sensor than a phone: this is the default for someone
+// who has not thought about it, and for them a frame that decodes beats a frame that carries more.
+const COLOUR_GRID_CEILING = 96
+
+/** isColour reports whether an encoder carries more than one bit per cell. */
+function isColour(encoder: string | undefined): boolean {
+  return !!encoder && encoder !== 'grayscale'
+}
+
 // fitGridAndCell solves the (grid, cell) pair that fits this screen, for whichever of the two
 // pieces the operator left on "Auto". The server cannot do this — it runs with no display
 // attached — so the browser looking at its own screen has to.
@@ -53,10 +84,21 @@ function frameEdgePx(grid: number, cell: number): number {
 // fixed and grid on auto picks the largest grid that fits at that cell. Both on auto searches
 // every combination and prefers the largest cell first, then the largest grid, because visibility
 // matters more than raw capacity when neither has been chosen deliberately.
-function fitGridAndCell(grid: 'auto' | number, cell: 'auto' | number): { grid: number; cell: number } {
+//
+// The encoder bounds that search rather than steering it: a colour payload cannot use the denser
+// grids at all on a camera channel, so they are removed from consideration before the preference
+// for "largest" is applied. See COLOUR_GRID_CEILING.
+function fitGridAndCell(
+  grid: 'auto' | number,
+  cell: 'auto' | number,
+  encoder?: string,
+): { grid: number; cell: number } {
   const usable = Math.min(window.screen.width, window.screen.height)
 
+  // An explicit choice is never second-guessed, whatever the encoder.
   if (grid !== 'auto' && cell !== 'auto') return { grid, cell }
+
+  const grids = isColour(encoder) ? GRID_PRESETS.filter((g) => g <= COLOUR_GRID_CEILING) : GRID_PRESETS
 
   if (grid !== 'auto') {
     const fits = CELL_PRESETS.filter((c) => frameEdgePx(grid, c) <= usable)
@@ -64,12 +106,12 @@ function fitGridAndCell(grid: 'auto' | number, cell: 'auto' | number): { grid: n
   }
 
   if (cell !== 'auto') {
-    const fits = GRID_PRESETS.filter((g) => frameEdgePx(g, cell) <= usable)
-    return { grid: fits.at(-1) ?? GRID_PRESETS[0]!, cell }
+    const fits = grids.filter((g) => frameEdgePx(g, cell) <= usable)
+    return { grid: fits.at(-1) ?? grids[0]!, cell }
   }
 
   let best: { grid: number; cell: number } | null = null
-  for (const g of GRID_PRESETS) {
+  for (const g of grids) {
     for (const c of CELL_PRESETS) {
       if (frameEdgePx(g, c) > usable) continue
       if (!best || c > best.cell || (c === best.cell && g > best.grid)) {
@@ -77,7 +119,7 @@ function fitGridAndCell(grid: 'auto' | number, cell: 'auto' | number): { grid: n
       }
     }
   }
-  return best ?? { grid: GRID_PRESETS[0]!, cell: CELL_PRESETS[0]! }
+  return best ?? { grid: grids[0]!, cell: CELL_PRESETS[0]! }
 }
 
 function randomKeyHex(): string {
@@ -135,7 +177,7 @@ export function NewTransfer() {
   const hasSavedKeys = (keys.data ?? []).length > 0
   const hasValidKey = needsKey && (keySource === 'saved' ? keyId !== '' : keyValid)
 
-  const resolved = fitGridAndCell(grid, cell)
+  const resolved = fitGridAndCell(grid, cell, encoder)
 
   const submit = useMutation({
     mutationFn: async () => {
