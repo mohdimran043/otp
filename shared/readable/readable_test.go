@@ -62,16 +62,23 @@ func TestColourCannotReachTheDenseGrids(t *testing.T) {
 	}
 }
 
-// TestBinaryReachesFurther is the trade worth surfacing: the same capture reads a much denser grid in one
-// bit a cell, because a thresholded cell needs less than half the pixels a measured one does.
+// TestBinaryReachesFurther is the trade an operator wanting a dense grid has to make, and its limits.
+//
+// Binary needs 6 pixels a cell against colour8's 10, so it reaches further on the same camera — but not as
+// much further as it looked when the floor was 4. On a 1080 capture that is 172 cells against 104, and 192 is
+// beyond both, which the observed run confirmed: 192 in binary located every frame and read no payloads.
 func TestBinaryReachesFurther(t *testing.T) {
-	colour := readable.Assess(192, 2, 3, 1080, 1920)
-	binary := readable.Assess(192, 2, 1, 1080, 1920)
+	colour := readable.Assess(160, 2, 3, 1080, 1920)
+	binary := readable.Assess(160, 2, 1, 1080, 1920)
 
-	require.False(t, colour.Readable)
-	require.True(t, binary.Readable, "192 cells is reachable at one bit a cell")
+	require.False(t, colour.Readable, "160 cells needs 10 px/cell in colour and gets 6.6")
+	require.True(t, binary.Readable, "the same grid clears the 6 px/cell binary floor")
 	require.True(t, colour.BinaryWouldWork)
-	require.Contains(t, colour.Explain(192, 3), "one bit a cell")
+	require.Contains(t, colour.Explain(160, 3), "one bit a cell")
+
+	// And the ceiling each encoding reaches on this camera, which is the number worth quoting.
+	t.Logf("on a 1080 capture: colour tops out at %d cells, binary at %d",
+		colour.MaxGrid, binary.MaxGrid)
 }
 
 // TestMaxGridIsUsableAdvice checks the suggested ceiling actually passes its own test, which is the property
@@ -93,18 +100,28 @@ func TestMaxGridIsUsableAdvice(t *testing.T) {
 
 // TestA512GridNeedsARealSensor answers the question directly: what would it take to read the densest grid
 // the sender offers?
+//
+// The answer moved when the binary floor was corrected from 4 to 6, and that is worth keeping visible. On the
+// old figure a 12 MP capture read 512 cells in binary; on the corrected one it falls just short — 3024 across
+// 516 cells is 5.86 pixels a cell against the 6 now required. So 512 needs a sensor with roughly 3,100 pixels
+// on its short side, which is above 12 MP in the 3:4 shape phones use.
 func TestA512GridNeedsARealSensor(t *testing.T) {
-	// 516 cells at four pixels each is 2064 pixels on the short side — a 12 MP phone in landscape reaches
-	// it, and no 1080p capture does.
-	require.False(t, readable.Assess(512, 2, 1, 1080, 1920).Readable)
-	require.True(t, readable.Assess(512, 2, 1, 3024, 4032).Readable,
-		"512 cells is readable in binary on a 12 MP capture")
-	require.False(t, readable.Assess(512, 2, 3, 3024, 4032).Readable,
-		"but not in colour, which needs 5160 pixels across")
+	require.False(t, readable.Assess(512, 2, 1, 1080, 1920).Readable,
+		"512 cells is far out of reach at 1080p in any encoding")
 
-	a := readable.Assess(512, 2, 3, 3024, 4032)
-	t.Logf("512 colour on a 12MP capture: %.1f px/cell, needs %.0f — max colour grid %d",
-		a.ModulePixels, a.Required, a.MaxGrid)
+	twelveMP := readable.Assess(512, 2, 1, 3024, 4032)
+	require.False(t, twelveMP.Readable, "12 MP falls just short of 512 cells in binary")
+	t.Logf("512 binary on a 12MP capture: %.2f px/cell against %.0f needed", twelveMP.ModulePixels, twelveMP.Required)
+
+	// A larger sensor does reach it, which is the useful half of the answer.
+	require.True(t, readable.Assess(512, 2, 1, 3472, 4624).Readable,
+		"512 cells in binary needs roughly 3,100 pixels on the short side")
+
+	// And never in colour, on any sensor a phone has: 516 cells at ten pixels is 5,160 across.
+	require.False(t, readable.Assess(512, 2, 3, 3024, 4032).Readable)
+	colour := readable.Assess(512, 2, 3, 3024, 4032)
+	t.Logf("512 colour on a 12MP capture: %.1f px/cell, needs %.0f — max colour grid there %d",
+		colour.ModulePixels, colour.Required, colour.MaxGrid)
 }
 
 func TestDegenerateInputsDoNotPanic(t *testing.T) {
@@ -138,4 +155,20 @@ func TestTheHopelessBandStillSaysSo(t *testing.T) {
 	require.True(t, a.Hopeless, "2.1 px/cell is below any band that decodes")
 	require.False(t, a.Marginal)
 	require.Contains(t, a.Explain(512, 3), "cannot be read")
+}
+
+// TestTheBinaryFloorMatchesWhatWasObserved pins the one binary observation there is, so the figure cannot
+// drift back to a value that contradicts it.
+//
+// A 192-cell binary frame at 5.5 captured pixels a cell located its geometry on every frame and failed its
+// payload on 41 of 41, with recovery offered all of them and rescuing none. Whatever the true floor is, it
+// is above that.
+func TestTheBinaryFloorMatchesWhatWasObserved(t *testing.T) {
+	observed := readable.Assess(192, 2, 1, 1080, 1920)
+	require.InDelta(t, 5.5, observed.ModulePixels, 0.1)
+	require.False(t, observed.Readable,
+		"192 cells in binary on a 1080 capture read no payloads at all and must not be called readable")
+
+	// And the floor itself has to sit above the failure, or the assessment above is accidental.
+	require.Greater(t, readable.BinaryPixels, 5.7)
 }

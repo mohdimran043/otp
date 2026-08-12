@@ -33,16 +33,25 @@ import (
 
 // Pixels per cell each modulation needs, measured on this project's own captures.
 const (
-	// BinaryPixels is the smallest cell a one-bit frame reads reliably. A binary cell only has to land on
-	// the correct side of one threshold, so a coarse read of it is still the right read — below about three
-	// pixels it cannot survive a lens, a Bayer filter and a JPEG in series.
+	// BinaryPixels is the smallest cell a one-bit frame reads reliably, and it is the least trustworthy
+	// number in this file. Read the history before relying on it.
 	//
-	// Three rather than four, and the provenance matters. Three is the figure the receiver's aiming display
-	// carried from the start, with that reasoning attached; four was an estimate written here later, and for
-	// a while the two disagreed — the receiver told an operator a binary geometry needed 3 while the sender
-	// refused it for not reaching 4. Neither number is backed by a decode-rate sweep the way the colour one
-	// is, so the one with the recorded reasoning wins until someone measures it.
-	BinaryPixels = 3.0
+	// It was 3, taken from the aiming display's original constant, which reasoned that a binary cell only
+	// has to land on the correct side of one threshold so a coarse read is still the right read. That is
+	// sound as far as it goes. Then it was briefly 4, an estimate written here, and for a while the two
+	// disagreed — the receiver told an operator a geometry needed 3 while the sender refused it for not
+	// reaching 4.
+	//
+	// Six now, and from an observation rather than an argument: a 192-cell binary frame at 5.5 to 5.7
+	// captured pixels a cell located its geometry cleanly on every frame and failed its payload checksum on
+	// 41 of 41, with the recovery engine offered all of them and rescuing none. So the real floor is above
+	// 5.7, and 3 was optimistic by at least a factor of two.
+	//
+	// Six is a lower bound, not a measured threshold. Unlike the colour figure — which has a decode-rate
+	// sweep behind it, 12 reading every frame and 5.9 reading none — nothing here establishes where binary
+	// actually becomes reliable, only that it is not yet reliable at 5.7. Treat it as provisional and run
+	// the sweep for binary before quoting it as measured.
+	BinaryPixels = 6.0
 
 	// ColourPixels is what a multi-level cell needs, and it is several times the binary figure for a reason
 	// worth stating, because three pixels looks sufficient and is not.

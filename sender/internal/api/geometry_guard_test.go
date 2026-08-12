@@ -54,17 +54,21 @@ func TestTheGridThatWorkedIsAccepted(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestBinaryIsOfferedWhenItWouldWork covers the trade an operator wanting a dense grid has to make: the same
-// grid reads at one bit a cell, because a thresholded cell needs less than half the pixels a measured one does.
+// TestBinaryIsOfferedWhenItWouldWork covers the trade an operator wanting a denser grid has to make: binary
+// needs 6 pixels a cell against colour8's 10, so it reaches 176 cells on a 1080 capture where colour reaches
+// 104.
+//
+// 160 cells rather than 192, and the difference is an observation rather than a tidy-up: 192 in binary located
+// its geometry on every frame and read no payloads at all, which is what moved the binary floor from 4 to 6.
 func TestBinaryIsOfferedWhenItWouldWork(t *testing.T) {
-	req := TransferRequest{GridWidth: 192, GridHeight: 192, CellPixels: 4, Encoder: "color8", BitDepth: 3}
+	req := TransferRequest{GridWidth: 160, GridHeight: 160, CellPixels: 4, Encoder: "color8", BitDepth: 3}
 	err := validateGeometryForCamera(req, guardConfig(), uint8(req.BitDepth))
-	require.Error(t, err)
+	require.Error(t, err, "6.6 px/cell is below the colour band")
 	require.Contains(t, err.Error(), "one bit a cell")
 
 	req.Encoder, req.BitDepth = "binary", 1
-	err = validateGeometryForCamera(req, guardConfig(), uint8(req.BitDepth))
-	require.NoError(t, err, "192 cells is readable at one bit a cell on a 1080 capture")
+	require.NoError(t, validateGeometryForCamera(req, guardConfig(), uint8(req.BitDepth)),
+		"160 cells clears the binary floor on a 1080 capture")
 }
 
 // TestTheCheckIsSkippedWithoutACamera keeps the file-loopback channel usable. There is no camera there, so
