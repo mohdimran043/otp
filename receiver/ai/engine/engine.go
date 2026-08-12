@@ -72,6 +72,11 @@ type Report struct {
 	Flips      int `json:"flips"`
 	Candidates int `json:"candidates"`
 
+	// Considered is how many cells the engine looked at: the search set for a bounded search, or the
+	// whole payload region for an engine that reads every cell. It separates "tried one correction and
+	// it worked" from "read twelve thousand cells and one was wrong", which cost very different amounts.
+	Considered int `json:"considered,omitempty"`
+
 	// WorstMargin is the least confident cell considered, in the palette's weighted units.
 	WorstMargin float64 `json:"worst_margin"`
 

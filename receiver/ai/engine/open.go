@@ -33,7 +33,7 @@ type Settings struct {
 //
 // A list rather than a free-form string check, for the same reason the capture sources are enumerated:
 // accepting a name and failing later is how a settings page comes to be able to stop a service.
-func AvailableEngines() []string { return []string{"none", "go", "sidecar"} }
+func AvailableEngines() []string { return []string{"none", "go", "sidecar", "classifier"} }
 
 // Open builds the engine a configuration names.
 //
@@ -67,6 +67,23 @@ func Open(ctx context.Context, s Settings) (Engine, error) {
 		}
 		// Cheapest first: the search on the original pixels, then the model server.
 		return NewChain(inner, side), nil
+
+	case "classifier":
+		// The learned engine, with the deterministic search in front of it. Cheapest first: a candidate
+		// search over palette margins costs microseconds and no network, so it runs on every failure and
+		// the model runs only on what it could not read. Reversing that would pay a GPU round trip for
+		// frames the arithmetic already fixes.
+		inner := NewGo(s.Search)
+		cls, err := NewClassifier(ctx, ClassifierOptions{
+			URL:           s.SidecarURL,
+			Timeout:       s.SidecarTimeout,
+			MaxCells:      s.Search.MaxCells,
+			MaxCandidates: s.Search.MaxCandidates,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return NewChain(inner, cls), nil
 
 	default:
 		return nil, fmt.Errorf("engine: %q is not one of %v", s.Engine, AvailableEngines())

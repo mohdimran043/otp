@@ -227,6 +227,100 @@ it could read it. Pull a session with `mc cp` against the `otp-receiver` bucket 
 of the stratification. Stored objects are keyed `.png` but hold whatever the camera posted — a browser
 posts JPEG — so decode by content, not by extension.
 
+
+## Machine learning: a cell classifier, measured against the deterministic engine
+
+Added 2026-08-12. A small CNN reads each payload cell from a patch instead of matching one averaged
+sample against eight palette entries.
+
+**Why a classifier and not an enhancer.** Real failures concentrate in `payload_crc` at a finder score
+near 1.000 — the frame was found, geometry is right, both fixed bands read, individual cell decisions
+were wrong. That is per-cell classification. An enhancement network would attack `no_quad`, which at one
+or two pixels a cell is missing *samples*, and no network invents samples never captured.
+
+**What the model sees.** A 9x9 patch spanning 1.5 cells, sampled *through the decoder's homography* in
+cell coordinates — so it is invariant to scale, rotation and perspective, and one model covers every
+geometry. Plus this frame's measured black and white per channel, concatenated at the head rather than
+applied to the input, so the model can learn its own mapping including the gamma a linear correction
+cannot represent. The decoder's own centre sample is fed forward directly so the model starts from at
+least the baseline's information.
+
+The point of the patch is context. The decoder averages a window at the cell centre; at four pixels a
+cell the neighbours bleed into it, so the colour there is a mixture whose composition depends on the
+surroundings. A distance metric on one number cannot represent that. A patch can.
+
+**Feature extraction lives in `shared/cellpatch`**, imported by both the sender's dataset exporter and the
+receiver's inference path. Training features and production features are then the same code to the last
+bilinear weight — two implementations would drift silently, and the symptom would be a model that scored
+well in training and performed worse than the rule it replaced.
+
+**Training.** 1,031,400 labelled cells from 156 frames across 8 geometries and 12 optical profiles.
+Labels are proved, not assumed: taken from the pristine render and verified against its own footer, so a
+mislabelled set is refused rather than trained on. Split by **frame**, never by cell — cells from one
+frame share its exposure and blur, so a cell split scores the model on frames it has already seen.
+26,552 parameters, 14 s on an RTX 4090.
+
+```
+baseline (decoder's rule) held-out accuracy  99.985%   (32 errors in 215,424 cells)
+model held-out accuracy                     100.000%
+cells fixed / broken                         32 / 0
+```
+
+Read that with care. The baseline is already at 99.985% on synthetic data, so this comparison proves only
+that the model does not regress. **The synthetic set cannot demonstrate value** — the same bimodality the
+decode sweep found means these profiles either leave cells clean or destroy the fiducials. The real
+corpus is where the claim is settled.
+
+### On real captures, the model roughly doubles what recovery achieves
+
+175 real phone-camera frames, all three engines over identical frames in one run:
+
+```
+engine            decoded  recovered        total       rate   recover ms
+go                     43         10           53      30.3%         1192
+classifier             43         21           64      36.6%          804
+go+classifier          43         24           67      38.3%         1124
+```
+
+Every recovery in every engine came from `payload_crc`, which is the bucket the design predicted.
+
+- No recovery at all: **24.6%**
+- Deterministic search: **30.3%** (+5.7 points)
+- Learned classifier: **36.6%** (+12.0 points) — **2.1x the deterministic engine's recoveries**
+- Both, cheapest first: **38.3%** (+13.7 points)
+
+The chain beats either alone — 24 recoveries against 21 and 10 — so the two engines recover *different*
+frames and running both is worth more than picking one. The model was trained purely on synthetic
+degradation and generalises to real phone-camera JPEG, which is the result that justifies the approach.
+
+Cost is real: about 0.8-1.2 s per recovered frame, dominated by sampling and classifying twelve thousand
+cells per frame plus the round trip. That is affordable only because recovery runs on failures and off the
+capture hot path.
+
+### Running it
+
+```bash
+# 1. generate the training set (Go knows the truth)
+OTP_DATASET_OUT=/tmp/ds OTP_DATASET_FRAMES=3 go test ./ai/dataset/ -run TestGenerate -v   # in sender/
+
+# 2. train (RTX 4090, ~14s)
+cd receiver/ai/service && python3 train.py --data /tmp/ds --out models/symbol-classifier/v1 --epochs 12
+
+# 3. serve
+python3 serve.py --weights models/symbol-classifier/v1 --port 9800
+
+# 4. point the receiver at it
+OTP_RECEIVER_DECODER_RECOVERY_ENGINE=classifier
+OTP_RECEIVER_DECODER_RECOVERY_SIDECAR_URL=http://172.17.0.1:9800   # docker bridge gateway
+
+# 5. compare engines on real captures
+OTP_CORPUS_SESSIONS=/dir OTP_CLASSIFIER_URL=http://localhost:9800 \
+  go test ./ai/corpus/ -run TestCorpusEngines -v -timeout 3600s
+```
+
+The service runs on the host rather than in a container because this machine's Docker has no NVIDIA
+runtime configured. Nothing in the contract depends on that: it is an HTTP endpoint either way.
+
 ## What that implies, stated plainly
 
 Recovery is correct, cheap, and on real captures it earns a measurable +5.7 points. It is also narrow:
@@ -240,9 +334,10 @@ But it is second-order next to the configuration finding:
   cells, and `COLOUR_GRID_CEILING = 96` bounds the wrong axis — it caps the grid for the Auto chooser
   when what needs bounding is cell size. Fixing that is worth far more than any further recovery work
   and costs nothing.
-- **A GPU enhancement sidecar remains hard to justify.** The largest remaining bucket is `no_quad`, and
-  at one pixel a cell that is missing samples rather than missing contrast. No restoration network adds
-  samples that were never captured. The engine seam is in place if the evidence changes.
+- **The learned classifier is justified; a GPU *enhancement* network still is not.** The classifier
+  doubles recovery on real frames because it attacks per-cell reads, which is where real failures are.
+  Enhancement would attack `no_quad`, which at one pixel a cell is missing samples rather than missing
+  contrast, and no network adds samples that were never captured.
 - **In-frame parity is still the way to widen the window.** Recovery corrects twelve cells; parity spent
   within the frame would address the 2-5% band wholesale, where today a frame missing its CRC is lost
   whole however few cells were wrong.

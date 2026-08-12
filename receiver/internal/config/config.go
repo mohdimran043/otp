@@ -545,9 +545,9 @@ func (c Config) Validate() error {
 		}
 		switch c.Decoder.Recovery.Engine {
 		case "", "go", "none":
-		case "sidecar":
+		case "sidecar", "classifier":
 			if c.Decoder.Recovery.SidecarURL == "" {
-				add("decoder.recovery.engine is sidecar but no sidecar_url is set")
+				add("decoder.recovery.engine is %s but no sidecar_url is set", c.Decoder.Recovery.Engine)
 			}
 		default:
 			add("decoder.recovery.engine %q is not one of %v",

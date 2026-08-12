@@ -33,3 +33,8 @@ demo/
 # compose file and falls back to the host toolchain when it is absent, so a clone without it still runs.
 PREREQUISITES.md
 docker-compose.test.yml
+
+# Trained model weights. Reproducible from sender/ai/dataset plus receiver/ai/service/train.py, and
+# large; the training report beside them is what is worth reading and it is small enough to keep.
+receiver/ai/service/models/*/*/weights.pt
+receiver/ai/service/__pycache__/
