@@ -3,6 +3,7 @@ package protocol
 import (
 	"image"
 	"image/color"
+	"math"
 )
 
 // GrayMap is an 8-bit luminance buffer. Decoding starts by flattening whatever
@@ -190,6 +191,118 @@ func Binarize(g *GrayMap) *Bitmap {
 		}
 	}
 	return bm
+}
+
+// flattenTile is the side, in pixels, of the neighbourhood FlattenIllumination averages over.
+//
+// Small — about one cell at the sizes a camera actually resolves, and the same tile the binariser
+// already uses. That is not the obvious choice: the intuition is that the neighbourhood should span
+// several cells, so that the average describes the exposure rather than the payload. Measured
+// against real captures, that intuition is simply wrong, and not by a little. Detecting the fiducial
+// quad across 65 photographed frames:
+//
+//	tile 12: 56 of 65      tile 24: 32 of 65      tile 48: 22 of 65
+//	tile 16: 55 of 65      tile 32: 22 of 65      tile 64: 21 of 65  (= no flattening at all)
+//
+// The reason is that a fiducial is seven cells across, so its ring survives an average taken over
+// one. What a one-cell neighbourhood removes is precisely the thing in the way: the local level of
+// the field beside the ring. Widen it past two or three cells and the average starts to include the
+// ring itself, which is the point at which it stops helping and the numbers fall off a cliff.
+const flattenTile = 16
+
+// FlattenIllumination divides out the slowly-varying part of the luminance.
+//
+// It exists for one specific and initially baffling failure: a camera pointed at a bright display in
+// a dim room meters for the room, drives the display into the sensor's ceiling, and returns a frame
+// whose payload is a flat sheet of white. Every value there is 255, so the local contrast a
+// fiducial's outer ring depends on is gone — not reduced, gone — and connected component analysis
+// welds the ring to the field beside it and reports one shape where there were two. The symptom is
+// "could not locate four finder patterns" on frames a person looking at them can see all four in.
+//
+// Dividing by a heavily smoothed copy restores the local difference: what survives is how much
+// brighter each pixel is than its neighbourhood, which is exactly what distinguishes a ring from the
+// field around it and is untouched by whatever the exposure did to absolute level.
+//
+// It is deliberately NOT applied to the buffer later stages sample from. The division rescales every
+// pixel by a different factor, so absolute luminance afterwards means nothing, and both the payload
+// sampler and the band readers threshold on absolute luminance. Flattening the whole pipeline turns
+// a frame that decodes into one that locates perfectly and then fails its payload CRC — measured, on
+// captures that had been decoding cleanly. So this is for finding the fiducials and nothing else.
+func FlattenIllumination(g *GrayMap) *GrayMap {
+	if g.W < flattenTile || g.H < flattenTile {
+		return g
+	}
+
+	tw := (g.W + flattenTile - 1) / flattenTile
+	th := (g.H + flattenTile - 1) / flattenTile
+
+	// Mean of each tile: the local exposure, at a resolution far coarser than a cell.
+	means := make([]float64, tw*th)
+	for ty := 0; ty < th; ty++ {
+		for tx := 0; tx < tw; tx++ {
+			x0, y0 := tx*flattenTile, ty*flattenTile
+			x1, y1 := min(x0+flattenTile, g.W), min(y0+flattenTile, g.H)
+			var sum, n float64
+			for y := y0; y < y1; y++ {
+				row := g.Pix[y*g.W:]
+				for x := x0; x < x1; x++ {
+					sum += float64(row[x])
+					n++
+				}
+			}
+			if n == 0 {
+				n = 1
+			}
+			means[ty*tw+tx] = sum / n
+		}
+	}
+
+	out := &GrayMap{W: g.W, H: g.H, Pix: make([]uint8, len(g.Pix))}
+	for y := 0; y < g.H; y++ {
+		// Bilinear between tile centres, so the divisor varies smoothly. A nearest-tile divisor
+		// leaves a visible step at every tile edge, and a step is a straight high-contrast line —
+		// precisely the feature the fiducial detector is looking for.
+		fy := float64(y)/flattenTile - 0.5
+		ty0 := clampInt(int(math.Floor(fy)), 0, th-1)
+		ty1 := clampInt(ty0+1, 0, th-1)
+		wy := fy - math.Floor(fy)
+
+		row := g.Pix[y*g.W:]
+		dst := out.Pix[y*g.W:]
+		for x := 0; x < g.W; x++ {
+			fx := float64(x)/flattenTile - 0.5
+			tx0 := clampInt(int(math.Floor(fx)), 0, tw-1)
+			tx1 := clampInt(tx0+1, 0, tw-1)
+			wx := fx - math.Floor(fx)
+
+			top := means[ty0*tw+tx0]*(1-wx) + means[ty0*tw+tx1]*wx
+			bot := means[ty1*tw+tx0]*(1-wx) + means[ty1*tw+tx1]*wx
+			local := top*(1-wy) + bot*wy
+
+			// A tile that is genuinely black divides to noise, so hold the divisor off the floor.
+			if local < 1 {
+				local = 1
+			}
+			// Re-centred on mid-grey: the result is a ratio, and the binariser downstream expects
+			// something that still looks like an 8-bit luminance image.
+			v := float64(row[x]) / local * 128
+			if v > 255 {
+				v = 255
+			}
+			dst[x] = uint8(v)
+		}
+	}
+	return out
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 // Median3 applies a 3x3 median filter to luminance.

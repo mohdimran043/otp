@@ -195,6 +195,24 @@ func detectQuad(gray *GrayMap) ([4]FinderCandidate, *GrayMap, error) {
 	if err2 == nil {
 		return quad, denoised, nil
 	}
+
+	// Last: flatten the illumination and look again.
+	//
+	// This is the overexposed case — a display metered against a dark room, its payload clipped to a
+	// sheet of white that swallows the fiducial rings. Neither of the attempts above helps there,
+	// because nothing is noisy and nothing is dark; the local contrast is simply gone, and only
+	// dividing out the local exposure brings it back.
+	//
+	// The *original* luminance is returned, not the flattened one. Flattening rescales every pixel
+	// by its own factor, which is what makes the fiducials findable and equally what makes absolute
+	// level meaningless afterwards — and every later stage, from the band readers to the payload
+	// sampler, thresholds on absolute level. Detecting on one buffer and sampling from another is
+	// the whole point: measured on real captures, flattening both finds the quad on frames that had
+	// none and then fails their payload CRC, which trades a visible failure for a subtler one.
+	flat := FlattenIllumination(gray)
+	if quad, err3 := SelectFinderQuad(FindFinderCandidates(Binarize(flat))); err3 == nil {
+		return quad, gray, nil
+	}
 	return [4]FinderCandidate{}, gray, err
 }
 
