@@ -2,11 +2,27 @@ package pipeline
 
 import "image"
 
-// defaultMinToneFraction is the historical threshold: a twelfth of the samples dark and a twelfth light.
+// defaultMinToneFraction is off, and it took two measured outages to get there.
 //
-// Named here rather than left as a literal so config.Default and the tests refer to the same thing, and a
-// change to one cannot silently disagree with the other.
-const defaultMinToneFraction = 1.0 / 12.0
+// It was a twelfth — a twelfth of the samples dark and a twelfth light. Measured against a real handheld
+// session that figure rejected 172 of 179 posted frames, so it was lowered to 0.02 in deployment. Measured
+// again on 2026-08-13 against a phone filming a monitor, **0.02 rejected 312 of 312** — every frame, for
+// twenty minutes, while the operator watched a preview that showed the frame perfectly.
+//
+// That failure mode is the worst this codebase has. A gated frame reaches neither the decoder nor the
+// failure log, so the receiver reports frames posted, none captured, nothing failed and nothing wrong. It
+// is indistinguishable from a camera that is not running, and it has now cost debugging time three
+// separate times.
+//
+// What the gate was for was keeping a camera pointed at nothing from filling the failure log. That is a
+// real but small cost — a wasted decode and a stored image — and it is now smaller still, because the
+// decoder reports which stage a frame died at, so a log full of no_quad is itself the diagnosis rather
+// than noise. Weigh a bounded waste against a silent total outage and the default has to be off.
+//
+// Set it above zero to bring the gate back on a link too slow to carry every frame. Anything at or below
+// zero disables the tone test and leaves the decoder's checksums as the only filter, which is what
+// someone aiming a camera actually wants.
+const defaultMinToneFraction = 0
 
 // looksLikeAFrame is a cheap test for "is there anything on that screen".
 //

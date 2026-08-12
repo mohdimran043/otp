@@ -20,6 +20,13 @@ type recoveryCounters struct {
 	recovered  atomic.Uint64
 	candidates atomic.Uint64
 
+	// decodeNanos and recoverNanos accumulate where the time actually goes, so "the AI is slow" can be
+	// answered with a split rather than an impression. Decode is what every frame costs; recovery is what
+	// only failures cost, and the two are wildly different numbers.
+	decodeNanos  atomic.Int64
+	decodeCount  atomic.Int64
+	recoverNanos atomic.Int64
+
 	// buckets counts how frames finished, by the stage they failed at. A map behind a mutex rather
 	// than atomics because the key set is not fixed at compile time and the write rate is one per
 	// frame — nothing next to a decode.
@@ -67,6 +74,12 @@ type RecoveryStats struct {
 	// sit in payload_crc, and those call for opposite actions.
 	Buckets map[string]uint64 `json:"buckets"`
 
+	// MeanDecodeMs is what an average frame costs before recovery is considered, and MeanRecoverMs what
+	// an average offered frame costs in the engine. Reported separately because only the second is this
+	// layer's, and conflating them makes the decoder look slow or the model look cheap.
+	MeanDecodeMs  float64 `json:"mean_decode_ms"`
+	MeanRecoverMs float64 `json:"mean_recover_ms"`
+
 	// Engine and Version name what did the recovering. Reported so a change in the recovered count is
 	// attributable: the same figure under "go" and under "sidecar+go" is the finding that a model is
 	// earning nothing.
@@ -81,6 +94,12 @@ func (c *recoveryCounters) stats() RecoveryStats {
 		Recovered:  c.recovered.Load(),
 		Candidates: c.candidates.Load(),
 		Buckets:    map[string]uint64{},
+	}
+	if n := c.decodeCount.Load(); n > 0 {
+		out.MeanDecodeMs = float64(c.decodeNanos.Load()) / float64(n) / 1e6
+	}
+	if n := c.attempted.Load(); n > 0 {
+		out.MeanRecoverMs = float64(c.recoverNanos.Load()) / float64(n) / 1e6
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -100,6 +119,9 @@ func (c *recoveryCounters) reset() {
 	c.attempted.Store(0)
 	c.recovered.Store(0)
 	c.candidates.Store(0)
+	c.decodeNanos.Store(0)
+	c.decodeCount.Store(0)
+	c.recoverNanos.Store(0)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.buckets = nil

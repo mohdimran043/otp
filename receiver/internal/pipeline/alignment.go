@@ -3,10 +3,10 @@ package pipeline
 import (
 	"fmt"
 	"image"
-	"math"
 	"time"
 
 	"github.com/opticaltransport/otp/shared/protocol"
+	"github.com/opticaltransport/otp/shared/readable"
 )
 
 // Alignment is what the last captured frame says about how the camera is pointed.
@@ -59,6 +59,11 @@ type Alignment struct {
 
 	// MaxGridForCapture is the largest grid this capture could resolve at this encoding.
 	MaxGridForCapture int `json:"max_grid_for_capture"`
+
+	// RotationHelps is true when turning the camera ninety degrees would be enough on its own. Surfaced
+	// separately because it is the cheapest fix available — a wrist movement, no reconfiguration, no
+	// second transfer — and worth saying before any advice that costs more.
+	RotationHelps bool `json:"rotation_helps"`
 
 	// Perspective is 0 for a square-on view and rises as the camera moves off-axis.
 	Perspective float64 `json:"perspective"`
@@ -175,31 +180,6 @@ const (
 	maxColourModulePixels = 13.0
 )
 
-// denseAdvice explains a grid the capture cannot resolve, and names the two things that would fix it.
-//
-// Rotation first when it would be enough, because it costs the operator a wrist movement and nothing else:
-// a square frame in a portrait capture is bounded by the 1080-pixel width, and the same frame in landscape
-// gets the 1920. That is the difference between 8.2 pixels a cell and 14.5 at a 128 grid, which is the
-// difference between never decoding and decoding everything.
-func denseAdvice(a Alignment, w, h float64) string {
-	base := fmt.Sprintf(
-		"The grid is too dense for this camera — cells can only reach %.1f pixels even with the frame "+
-			"filling the view, and this encoding needs about %.0f. Moving closer cannot help: a square "+
-			"frame is bounded by the short side of the picture, so the figure is fixed by the grid size.",
-		a.AchievableModulePixels, a.RequiredModulePixels)
-
-	if a.RotatedModulePixels >= a.RequiredModulePixels && math.Abs(w-h) > 1 {
-		return base + fmt.Sprintf(
-			" Turn the camera sideways and it becomes %.1f — that alone is enough.",
-			a.RotatedModulePixels)
-	}
-	if a.MaxGridForCapture > 0 {
-		return base + fmt.Sprintf(
-			" Lower the sender's grid to about %d cells or fewer.", a.MaxGridForCapture)
-	}
-	return base
-}
-
 // requiredModule is the cell size this frame's encoding needs, in captured pixels.
 //
 // Read from the header the decoder just recovered rather than configured, so it follows the sender
@@ -262,21 +242,16 @@ func measureAlignment(img image.Image, g *protocol.Geometry, decoded bool) Align
 		a.MaxModulePixels = maxColourModulePixels
 	}
 
-	// The best this capture could ever manage at this geometry: the frame filling the short side,
-	// divided by how many cells span it. The frame is square, so the short side is what bounds it
-	// however the camera is held — which is why a portrait capture of a dense grid is hopeless while
-	// the same grid in landscape is fine.
-	cellsAcross := float64(g.Layout.GridWidth + 2*g.Layout.QuietZone)
-	if short := math.Min(w, h); cellsAcross > 0 && short > 0 {
-		a.AchievableModulePixels = short / cellsAcross
-		// And what a rotation would buy, since the long side is usually half again as much.
-		a.RotatedModulePixels = math.Max(w, h) / cellsAcross
-		// The largest grid that could reach the requirement on this capture, as a number an operator
-		// can act on rather than a ratio they have to solve.
-		if a.RequiredModulePixels > 0 {
-			a.MaxGridForCapture = int(short/a.RequiredModulePixels) - 2*g.Layout.QuietZone
-		}
-	}
+	// What this capture can do at this geometry, from the shared model both sides use. Computed here
+	// rather than inline so the sender's pre-flight check and this aiming display cannot disagree about
+	// whether a geometry is possible — they were separate arithmetic once and that is how "move closer"
+	// came to be shown at 86% of the view filled.
+	cap := readable.Assess(g.Layout.GridWidth, g.Layout.QuietZone, g.Header.BitDepth,
+		bounds.Dx(), bounds.Dy())
+	a.AchievableModulePixels = cap.ModulePixels
+	a.RotatedModulePixels = cap.Rotated
+	a.RotationHelps = cap.RotationHelps
+	a.MaxGridForCapture = cap.MaxGrid
 
 	switch {
 	case a.Fill > maxFill:
@@ -291,10 +266,9 @@ func measureAlignment(img image.Image, g *protocol.Geometry, decoded bool) Align
 			a.ModulePixels, a.MaxModulePixels)
 	// Tested before too_far, because when both apply this is the true fault and the other is advice
 	// that cannot be followed.
-	case a.AchievableModulePixels > 0 && a.RequiredModulePixels > 0 &&
-		a.AchievableModulePixels < a.RequiredModulePixels:
+	case a.AchievableModulePixels > 0 && !cap.Readable:
 		a.Status = StatusTooDense
-		a.Advice = denseAdvice(a, w, h)
+		a.Advice = cap.Explain(g.Layout.GridWidth, g.Header.BitDepth)
 	case a.Fill < minFill || a.ModulePixels < a.RequiredModulePixels:
 		a.Status = StatusTooFar
 		a.Advice = fmt.Sprintf(

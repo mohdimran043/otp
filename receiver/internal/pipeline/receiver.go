@@ -603,7 +603,10 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 		opts.ExpectedLayout = learned
 	}
 
+	decodeStarted := time.Now()
 	frame, geometry, decodeErr := decodeFrame(capture.Image, opts)
+	r.recovery.decodeNanos.Add(int64(time.Since(decodeStarted)))
+	r.recovery.decodeCount.Add(1)
 	finder, timing, contrast := decodeQuality(geometry)
 
 	// Remember the layout of anything that resolved, including a frame that located and then failed
@@ -649,12 +652,14 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 	if decodeErr != nil && cfg.Decoder.Recovery.Enabled {
 		bucket := classify.Of(decodeErr)
 		r.recovery.attempted.Add(1)
+		recoverStarted := time.Now()
 		res, rerr := r.engine.Recover(ctx, engine.Request{
 			Image:    capture.Image,
 			Geometry: geometry,
 			Bucket:   bucket,
 			Clipped:  classify.Clipped(capture.Image),
 		})
+		r.recovery.recoverNanos.Add(int64(time.Since(recoverStarted)))
 		if rerr == nil {
 			r.recovery.recovered.Add(1)
 			r.recovery.candidates.Add(uint64(res.Report.Candidates))

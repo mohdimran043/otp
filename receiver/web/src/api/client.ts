@@ -31,6 +31,9 @@ export interface RecoveryStats {
   // Keyed by stage: decoded, no_quad, descriptor_crc, header_crc, footer_crc, payload_crc, below_floors,
   // degenerate_geometry, unsupported_version, other.
   buckets: Record<string, number>
+  /** Where the time goes: what every frame costs to decode, against what an offered frame costs in the engine. */
+  mean_decode_ms: number
+  mean_recover_ms: number
 }
 
 export interface MergedView {
@@ -88,6 +91,8 @@ export interface AlignmentView {
   rotated_module_pixels: number
   /** The largest grid this capture could resolve at this encoding. */
   max_grid_for_capture: number
+  /** True when turning the camera ninety degrees would be enough on its own — the cheapest fix there is. */
+  rotation_helps: boolean
   /** 0 for square-on, rising as the camera moves off-axis. */
   perspective: number
   finder_score: number

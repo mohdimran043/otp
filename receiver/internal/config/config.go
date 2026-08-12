@@ -380,7 +380,7 @@ func Default() Config {
 			IdleInterval: 100 * time.Millisecond,
 			// A twelfth, unchanged from when this was a constant: the same behaviour for every deployment that
 			// does not ask for something else.
-			MinToneFraction: 1.0 / 12.0,
+			MinToneFraction: 0,
 		},
 		Decoder: Decoder{
 			MinFinderScore: 0.75,

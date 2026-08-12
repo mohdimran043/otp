@@ -182,6 +182,17 @@ export function AlignmentGuide({
                   : `${alignment.module_pixels.toFixed(1)} px per cell`
               }
             />
+            {/* Rotation first, and visually loudest, because it is the one fix that costs nothing: a square
+                frame is bounded by the short side of the picture, so turning the camera can be worth half
+                again as many pixels per cell without moving, reconfiguring or resending anything. */}
+            {alignment.rotation_helps && (
+              <Chip
+                size="small"
+                color="warning"
+                icon={<ScreenRotationIcon />}
+                label={`turn sideways → ${alignment.rotated_module_pixels.toFixed(1)} px per cell`}
+              />
+            )}
             <Chip size="small" label={`${Math.round(alignment.perspective * 100)}% off-square`} />
             <Chip size="small" label={`fiducials ${Math.round(alignment.finder_score * 100)}%`} />
             <Chip size="small" label={`contrast ${Math.round(alignment.contrast)}`} />
