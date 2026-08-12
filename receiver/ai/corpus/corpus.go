@@ -21,6 +21,7 @@ import (
 	"image"
 	_ "image/jpeg" // stored captures are whatever the camera posted, and a browser posts JPEG
 	_ "image/png"  // the file source writes PNG
+	"math"
 	"os"
 	"sort"
 	"time"
@@ -56,6 +57,14 @@ type Outcome struct {
 	// note saying what the sender was configured for, and the frames themselves are the only reliable
 	// record — the grid a settings page claims is not evidence of what was actually transmitted.
 	Layout string
+
+	// FrameShare is the located frame's area as a fraction of the whole photograph.
+	//
+	// This is the figure that says whether "find the code in the photo" is working, and it is the only
+	// honest way to ask: a frame filling the view and a frame occupying a tenth of it are different
+	// problems, and a decode rate averaged over both describes neither. Zero when no geometry resolved,
+	// which is itself the answer for those frames — the code was not found in the photo at all.
+	FrameShare float64
 
 	// MarginalCells is how many payload cells were read with a margin under a quarter of the
 	// palette's separation, and TotalCells how many there were.
@@ -126,6 +135,9 @@ type LayoutStats struct {
 	MeanMarginal float64
 	MeanTotal    float64
 	MeanFinder   float64
+
+	// MeanShare is the average fraction of the photograph the frame occupied at this geometry.
+	MeanShare float64
 }
 
 // Options configures a replay.
@@ -180,6 +192,7 @@ func Replay(ctx context.Context, path string, opts Options) (Outcome, error) {
 	if geometry != nil {
 		out.FinderScore = geometry.FinderScore
 		out.Contrast = geometry.Contrast
+		out.FrameShare = frameShare(geometry, img.Bounds())
 		out.Layout = fmt.Sprintf("%dx%d@%dpx", geometry.Layout.GridWidth, geometry.Layout.GridHeight, geometry.Layout.CellPixels)
 		out.MarginalCells, out.TotalCells = margins(geometry, img, opts.MarginalThreshold)
 	}
@@ -200,6 +213,24 @@ func Replay(ctx context.Context, path string, opts Options) (Outcome, error) {
 		out.Report = res.Report
 	}
 	return out, nil
+}
+
+// frameShare is the quad's area over the image's, by the shoelace formula.
+//
+// The corners arrive ordered top-left, top-right, bottom-left, bottom-right, so the polygon is walked
+// TL-TR-BR-BL to trace the perimeter rather than a bow tie.
+func frameShare(g *protocol.Geometry, bounds image.Rectangle) float64 {
+	area := float64(bounds.Dx() * bounds.Dy())
+	if area <= 0 {
+		return 0
+	}
+	q := [4]protocol.Point{g.Corners[0], g.Corners[1], g.Corners[3], g.Corners[2]}
+	var sum float64
+	for i := 0; i < 4; i++ {
+		j := (i + 1) % 4
+		sum += q[i].X*q[j].Y - q[j].X*q[i].Y
+	}
+	return math.Abs(sum) / 2 / area
 }
 
 // margins counts how many payload cells were read with little confidence.
@@ -256,6 +287,7 @@ func Summarise(outcomes []Outcome, engineName, version string) Summary {
 			ls.MeanMarginal += float64(o.MarginalCells)
 			ls.MeanTotal += float64(o.TotalCells)
 			ls.MeanFinder += o.FinderScore
+			ls.MeanShare += o.FrameShare
 			if o.Bucket == classify.BucketDecoded {
 				ls.Decoded++
 			}
@@ -292,6 +324,7 @@ func Summarise(outcomes []Outcome, engineName, version string) Summary {
 			ls.MeanMarginal /= float64(ls.Frames)
 			ls.MeanTotal /= float64(ls.Frames)
 			ls.MeanFinder /= float64(ls.Frames)
+			ls.MeanShare /= float64(ls.Frames)
 		}
 	}
 

@@ -99,10 +99,10 @@ func TestCorpusSessions(t *testing.T) {
 		sort.Strings(names)
 		for _, k := range names {
 			ls := r.summary.ByLayout[k]
-			fmt.Printf("  %-10s %-16s %4d frames  %4d decoded (%3.0f%%)  %4d recovered  finder %.3f  marginal %.0f of %.0f\n",
+			fmt.Printf("  %-10s %-16s %4d frames  %4d decoded (%3.0f%%)  %4d recovered  finder %.3f  frame %4.1f%% of photo  marginal %.0f of %.0f\n",
 				r.session, k, ls.Frames, ls.Decoded,
 				100*float64(ls.Decoded)/float64(ls.Frames), ls.Recovered,
-				ls.MeanFinder, ls.MeanMarginal, ls.MeanTotal)
+				ls.MeanFinder, 100*ls.MeanShare, ls.MeanMarginal, ls.MeanTotal)
 		}
 		if len(names) == 0 {
 			fmt.Printf("  %-10s %-16s %4d frames  no geometry resolved on any frame\n",

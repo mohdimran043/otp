@@ -127,10 +127,34 @@ const postRate = 10
  * gradient energy of a frame collapses when it is smeared and returns the instant it is not. Comparing that
  * against what this camera has recently managed — rather than any fixed number — is what makes it work across
  * different phones, distances and lighting, none of which can be known in advance.
+ *
+ * Which is why this now defaults to *off*.
+ *
+ * The paragraph above was written before the receiver could recover a frame. It is still true that motion blur
+ * mixes a cell with its neighbours before the sensor sees it — but "nothing downstream recovers that" is no
+ * longer the case. Mixing with neighbours is precisely what the learned cell classifier is trained to undo: it
+ * reads a patch spanning one and a half cells rather than one averaged sample, and measured on real captures it
+ * recovers twice as many frames as the arithmetic search alone.
+ *
+ * So a blurred frame is now a candidate, not waste, and the cost of dropping one has inverted. Dropping it
+ * saves an upload and a decode; keeping it may be the frame that carries a chunk nothing else delivered. The
+ * decision belongs on the server, which can see what recovery achieved, and not in a browser guessing.
+ *
+ * The measurement stays and the counter stays, because "how steady is this camera" is genuinely useful to show
+ * an operator. Only the rejection is gone. Set a floor above zero to bring it back — on a channel with recovery
+ * disabled, or a link too slow to carry every frame, it is still the right trade.
  */
 
-/** sharpnessFloor is the fraction of recent best sharpness a frame must reach to be worth posting. */
-const sharpnessFloor = 0.7
+/**
+ * sharpnessFloor is the fraction of recent best sharpness a frame must reach to be worth posting. Zero posts
+ * everything and lets the server decide, which is the default now that the server can recover blur.
+ */
+let sharpnessFloor = 0
+
+/** setSharpnessFloor adjusts the blur gate at run time. Zero disables it. */
+export function setSharpnessFloor(fraction: number): void {
+  sharpnessFloor = Number.isFinite(fraction) && fraction > 0 ? fraction : 0
+}
 
 /**
  * sharpnessDecay lets the reference fall when the scene genuinely changes, so moving to a new position does not
