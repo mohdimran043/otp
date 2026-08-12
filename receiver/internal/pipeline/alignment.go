@@ -53,10 +53,6 @@ type Alignment struct {
 	// fault is the sender's grid rather than the operator's hands.
 	AchievableModulePixels float64 `json:"achievable_module_pixels"`
 
-	// RotatedModulePixels is the same figure with the camera turned sideways, so the long side of the
-	// picture bounds the frame instead of the short one.
-	RotatedModulePixels float64 `json:"rotated_module_pixels"`
-
 	// MaxGridForCapture is the largest grid this capture could resolve at this encoding.
 	MaxGridForCapture int `json:"max_grid_for_capture"`
 
@@ -64,11 +60,6 @@ type Alignment struct {
 	// hundred rather than none. Distinguished from hopeless because the page must not paint a geometry red
 	// and call it unreadable while the operator watches chunks being acknowledged.
 	GeometryMarginal bool `json:"geometry_marginal"`
-
-	// RotationHelps is true when turning the camera ninety degrees would be enough on its own. Surfaced
-	// separately because it is the cheapest fix available — a wrist movement, no reconfiguration, no
-	// second transfer — and worth saying before any advice that costs more.
-	RotationHelps bool `json:"rotation_helps"`
 
 	// Perspective is 0 for a square-on view and rises as the camera moves off-axis.
 	Perspective float64 `json:"perspective"`
@@ -254,8 +245,6 @@ func measureAlignment(img image.Image, g *protocol.Geometry, decoded bool) Align
 	cap := readable.Assess(g.Layout.GridWidth, g.Layout.QuietZone, g.Header.BitDepth,
 		bounds.Dx(), bounds.Dy())
 	a.AchievableModulePixels = cap.ModulePixels
-	a.RotatedModulePixels = cap.Rotated
-	a.RotationHelps = cap.RotationHelps
 	a.GeometryMarginal = cap.Marginal
 	a.MaxGridForCapture = cap.MaxGrid
 

@@ -567,7 +567,14 @@ func validateGeometryForCamera(request TransferRequest, cfg config.Config, depth
 	}
 
 	assessment := readable.Assess(request.GridWidth, cfg.Optical.QuietZone, depth, short, long)
-	if assessment.Readable {
+	if assessment.Readable || assessment.Marginal {
+		// Marginal is allowed through, and the first version of this refused it — which turned a slow
+		// channel into a blocked one. An operator who has been told a geometry will decode a few frames in
+		// a hundred may still have reasons to send it: a small file, a soak test, or simply wanting to see
+		// it for themselves. Refusing that is deciding on their behalf, and it stopped an upload outright.
+		//
+		// Only the hopeless band is refused, where the measurements say no frames decode at all and the
+		// transfer would be pure waste.
 		return nil
 	}
 	return fmt.Errorf("%s", assessment.Explain(request.GridWidth, depth))

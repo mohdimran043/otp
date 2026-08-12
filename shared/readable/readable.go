@@ -7,11 +7,18 @@
 // capture can ever produce, at any distance, with perfect aim. If that figure is below what the encoding
 // needs, the transfer cannot work and no amount of moving, focusing or processing changes it.
 //
-// Measured, this is not a marginal effect. A 128-cell grid photographed in portrait at 1080x1920 tops out at
-// 1080/132 = 8.2 pixels a cell; colour8 needs about ten. The same grid in landscape gets 1920/132 = 14.5 and
-// reads every frame. The difference between "never works" and "always works" is which way the phone was
-// held, and nothing in the numbers an operator sees says so — the aiming display reported "move closer" at
-// 86% of the view filled, advice that could not be followed.
+// Measured, this is not a small effect. A 128-cell grid against a 1080-pixel capture tops out at 1080/132 =
+// 8.2 pixels a cell where colour8 wants ten, and the transfers at that geometry acknowledged 3 and 24 chunks
+// of 74 before exhausting their retransmissions. The aiming display meanwhile said "move closer" at 86% of
+// the view filled, which is advice that cannot be followed.
+//
+// Only the short side counts, and an earlier version of this package got that wrong in a way worth recording.
+// It reported what the long side would give and advised turning the camera — 8.2 against 14.5 — which does
+// nothing at all: a square inscribed in a 1920x1080 picture is 1080 across, and so is one in a 1080x1920
+// picture. The capture is requested as 1920x1080 either way. That advice was given to an operator who was
+// about to act on it, and the only reason it was caught is that they asked why the numbers had not moved.
+//
+// So the two things that actually change the figure are the grid and the capture resolution. Nothing else.
 //
 // The model is deliberately coarse. It assumes the frame fills the short side, which is optimistic, and it
 // ignores blur, exposure and compression, which are not free. So a geometry this package calls readable may
@@ -19,7 +26,10 @@
 // one: it is a floor, and a floor is what a refusal should rest on.
 package readable
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // Pixels per cell each modulation needs, measured on this project's own captures.
 const (
@@ -66,10 +76,6 @@ type Assessment struct {
 	// ModulePixels is the best this capture could resolve, with the frame filling the short side.
 	ModulePixels float64
 
-	// Rotated is the same figure with the camera turned ninety degrees, so the long side of the picture
-	// bounds the frame instead of the short one.
-	Rotated float64
-
 	// Required is what the encoding needs.
 	Required float64
 
@@ -86,15 +92,9 @@ type Assessment struct {
 	// Hopeless is below even the marginal band: no frames at all, in the measurements this rests on.
 	Hopeless bool
 
-	// RotationHelps is true when turning the camera would be enough on its own. It is worth reporting
-	// separately because it is the cheapest fix there is — a wrist movement, no reconfiguration, no
-	// second transfer.
-	RotationHelps bool
-
-	// MaxGrid is the largest grid this capture could read at this bit depth, and MaxGridRotated the same
-	// held the other way. Reported as cell counts because that is what an operator chooses from.
-	MaxGrid        int
-	MaxGridRotated int
+	// MaxGrid is the largest grid this capture could read at this bit depth, as a cell count because that
+	// is what an operator chooses from.
+	MaxGrid int
 
 	// BinaryWouldWork reports whether dropping to one bit a cell would make this grid readable. Large
 	// grids are reachable in binary and not in colour, because binary needs less than half the pixels —
@@ -107,11 +107,13 @@ type Assessment struct {
 // captureW and captureH are the pixel dimensions of the photograph, in either order — the short side is
 // taken, since that is what bounds a square frame.
 func Assess(gridWidth, quietZone int, bitDepth uint8, captureW, captureH int) Assessment {
+	// The short side, and only the short side. A frame is square, so the larger dimension cannot be used
+	// however the camera is held: a square inscribed in a 1920x1080 picture is 1080 across, and the same
+	// square in a 1080x1920 picture is also 1080 across. An earlier version of this reported what the long
+	// side would give and advised turning the camera, which is advice that does nothing — the number does
+	// not change, and an operator who follows it and sees no difference has been sent on an errand.
 	cells := float64(gridWidth + 2*quietZone)
-	short, long := float64(captureW), float64(captureH)
-	if short > long {
-		short, long = long, short
-	}
+	short := math.Min(float64(captureW), float64(captureH))
 
 	a := Assessment{Required: Required(bitDepth)}
 	if cells <= 0 || short <= 0 {
@@ -119,14 +121,11 @@ func Assess(gridWidth, quietZone int, bitDepth uint8, captureW, captureH int) As
 	}
 
 	a.ModulePixels = short / cells
-	a.Rotated = long / cells
 	a.Readable = a.ModulePixels >= a.Required
 	a.Marginal = !a.Readable && a.ModulePixels >= a.Required*MarginalFraction
 	a.Hopeless = a.ModulePixels < a.Required*MarginalFraction
-	a.RotationHelps = !a.Readable && a.Rotated >= a.Required
 
 	a.MaxGrid = int(short/a.Required) - 2*quietZone
-	a.MaxGridRotated = int(long/a.Required) - 2*quietZone
 	a.BinaryWouldWork = !a.Readable && a.ModulePixels >= BinaryPixels
 
 	return a
@@ -166,20 +165,14 @@ func (a Assessment) Explain(gridWidth int, bitDepth uint8) string {
 		"closer cannot change the figure."
 
 	switch {
-	case a.RotationHelps:
-		return opening + fmt.Sprintf(
-			" Turn the camera sideways and cells become %.1f pixels, which is enough on its own — that is "+
-				"the whole fix, and it costs nothing.", a.Rotated)
 	case a.BinaryWouldWork && bitDepth > 1:
 		return opening + fmt.Sprintf(
 			" At one bit a cell this grid would read, since binary needs about %.0f pixels rather than "+
 				"%.0f — the same grid, a third of the payload. Otherwise use %d cells or fewer.",
 			BinaryPixels, a.Required, max(a.MaxGrid, 0))
 	default:
-		msg := opening + fmt.Sprintf(" Use %d cells or fewer", max(a.MaxGrid, 0))
-		if a.MaxGridRotated > a.MaxGrid {
-			msg += fmt.Sprintf(", or %d with the camera sideways", a.MaxGridRotated)
-		}
-		return msg + "."
+		return opening + fmt.Sprintf(
+			" Use %d cells or fewer, or raise the camera's capture resolution — those are the only two "+
+				"things that move this number.", max(a.MaxGrid, 0))
 	}
 }

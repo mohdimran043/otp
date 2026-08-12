@@ -21,12 +21,12 @@ func TestTheCaseThatCostAnAfternoon(t *testing.T) {
 	require.InDelta(t, 8.18, a.ModulePixels, 0.05, "1080 across 132 cells")
 	require.InDelta(t, 10.0, a.Required, 0.01)
 
-	// And the fix that costs nothing: the same frame in landscape.
-	require.True(t, a.RotationHelps, "turning the camera is enough on its own here")
-	require.InDelta(t, 14.5, a.Rotated, 0.1)
-
+	// And no rotation advice, because a square frame gains nothing from it: the short side bounds it either
+	// way round. An earlier version claimed 14.5 pixels a cell from turning the camera, which is a number
+	// that does not exist — the capture is 1920x1080 in both orientations and a square inscribed in it is
+	// 1080 across.
 	msg := a.Explain(128, 3)
-	require.Contains(t, msg, "sideways")
+	require.NotContains(t, msg, "sideways")
 	require.Contains(t, msg, "moving closer cannot change")
 }
 

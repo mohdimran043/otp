@@ -87,12 +87,8 @@ export interface AlignmentView {
    * opposite conclusion from too_far, and the numbers alone cannot tell them apart.
    */
   achievable_module_pixels: number
-  /** The same figure with the camera turned sideways, so the long side bounds the frame instead. */
-  rotated_module_pixels: number
   /** The largest grid this capture could resolve at this encoding. */
   max_grid_for_capture: number
-  /** True when turning the camera ninety degrees would be enough on its own — the cheapest fix there is. */
-  rotation_helps: boolean
   /**
    * A grid a little short of what the encoding wants, which decodes a few frames in a hundred rather than
    * none. Shown amber rather than red: painting it red while chunks are being acknowledged is what made the
