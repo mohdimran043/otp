@@ -189,12 +189,19 @@ type FEC struct {
 
 // Display configures the optical output.
 type Display struct {
-	// Sink is "file", "none" for camera-only mode, or "opengl" in a build that includes it.
+	// Sink is "none" for camera-only mode, "file", or "opengl" in a build that includes it.
 	//
-	// "none" writes nothing to the shared directory: the receiver watches the physical display with
-	// its own camera instead of reading files off a volume. It is not reloadable — the sink is opened
-	// once at process startup — so changing it here or through the settings API takes effect on the
-	// next restart.
+	// "none" is the default, and it is the protocol working as intended: nothing is written to the
+	// shared directory, and the receiver watches the physical display with its own camera instead of
+	// reading files off a volume. An optical transport that hands the receiver a file over a shared
+	// mount has quietly stopped being one — the frames are real, the display is real, and the channel
+	// between them is a directory. That is a useful thing to have for developing against, which is why
+	// "file" exists, but defaulting to it means the ordinary way to run this system is the way that
+	// bypasses it, and a deployment can transfer a file perfectly without the camera path ever having
+	// been exercised.
+	//
+	// Not reloadable — the sink is opened once at process startup — so changing it here or through the
+	// settings API takes effect on the next restart.
 	Sink string `yaml:"sink"`
 
 	// Dir is the file sink's output directory: the shared volume the receiver's file
@@ -368,7 +375,7 @@ func Default() Config {
 			ManifestInterval: 64,
 		},
 		Display: Display{
-			Sink:       "file",
+			Sink:       "none",
 			Dir:        "/var/lib/otp/shared/frames",
 			FPS:        10,
 			Brightness: 0,

@@ -93,22 +93,25 @@ func TestGetSettingsReportsTheConfiguredSink(t *testing.T) {
 
 	var view settingsView
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &view))
-	require.Equal(t, "file", view.Sink, "the default deployment writes to the shared directory")
+	require.Equal(t, "none", view.Sink, "the default deployment is camera-only: nothing goes to disk")
 }
 
-// TestPatchSettingsAppliesSinkNoneWhileIdle is the camera-only path: with nothing in flight, switching
-// to the discard sink is applied and echoed back in the response.
-func TestPatchSettingsAppliesSinkNoneWhileIdle(t *testing.T) {
+// TestPatchSettingsAppliesSinkFileWhileIdle is the development path: with nothing in flight, switching
+// off the camera channel to the shared directory is applied and echoed back in the response.
+//
+// Switching *to* file is what makes this test say anything, now that camera-only is the default — asking
+// for the sink already in force would pass without the handler doing a thing.
+func TestPatchSettingsAppliesSinkFileWhileIdle(t *testing.T) {
 	h := newSettingsHarness(t)
 
-	response := h.patch(t, `{"sink": "none"}`)
+	response := h.patch(t, `{"sink": "file"}`)
 	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 
 	var view settingsView
 	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &view))
-	require.Equal(t, "none", view.Sink)
+	require.Equal(t, "file", view.Sink)
 
-	require.Equal(t, "none", h.watcher.Current().Display.Sink,
+	require.Equal(t, "file", h.watcher.Current().Display.Sink,
 		"the running configuration must carry the change, even though the already-open sink cannot swap")
 }
 
@@ -119,10 +122,10 @@ func TestPatchSettingsRefusesSinkWhileTransmitting(t *testing.T) {
 	h := newSettingsHarness(t)
 	h.seedTransmitting(t)
 
-	response := h.patch(t, `{"sink": "none"}`)
+	response := h.patch(t, `{"sink": "file"}`)
 	require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
 
-	require.Equal(t, "file", h.watcher.Current().Display.Sink, "a refused change must not be applied")
+	require.Equal(t, "none", h.watcher.Current().Display.Sink, "a refused change must not be applied")
 }
 
 // TestPatchSettingsRejectsAnUnknownSink covers the validation path: a typo in the sink name must be

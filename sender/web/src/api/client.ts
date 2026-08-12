@@ -128,6 +128,13 @@ export interface DisplayStatus {
   encoder: string
   bit_depth: number
   frames_shown: number
+
+  // held is whether an operator has stopped the display. It comes from the server rather than being
+  // remembered locally because the hold belongs to the display: a second tab, or this page after a
+  // reload, has to be able to find out.
+  held: boolean
+  held_since?: string
+
   frame?: DisplayFrame
 }
 
@@ -328,6 +335,21 @@ export const api = {
   deleteKey: (id: number) => request<void>(`/api/v1/keys/${id}`, { method: 'DELETE' }),
 
   display: () => request<DisplayStatus>('/api/v1/display'),
+
+  // Driving the display by hand. Hold stops it advancing so a frame can be looked at — or photographed
+  // — for as long as it takes; showFrame is refused unless it is held, because a running scheduler would
+  // replace the chosen frame within a frame interval and the control would appear to work without doing
+  // anything.
+  holdDisplay: () => request<DisplayStatus>('/api/v1/display/hold', { method: 'POST' }),
+
+  releaseDisplay: () => request<DisplayStatus>('/api/v1/display/release', { method: 'POST' }),
+
+  showFrame: (transmissionID: string, frameNumber: number) =>
+    request<DisplayStatus>('/api/v1/display/frame', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transmission_id: transmissionID, frame_number: frameNumber }),
+    }),
 
   settings: () => request<DisplaySettings>('/api/v1/settings'),
 

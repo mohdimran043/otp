@@ -159,18 +159,29 @@ budget reserves for the lens.
 
 ## The channel: a directory, or actual light
 
-By default the sender writes every rendered frame into the shared directory as a PNG, which is what lets a
-receiver reading that directory work with no camera at all. It is the right default for development and for
-the offline round trip below — but in a deployment where the channel really is optical, it is a second,
-invisible path carrying the same bytes, and the air gap it was meant to prove is not being tested.
+By default the channel is light. The sender renders frames, displays them, and writes nothing to disk; the
+receiver takes what a browser's camera posts. The only way across is to point that camera at the screen,
+which is the point of the system — and the reason it is the default is that anything else lets a deployment
+carry a file end to end without the optical path ever having been exercised.
 
-**Settings → Transfer channel** turns it off. On *camera only*, frames are still rendered, still counted,
-still displayed — and written nowhere. The only way to receive them is to point a camera at the screen.
+The sender can instead write every rendered frame into the shared directory as a PNG, which a receiver reading
+that directory picks up with no camera at all. That is the development channel and the offline round trip
+below: fast, deterministic, and a second invisible path carrying the same bytes, so the air gap it was meant
+to prove is not being tested while it is on.
+
+**Settings → Transfer channel** switches between them.
 
 ```
+OTP_SENDER_DISPLAY_SINK=none    # default: render and display only; nothing on disk
 OTP_SENDER_DISPLAY_SINK=file    # write PNGs into DISPLAY_DIR
-OTP_SENDER_DISPLAY_SINK=none    # render and display only; nothing on disk
+
+OTP_RECEIVER_CAPTURE_SOURCE=browser   # default: frames posted by a page holding the camera
+OTP_RECEIVER_CAPTURE_SOURCE=camera    # a Video4Linux device, which a container needs passed in
+OTP_RECEIVER_CAPTURE_SOURCE=file      # read the PNGs the sender's file sink wrote
 ```
+
+The two go together: a sender on `none` and a receiver on `file` will sit there transferring nothing, because
+nothing is being written for it to read.
 
 Like the grid, the sink is read once at startup, so it **takes effect on the next restart** rather than live,
 and the change is refused outright while any transfer is in flight.

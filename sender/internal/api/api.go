@@ -123,6 +123,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/display/next", s.nextDisplayFrame)
 	mux.HandleFunc("GET /api/v1/display/frame.png", s.getDisplayFrameImage)
 
+	// Driving the display by hand: stop it, step it, let it go. Same verb style as the transfer
+	// controls, because they are the same kind of thing — an operator taking over from a loop.
+	mux.HandleFunc("POST /api/v1/display/hold", s.holdDisplay)
+	mux.HandleFunc("POST /api/v1/display/release", s.releaseDisplay)
+	mux.HandleFunc("POST /api/v1/display/frame", s.showFrame)
+
 	// The display's own settings: frame rate now, geometry when nothing is in flight.
 	mux.HandleFunc("GET /api/v1/settings", s.getSettings)
 	mux.HandleFunc("PATCH /api/v1/settings", s.updateSettings)

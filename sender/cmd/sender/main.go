@@ -228,6 +228,20 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 		}()
 	}
 
+	// A transfer that was displaying when this process last stopped is given its display loop back.
+	//
+	// The loop is a goroutine, so it dies with the process; the status is a row, so it does not. Without
+	// this, a restart mid-transfer leaves a transmission claiming to be transmitting with nothing behind
+	// it — the display stays blank, the transfer never completes, and every status the API reports says it
+	// is in flight. It cannot be rescued through the API either, because start takes only a ready transfer
+	// and resume only a paused one, so the single status that needs it is the one neither accepts.
+	//
+	// Re-displaying from the beginning of what is outstanding is the correct recovery rather than a
+	// compromise: acknowledgements are durable, so the scheduler shows only unacknowledged chunks, and it
+	// deliberately keeps its retransmission timers in memory because a restart cannot know what the
+	// receiver saw while it was gone.
+	resumeInterruptedDisplays(ctx, st, transmit, log.Logger)
+
 	server := &http.Server{
 		Addr: cfg.Addr(),
 		Handler: api.New(api.Options{
@@ -280,6 +294,42 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 	// problem: the sink renames into place, so the receiver sees a complete frame or none.
 	displays.Wait()
 	return nil
+}
+
+// resumeInterruptedDisplays gives a display loop back to every transfer that was mid-display when this
+// process last stopped, and reports how many it started.
+//
+// Only the transmitting status, because only it is a broken promise. A transmitting row asserts that
+// something is putting frames on the screen, and after a restart that assertion is false — which is exactly
+// the condition to repair. Every other unfinished status is waiting for something that is still true: a ready
+// transfer prepared with autostart=false is waiting for an operator to press start, and displaying it because
+// the process happened to restart would put a file on a screen they had chosen not to put there yet. A paused
+// one is waiting for the same reason, more explicitly.
+//
+// A failure here is logged and not fatal. The transfers are recoverable by hand, and a sender that refuses to
+// boot because it could not read one row is worse than one that boots and says what it could not resume.
+func resumeInterruptedDisplays(ctx context.Context, st *store.Store, transmit func(context.Context, uuid.UUID), log *zap.Logger) int {
+	// The limit is stated rather than left to default, which pages at a hundred. A hundred transfers
+	// interleaving on one screen is not a real deployment, so the difference will never be reached — but a
+	// default that quietly drops the hundred-and-first would leave exactly the orphan this exists to
+	// prevent, and be invisible when it did.
+	const allInterrupted = 1000
+
+	interrupted, err := st.Transmissions.List(ctx,
+		[]store.TransmissionStatus{store.TxTransmitting}, allInterrupted, 0)
+	if err != nil {
+		log.Warn("could not look for transfers interrupted by a restart", zap.Error(err))
+		return 0
+	}
+
+	for _, tx := range interrupted {
+		log.Info("resuming a transfer interrupted by a restart",
+			zap.String("transmission", tx.ID.String()),
+			zap.Int("acked_chunks", tx.AckedChunks),
+			zap.Int("chunk_count", tx.ChunkCount))
+		transmit(ctx, tx.ID)
+	}
+	return len(interrupted)
 }
 
 // withStoredSettings lays the operator's stored display settings over a freshly loaded configuration.

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -91,6 +93,15 @@ type displayStatus struct {
 	// while looking at a frame that has not changed — a keep-alive repeat looks identical otherwise.
 	Shown int64 `json:"frames_shown"`
 
+	// Held is whether an operator has stopped the display, and HeldSince when that started.
+	//
+	// Reported rather than left for the caller to remember, because the hold belongs to the display and
+	// not to whichever page happened to set it: a second tab, or the same page after a reload, has to be
+	// able to find out. Without it a viewer could only infer a hold from frames that stopped arriving,
+	// which is also what a dead channel looks like.
+	Held      bool       `json:"held"`
+	HeldSince *time.Time `json:"held_since,omitempty"`
+
 	Frame *displayFrame `json:"frame,omitempty"`
 }
 
@@ -140,7 +151,7 @@ func (s *Server) getDisplay(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Current()
 	frame, at, have := s.display.Current()
 
-	s.respond(w, http.StatusOK, displayStatus{
+	status := displayStatus{
 		Sink:     s.display.Name(),
 		Live:     have,
 		FPS:      cfg.Display.FPS,
@@ -152,7 +163,123 @@ func (s *Server) getDisplay(w http.ResponseWriter, r *http.Request) {
 		BitDepth: cfg.Optical.BitDepth,
 		Shown:    s.display.Shown(),
 		Frame:    s.frameView(frame, at, have, wantsImage(r)),
-	})
+	}
+	if held, since := s.display.HoldState(); held {
+		status.Held, status.HeldSince = true, &since
+	}
+
+	s.respond(w, http.StatusOK, status)
+}
+
+// holdDisplay stops the display advancing, so an operator can look at one frame.
+//
+// The hold is on the display rather than on the page because the page is not a viewer: under camera mode it
+// is the transmitting end of the channel, the surface a camera is pointed at. A pause that froze one browser
+// would leave the phone acting as the display still advancing, and the operator aiming at something other
+// than what they were looking at.
+//
+// Idempotent, and so is release. Two tabs or two operators pressing the same button is not an error, and
+// answering with a conflict would mean the UI had to track state it cannot reliably know.
+func (s *Server) holdDisplay(w http.ResponseWriter, r *http.Request) {
+	if s.display == nil {
+		s.fail(w, http.StatusNotImplemented, "this build has no live display", nil)
+		return
+	}
+	s.display.Hold()
+	s.log.Info("display held")
+	s.getDisplay(w, r)
+}
+
+// releaseDisplay lets the display advance again.
+//
+// Where it goes next is the scheduler's business, not the operator's: a running transfer resumes on its own
+// choice of frame within a frame interval, replacing whatever was being looked at. That is right — the
+// scheduler shows what the transfer still needs, and a manual pick is a look at the channel rather than an
+// instruction about what to send.
+func (s *Server) releaseDisplay(w http.ResponseWriter, r *http.Request) {
+	if s.display == nil {
+		s.fail(w, http.StatusNotImplemented, "this build has no live display", nil)
+		return
+	}
+	s.display.Release()
+	s.log.Info("display released")
+	s.getDisplay(w, r)
+}
+
+// showFrameRequest names the frame to put on the display.
+type showFrameRequest struct {
+	TransmissionID string `json:"transmission_id"`
+	FrameNumber    *int   `json:"frame_number"`
+}
+
+// showFrame puts a stored frame on the display, so an operator can step through a transmission by hand.
+//
+// It requires the display to be held, and that is the whole rule. The permissive alternative — allow it
+// whenever no scheduler could overwrite the choice — makes the same request succeed or fail depending on
+// transfer status the operator is not looking at, and a control that works only sometimes is worse than one
+// that says what it needs. While a scheduler runs it would overwrite the choice within a frame interval, so
+// a step that "succeeded" would be a control that appears to work and does not.
+func (s *Server) showFrame(w http.ResponseWriter, r *http.Request) {
+	if s.display == nil {
+		s.fail(w, http.StatusNotImplemented, "this build has no live display", nil)
+		return
+	}
+
+	// A uuid and an integer, so the bound is generous at a kilobyte.
+	var request showFrameRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&request); err != nil {
+		s.fail(w, http.StatusBadRequest, "the request body is not the JSON this expects", err)
+		return
+	}
+
+	id, err := uuid.Parse(request.TransmissionID)
+	if err != nil {
+		s.fail(w, http.StatusBadRequest, "the transfer id is not a UUID", err)
+		return
+	}
+	if request.FrameNumber == nil || *request.FrameNumber < 0 {
+		s.fail(w, http.StatusBadRequest, "the frame number must be a non-negative integer", nil)
+		return
+	}
+
+	if held, _ := s.display.HoldState(); !held {
+		s.fail(w, http.StatusConflict,
+			"the display is running: hold it before stepping through frames, or the scheduler will "+
+				"replace the frame you chose within a frame interval", nil)
+		return
+	}
+
+	frame, err := s.store.Frames.GetByNumber(r.Context(), id, *request.FrameNumber)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.fail(w, http.StatusNotFound, "no such frame", err)
+			return
+		}
+		s.fail(w, http.StatusInternalServerError, "could not read the frame", err)
+		return
+	}
+
+	body, err := objectstore.GetBytes(r.Context(), s.objects, frame.StoredPath, maxFrameImageBytes)
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, "could not read the frame image", err)
+		return
+	}
+
+	if err := s.display.Show(r.Context(), optical.Frame{
+		Number:       frame.FrameNumber,
+		Transmission: frame.TransmissionID,
+		Manifest:     frame.IsManifest,
+		WidthPx:      frame.WidthPx,
+		HeightPx:     frame.HeightPx,
+		PNG:          body,
+	}); err != nil {
+		s.fail(w, http.StatusInternalServerError, "could not put the frame on the display", err)
+		return
+	}
+
+	// Not counted as a display of the frame: MarkDisplayed feeds the audit trail's record of what the
+	// channel carried, and an operator looking at a frame is not the channel carrying it.
+	s.getDisplay(w, r)
 }
 
 // nextDisplayFrame blocks until the display moves past the sequence the caller last saw.

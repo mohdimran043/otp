@@ -147,6 +147,12 @@ var (
 	ErrPaused    = errors.New("scheduler: the transfer was paused")
 )
 
+// errStopWhileHeld ends a park because an operator stopped the transfer while the display was held.
+//
+// Internal and never returned to a caller: it only has to be distinguishable from nil, because the loop's
+// answer to it is to go back to the top and let the ordinary status handling do the real work.
+var errStopWhileHeld = errors.New("scheduler: the transfer was stopped while the display was held")
+
 // New returns a scheduler.
 func New(st *store.Store, objects objectstore.Store, sink optical.Sink, cfg *config.Watcher, log *zap.Logger) *Scheduler {
 	return &Scheduler{
@@ -265,6 +271,34 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 			return stats, ErrPaused
 		}
 
+		// An operator looking at a frame stops the display here, before anything is chosen or shown.
+		//
+		// Parking rather than looping-and-skipping, so that a held display costs neither a database query
+		// nor a tick of the retransmission clock. What it does cost is forgiven on the way out: the receiver
+		// was shown nothing new while the screen was held, so its silence must not be read as loss.
+		heldFor, err := s.parkWhileHeld(ctx, func() error {
+			status, err := s.store.Transmissions.Status(ctx, transmissionID)
+			if err != nil {
+				return err
+			}
+			if status == store.TxCancelled || status == store.TxPaused {
+				return errStopWhileHeld
+			}
+			return nil
+		})
+		s.forgiveHold(heldFor)
+		if err != nil {
+			if ctx.Err() != nil {
+				stats.Duration = time.Since(started)
+				s.closeSession(ctx, session.ID, "stopped")
+				return stats, ctx.Err()
+			}
+			// A stop was requested, or the status could not be read. Either way the top of the loop is
+			// where both are already handled properly, with the session closed and the reason recorded —
+			// so go back to it rather than growing a second copy of that logic here.
+			continue
+		}
+
 		pending, err := s.store.Chunks.Pending(ctx, transmissionID, cfg.Display.WindowSize)
 		if err != nil {
 			return stats, err
@@ -378,6 +412,83 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 			}
 			return stats, fmt.Errorf("%w: %s", ErrStalled, reason)
 		}
+	}
+}
+
+// holdable is a display that can be stopped, as the scheduler needs it.
+//
+// A narrow interface asserted at use rather than a method on Sink, so that a sink whose business is writing
+// files or drawing textures is not made to grow an opinion about operators looking at frames. A sink that
+// does not offer a hold is simply never parked on.
+type holdable interface {
+	HoldState() (bool, time.Time)
+}
+
+// holdPoll is how often the scheduler looks up while parked.
+//
+// A second, because what it is really deciding is how long an operator waits for a cancel to be obeyed while
+// the display is held. Long enough that a held display costs nothing, short enough that a stop feels like one.
+const holdPoll = time.Second
+
+// parkWhileHeld blocks while the display is held, reporting how long it waited.
+//
+// It is a wait with a wake-up rather than a blocking receive because a held display must still be
+// controllable: an operator who holds the screen and then cancels the transfer should not have to release it
+// first to be obeyed. onTick runs on every wake-up and its error ends the park, which is how a cancel or a
+// pause reaches a scheduler that is otherwise doing nothing.
+//
+// The duration is measured from when this scheduler started waiting rather than from when the hold began.
+// Those differ when a display is already held as a transfer starts, and the shorter one is the honest answer:
+// it is the time this scheduler was actually prevented from showing anything, and forgiving more than that
+// would suppress retransmissions the channel genuinely owes.
+func (s *Scheduler) parkWhileHeld(ctx context.Context, onTick func() error) (time.Duration, error) {
+	display, ok := s.sink.(holdable)
+	if !ok {
+		return 0, nil
+	}
+	if held, _ := display.HoldState(); !held {
+		return 0, nil
+	}
+
+	started := time.Now()
+	s.log.Info("display held, waiting")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return time.Since(started), ctx.Err()
+		case <-time.After(holdPoll):
+		}
+
+		if err := onTick(); err != nil {
+			return time.Since(started), err
+		}
+		if held, _ := display.HoldState(); !held {
+			held := time.Since(started)
+			s.log.Info("display released", zap.Duration("held_for", held))
+			return held, nil
+		}
+	}
+}
+
+// forgiveHold moves every chunk's last-displayed time forward by however long the display was held.
+//
+// Without this the hold destroys the transfers it exists to help. The scheduler reads silence as loss — a
+// chunk unacknowledged for longer than Ack.Timeout is assumed missed — and that reading is correct only while
+// something is being shown. A hold longer than the timeout would otherwise make every outstanding chunk look
+// lost at the instant of release: all of them re-sent together, attempts climbing in step, and a long enough
+// hold walking the transfer into ErrStalled while the operator is carefully stepping through it.
+//
+// The receiver's silence during a hold means only that it was shown nothing new. Time is forgiven; attempts
+// are not, because those count what the sender genuinely tried and a hold does not undo a send.
+func (s *Scheduler) forgiveHold(heldFor time.Duration) {
+	if heldFor <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for esi, at := range s.sent {
+		s.sent[esi] = at.Add(heldFor)
 	}
 }
 

@@ -289,9 +289,18 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		// Only when the request is silent about depth. A depth named explicitly is the operator saying something
 		// specific, and is left to validation to accept or refuse on its own terms — papering over a genuine
 		// mistake by substituting something that happens to work would be worse than the error.
+		// Adopted onto the request, not just onto the configuration, so that the depth is stored beside the
+		// encoder that chose it. The two constrain each other, and the store is written from the fields the
+		// request named — so deriving the depth here and leaving the request silent kept the pair valid in
+		// memory while the row still held the previous encoding's depth. That divergence is invisible until a
+		// restart, and then it is total: the startup overlay validates the stored settings as a whole and
+		// drops all of them when they do not hold together, so one stale depth silently reverts every setting
+		// the operator ever changed — the frame rate, the geometry, and the display sink with them.
 		if request.BitDepth == nil {
 			if enc, err := encoding.ByName(next.Optical.Encoder); err == nil {
 				next.Optical.BitDepth = int(enc.DefaultBitDepth())
+				adopted := next.Optical.BitDepth
+				request.BitDepth = &adopted
 			}
 		}
 	}

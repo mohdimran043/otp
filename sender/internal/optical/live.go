@@ -30,6 +30,19 @@ type Live struct {
 	// receiver watching, and none of them should be able to starve another by arriving first.
 	changed chan struct{}
 
+	// held stops the display advancing on its own, and heldSince is when that started.
+	//
+	// It is here, beside the current frame, because there is one screen and there can be several
+	// schedulers: two concurrent transfers interleave on the same display, so "stop the display" is not a
+	// property any one of them can own. Both sides already hold this object — the API server as its
+	// display, every scheduler as its sink — so putting the state here is what lets them agree without
+	// either learning about the other.
+	//
+	// Guarded by mu, the same lock as the current frame, because a viewer asking what is on the screen and
+	// whether it is held wants one answer rather than two taken a moment apart.
+	held      bool
+	heldSince time.Time
+
 	// next assigns display sequence numbers, and it lives here because there is exactly one display.
 	//
 	// This was a per-scheduler counter, and that was a real bug rather than an untidiness. A scheduler
@@ -79,6 +92,45 @@ func (l *Live) Show(ctx context.Context, frame Frame) error {
 
 	close(previous)
 	return nil
+}
+
+// Hold stops the display advancing on its own, so that an operator can look at one frame.
+//
+// It does not stop Show, and that is deliberate rather than an oversight. Stepping frames by hand puts them
+// on the screen through the same Show path, so a hold that blocked it would deadlock the one thing it exists
+// to enable — the operator would freeze the display and then be unable to change what is on it. The hold is
+// a statement about who may drive the display: honoured by the scheduler, ignored by a deliberate manual
+// show. Enforcement belongs to the caller that agreed to be bound by it.
+//
+// Idempotent, and the first hold's timestamp is the one that survives. Two operators or two browser tabs
+// pressing the same button is not an error, and restarting the clock on the second press would under-report
+// how long the channel has been stopped — which is the number the scheduler uses to decide what not to
+// charge the receiver for.
+func (l *Live) Hold() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.held {
+		return
+	}
+	l.held, l.heldSince = true, time.Now()
+}
+
+// Release lets the display advance again. Idempotent, for the same reason Hold is.
+func (l *Live) Release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.held, l.heldSince = false, time.Time{}
+}
+
+// HoldState reports whether the display is held and since when.
+//
+// The time is part of the answer because the useful question is rarely "is it held" on its own: a scheduler
+// resuming needs to know how long it was stopped, and an operator looking at a still picture needs to be
+// able to tell a hold from a channel that has died.
+func (l *Live) HoldState() (bool, time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.held, l.heldSince
 }
 
 // Shown is how many frames the wrapped sink has displayed.

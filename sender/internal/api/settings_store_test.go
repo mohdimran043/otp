@@ -115,19 +115,21 @@ func TestPatchingStoresOnlyWhatTheRequestNamed(t *testing.T) {
 func TestStoredSettingsSurviveAConfigReload(t *testing.T) {
 	h := newSettingsHarness(t)
 
-	rec := patchSettings(t, h, map[string]string{"sink": "none"})
+	// Stored as "file", against a default of "none", so the assertion at the end can only pass if the
+	// stored value is what came through — asking for the default back would prove nothing either way.
+	rec := patchSettings(t, h, map[string]string{"sink": "file"})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	// A restart: the configuration comes back from file and environment knowing nothing of the change.
 	restarted := config.Default()
-	require.Equal(t, "file", restarted.Display.Sink, "the configured default is still file")
+	require.Equal(t, "none", restarted.Display.Sink, "the configured default is camera-only")
 
 	stored, err := h.store.DisplaySettings.All(context.Background())
 	require.NoError(t, err)
 	overlaid, err := restarted.WithOverrides(stored)
 	require.NoError(t, err)
 
-	require.Equal(t, "none", overlaid.Display.Sink,
+	require.Equal(t, "file", overlaid.Display.Sink,
 		"the operator's channel choice has to come back after a restart; before this it did not")
 }
 
