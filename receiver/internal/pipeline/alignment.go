@@ -137,57 +137,7 @@ const (
 	// decoder copes well past this; the point of stopping here is that squaring up is usually the
 	// easiest correction to make and it buys margin against everything else.
 	maxPerspective = 0.20
-
-	// minModulePixels is the smallest cell a *binary* frame reads reliably. Below about three pixels
-	// a cell cannot survive a lens, a Bayer filter and a JPEG in series.
-	minModulePixels = 3.0
-
-	// colourModulePixels is the same figure for a frame carrying more than one bit per cell, and it
-	// is far larger for a reason worth stating, because three pixels looks sufficient and is not.
-	//
-	// A binary cell needs only to land on the correct side of one threshold, so a coarse read of it
-	// is still the right read. A colour cell has to be matched against eight palette entries whose
-	// nearest neighbours are 86 apart in weighted distance, which makes it a measurement rather than
-	// a decision, and the accuracy of that measurement is set by how many pixels were averaged to
-	// make it. The sampler averages a window a quarter of a cell wide, so pixels per cell decides
-	// the noise directly: at a module of 5.9 that window is nine pixels, and measured on real
-	// captures the colour landed a mean weighted distance of 53 from its palette entry — against a
-	// margin of 86, so nearly two thirds of cells were closer to a neighbour than the noise. Every
-	// one of those frames located its geometry perfectly and failed its payload CRC.
-	//
-	// Ten pixels puts the window at twenty-five and cuts that noise by two thirds. It is a
-	// threshold worth being told about while there is still a chance to step forward, which is the
-	// whole point of saying it here rather than in a decode failure five seconds later.
-	colourModulePixels = 10.0
-
-	// maxColourModulePixels is where being closer starts costing more than it gains.
-	//
-	// This is the counter-intuitive end of the same measurement, and it caught out the operator and
-	// me both. More pixels per cell is better right up until the camera is resolving the panel's own
-	// pixel and subpixel structure rather than the frame drawn on it, at which point a cell stops
-	// being one colour and starts being a stripe pattern. Measured back to back on the same rig and
-	// the same transfer encoding: at 11.2 px per cell six frames of six decoded; at 13.6, closer and
-	// with more apparent detail, none of six did — and the decoder's own contrast figure fell from
-	// 176 to 160 while moving *closer*, which is the tell. Contrast rising as you approach is normal;
-	// contrast falling means the extra resolution is being spent on the panel rather than the frame.
-	//
-	// Advising a band rather than a floor is the point. A floor alone reported "good" at 13.6 while
-	// nothing decoded, which is the least useful thing an aiming display can do.
-	maxColourModulePixels = 13.0
 )
-
-// requiredModule is the cell size this frame's encoding needs, in captured pixels.
-//
-// Read from the header the decoder just recovered rather than configured, so it follows the sender
-// without the receiver having to be told what the sender is doing. A depth of zero means the header
-// was not read, and the binary figure is the safe assumption: it is the lower bar, so it advises
-// someone to keep moving closer rather than telling them they have arrived when they have not.
-func requiredModule(bitDepth uint8) float64 {
-	if bitDepth > 1 {
-		return colourModulePixels
-	}
-	return minModulePixels
-}
 
 // measureAlignment turns one frame's decode result into aiming advice.
 //
@@ -233,9 +183,13 @@ func measureAlignment(img image.Image, g *protocol.Geometry, decoded bool) Align
 
 	// What this frame's own encoding needs, which is several times the binary figure when the
 	// payload is in colour. Reported so the page can show the target alongside the measurement.
-	a.RequiredModulePixels = requiredModule(g.Header.BitDepth)
+	// From the shared model, not a local constant. Two copies of "how many pixels does a cell need" is
+	// exactly the drift this was consolidated to prevent, and it drifted anyway: the receiver's own
+	// constant said 3 for binary while the sender's check said 4, so an operator could be told a geometry
+	// was fine by one and refused by the other for the same frame.
+	a.RequiredModulePixels = readable.Required(g.Header.BitDepth)
 	if g.Header.BitDepth > 1 {
-		a.MaxModulePixels = maxColourModulePixels
+		a.MaxModulePixels = readable.MaxUsefulPixels
 	}
 
 	// What this capture can do at this geometry, from the shared model both sides use. Computed here

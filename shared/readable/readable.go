@@ -33,15 +33,29 @@ import (
 
 // Pixels per cell each modulation needs, measured on this project's own captures.
 const (
-	// BinaryPixels is the smallest cell a one-bit frame reads reliably. A binary cell is thresholded —
-	// above or below a level — so it survives on very little.
-	BinaryPixels = 4.0
+	// BinaryPixels is the smallest cell a one-bit frame reads reliably. A binary cell only has to land on
+	// the correct side of one threshold, so a coarse read of it is still the right read — below about three
+	// pixels it cannot survive a lens, a Bayer filter and a JPEG in series.
+	//
+	// Three rather than four, and the provenance matters. Three is the figure the receiver's aiming display
+	// carried from the start, with that reasoning attached; four was an estimate written here later, and for
+	// a while the two disagreed — the receiver told an operator a binary geometry needed 3 while the sender
+	// refused it for not reaching 4. Neither number is backed by a decode-rate sweep the way the colour one
+	// is, so the one with the recorded reasoning wins until someone measures it.
+	BinaryPixels = 3.0
 
-	// ColourPixels is what a multi-level cell needs, and it is several times the binary figure for a
-	// reason that is not obvious. A colour cell is not thresholded but *measured*, against eight palette
-	// entries a fixed distance apart, so its accuracy is set by how many pixels were averaged into it.
-	// Measured: 12 pixels a cell decoded every frame, 8.5 decoded about one in a hundred, 5.9 never
-	// decoded at all.
+	// ColourPixels is what a multi-level cell needs, and it is several times the binary figure for a reason
+	// worth stating, because three pixels looks sufficient and is not.
+	//
+	// A colour cell is matched against eight palette entries whose nearest neighbours sit 86 apart in
+	// weighted distance, which makes reading it a measurement rather than a decision — and the accuracy of
+	// that measurement is set by how many pixels were averaged to make it. The sampler averages a window a
+	// quarter of a cell wide, so pixels per cell decides the noise directly: at 5.9 that window is nine
+	// pixels, and the colour landed a mean weighted distance of 53 from its palette entry against a margin
+	// of 86. Every one of those frames located its geometry perfectly and failed its payload CRC.
+	//
+	// Measured end to end: 12 pixels a cell decoded every frame, 8.5 about one in a hundred, 5.9 never. Ten
+	// puts the sampling window at twenty-five pixels and cuts that noise by two thirds.
 	ColourPixels = 10.0
 
 	// MarginalFraction is where "reliable" ends and "occasionally" begins, as a fraction of Required.
@@ -57,9 +71,15 @@ const (
 	// from "one in a hundred" toward "never".
 	MarginalFraction = 0.8
 
-	// MaxUsefulPixels is where more resolution starts to hurt. Past about this, a sensor resolves the
-	// display's own pixel structure — the subpixel stripes of an LCD — and a cell stops being one colour.
-	// Closer is not better.
+	// MaxUsefulPixels is where being closer starts costing more than it gains, and it is the
+	// counter-intuitive end of the same measurement.
+	//
+	// More pixels per cell is better right up until the camera resolves the panel's own pixel and subpixel
+	// structure rather than the frame drawn on it, at which point a cell stops being one colour and becomes
+	// a stripe pattern. Measured back to back on the same rig and encoding: at 11.2 px per cell six frames
+	// of six decoded; at 13.6, closer and with more apparent detail, none of six did — while the decoder's
+	// contrast figure fell from 176 to 160 as the camera moved *closer*, which is the tell. Contrast rising
+	// as you approach is normal; contrast falling means the resolution is being spent on the panel.
 	MaxUsefulPixels = 13.0
 )
 
