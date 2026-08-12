@@ -155,3 +155,54 @@ func TestBandChecksumMatchesDescriptor(t *testing.T) {
 	// descriptor's own test pins.
 	require.Equal(t, uint16(0x29B1), encoding.CRC16ForTest([]byte("123456789")))
 }
+
+// TestValueWithMarginAgreesWithValue is the property that makes the margin safe to add: the
+// symbol chosen must be identical to the one Value chooses, or a recovery layer built on it
+// would silently disagree with the decoder it is trying to help.
+func TestValueWithMarginAgreesWithValue(t *testing.T) {
+	for _, p := range palettes() {
+		t.Run(p.Name, func(t *testing.T) {
+			for r := 0; r < 256; r += 17 {
+				for g := 0; g < 256; g += 17 {
+					for b := 0; b < 256; b += 17 {
+						c := color.RGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 255}
+						best, second, margin := p.ValueWithMargin(c)
+						require.Equal(t, p.Value(c), best, "sample %v", c)
+						require.NotEqual(t, best, second, "sample %v", c)
+						require.GreaterOrEqual(t, margin, 0.0, "sample %v", c)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestValueWithMarginZeroBetweenEntries checks the case the whole idea rests on: a sample
+// exactly between two palette entries is a coin toss, and must report a margin of nearly zero
+// so a candidate search ranks it first.
+func TestValueWithMarginZeroBetweenEntries(t *testing.T) {
+	p := encoding.Color8Palette
+	a, b := p.Colors[0], p.Colors[1]
+	mid := color.RGBA{
+		R: uint8((int(a.R) + int(b.R)) / 2),
+		G: uint8((int(a.G) + int(b.G)) / 2),
+		B: uint8((int(a.B) + int(b.B)) / 2),
+		A: 255,
+	}
+	_, _, margin := p.ValueWithMargin(mid)
+	require.Less(t, margin, 1.0, "a midpoint sample should have almost no margin")
+}
+
+// TestValueWithMarginAtPaletteEntry checks the other end: an exact palette colour is maximally
+// confident, and its margin is at least the palette's own separation figure.
+func TestValueWithMarginAtPaletteEntry(t *testing.T) {
+	for _, p := range []encoding.Palette{encoding.Color8Palette, encoding.GrayPalette(2)} {
+		t.Run(p.Name, func(t *testing.T) {
+			for i, c := range p.Colors {
+				best, _, margin := p.ValueWithMargin(c)
+				require.Equal(t, uint32(i), best)
+				require.GreaterOrEqual(t, margin, p.MinSeparation()-1e-9)
+			}
+		})
+	}
+}

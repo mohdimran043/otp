@@ -55,6 +55,49 @@ func (p Palette) Value(c color.RGBA) uint32 {
 	return uint32(best)
 }
 
+// ValueWithMargin is Value with the confidence of that decision attached.
+//
+// The margin is the distance to the second-nearest entry less the distance to the
+// nearest, in the same weighted units as MinSeparation. Zero means the sample sits
+// exactly between two symbols and the read is a coin toss; a margin approaching
+// MinSeparation means it landed on an entry with nothing else nearby.
+//
+// It exists because Value discards this, and what it discards is the only thing
+// separating a cell the sampler read confidently from one it guessed. Measured on a
+// marginal handheld capture, the mean distance to the nearest entry was 53 against a
+// colour8 separation of 86 — a channel sitting on the decision boundary, where a few
+// cells per frame are coin tosses and the rest are comfortable. That is a recoverable
+// failure and it currently reads as a total one: the payload misses its CRC by three
+// cells and the whole frame is discarded.
+//
+// Distances are square-rooted here where Value leaves them squared, so the figure is
+// directly comparable with MinSeparation. Value is deliberately *not* reimplemented in
+// terms of this: that root would then be paid on every cell of every frame on the hot
+// path, to produce a number the hot path never looks at.
+func (p Palette) ValueWithMargin(c color.RGBA) (best, second uint32, margin float64) {
+	bestDist, secondDist := math.Inf(1), math.Inf(1)
+	for i, ref := range p.Colors {
+		dr := float64(c.R) - float64(ref.R)
+		dg := float64(c.G) - float64(ref.G)
+		db := float64(c.B) - float64(ref.B)
+		d := 0.299*dr*dr + 0.587*dg*dg + 0.114*db*db
+		switch {
+		case d < bestDist:
+			second, secondDist = best, bestDist
+			best, bestDist = uint32(i), d
+		case d < secondDist:
+			second, secondDist = uint32(i), d
+		}
+	}
+	// A palette with one entry has no second choice and therefore no margin. Not
+	// reachable through any registered encoding, but returning a garbage second symbol
+	// here would put a wrong value into a candidate search rather than failing visibly.
+	if math.IsInf(secondDist, 1) {
+		return best, best, 0
+	}
+	return best, second, math.Sqrt(secondDist) - math.Sqrt(bestDist)
+}
+
 // MinSeparation returns the smallest weighted distance between any two entries,
 // which is the palette's noise margin.
 func (p Palette) MinSeparation() float64 {
