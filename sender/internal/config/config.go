@@ -172,6 +172,30 @@ type Optical struct {
 	CellPixels int `yaml:"cell_pixels"`
 	QuietZone  int `yaml:"quiet_zone"`
 
+	// CameraShortSidePixels is the short side, in pixels, of the picture the receiving camera takes.
+	//
+	// The sender cannot measure it — the camera is on the other side of an air gap — so it is configured,
+	// and it exists to answer one question before a transfer is spent rather than after: can the geometry
+	// this transfer is about to commit to actually be read?
+	//
+	// A frame is square, so its width on the sensor is bounded by the short side of the picture. Divide
+	// that by the grid plus its quiet zone and you have the most pixels per cell that camera can ever
+	// produce, at any distance, with perfect aim. Measured, a 128-cell grid on a 1080-wide capture tops
+	// out at 8.2 against the 10 colour8 needs — and the transfer failed after sending chunk 0 eleven times,
+	// which is an expensive way to learn arithmetic.
+	//
+	// Zero disables the check, which is right for a file-loopback channel where there is no camera at all.
+	CameraShortSidePixels int `yaml:"camera_short_side_pixels"`
+
+	// CameraLongSidePixels is the other dimension of that picture.
+	//
+	// Both are needed rather than just the short one, because the difference between them is the single
+	// cheapest fix available to an operator. A square frame is bounded by whichever side is shorter, so
+	// turning the camera ninety degrees can be worth half again as many pixels per cell — measured, 8.2
+	// against 14.5 at a 128-cell grid — without moving, reconfiguring or resending anything. Knowing only
+	// the short side, the advice cannot be given at all.
+	CameraLongSidePixels int `yaml:"camera_long_side_pixels"`
+
 	// EncryptionKeyHex, when set, encrypts every payload. It is 64 hex characters.
 	EncryptionKeyHex string `yaml:"encryption_key_hex"`
 
@@ -368,11 +392,16 @@ func Default() Config {
 				DataShards:   32,
 				ParityShards: 8,
 			},
-			GridWidth:        128,
-			GridHeight:       128,
-			CellPixels:       8,
-			QuietZone:        2,
-			ManifestInterval: 64,
+			GridWidth:  128,
+			GridHeight: 128,
+			CellPixels: 8,
+			QuietZone:  2,
+			// 1080, because the receiver browser capture is pinned to 1920x1080 and a square frame is
+			// bounded by the short side however the device is held. Raise it for a higher-resolution
+			// camera; zero disables the check, which is right for a file-loopback channel.
+			CameraShortSidePixels: 1080,
+			CameraLongSidePixels:  1920,
+			ManifestInterval:      64,
 		},
 		Display: Display{
 			Sink:       "none",

@@ -28,6 +28,7 @@ import (
 	"github.com/opticaltransport/otp/shared/encoding"
 	"github.com/opticaltransport/otp/shared/fec"
 	"github.com/opticaltransport/otp/shared/protocol"
+	"github.com/opticaltransport/otp/shared/readable"
 
 	"github.com/opticaltransport/otp/sender/internal/ackwatch"
 	"github.com/opticaltransport/otp/sender/internal/config"
@@ -530,8 +531,46 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 		return request, fmt.Errorf("grid %dx%d renders a %d×%d pixel frame, larger than any panel",
 			request.GridWidth, request.GridHeight, layout.ImageWidth(), layout.ImageHeight())
 	}
+	if err := validateGeometryForCamera(request, cfg, uint8(depth)); err != nil {
+		return request, err
+	}
 
 	return request, nil
+}
+
+// validateGeometryForCamera refuses a grid the receiving camera cannot resolve.
+//
+// Checked here, before a byte is encoded, because the alternative is discovering it afterwards and that has
+// now happened twice with the same file: a 128-cell grid against a 1080-pixel capture tops out at 8.2 pixels
+// a cell where colour8 needs 10, and the transfer retransmitted chunk 0 eleven times before failing. The
+// aiming display meanwhile advised "move closer" at 86% of the view already filled, which is advice that
+// cannot be followed — a frame is square, so its width is bounded by the short side of the picture.
+//
+// A floor rather than a prediction. It assumes the frame fills the camera's view and ignores blur, exposure
+// and compression, so a geometry that passes may still fail for other reasons while one that fails cannot
+// possibly work. That asymmetry is what makes it safe to refuse on: the check never rejects something that
+// would have worked.
+//
+// Its own function so the cases worth testing — specific geometries against specific captures — can be
+// exercised without going through the multipart form, which would test the parser instead.
+func validateGeometryForCamera(request TransferRequest, cfg config.Config, depth uint8) error {
+	short, long := cfg.Optical.CameraShortSidePixels, cfg.Optical.CameraLongSidePixels
+	if long < short {
+		// Given in either order, or only one given: a square frame is bounded by the smaller, and the
+		// larger is only used to say whether turning the camera would help.
+		long = short
+	}
+	if short <= 0 {
+		// No camera resolution configured, which is correct for a file-loopback channel: there is no sensor
+		// to be bounded by, and refusing a dense grid there would break a working development path.
+		return nil
+	}
+
+	assessment := readable.Assess(request.GridWidth, cfg.Optical.QuietZone, depth, short, long)
+	if assessment.Readable {
+		return nil
+	}
+	return fmt.Errorf("%s", assessment.Explain(request.GridWidth, depth))
 }
 
 // TransferStatus is what a caller sees when they ask how a transfer is going.

@@ -44,6 +44,11 @@ func TestParseTransferRequestEncryptionAndGrid(t *testing.T) {
 		Log:    zap.NewNop(),
 	})
 	cfg := config.Default()
+	// These cases are about whether a geometry fits a *panel* and carries its encoding — not about whether
+	// a camera can resolve it. Some of them deliberately use grids no camera could read (1024 cells at one
+	// pixel each), so the camera check is switched off here rather than weakened for everyone. Its own
+	// cases live in geometry_guard_test.go.
+	cfg.Optical.CameraShortSidePixels = 0
 
 	cases := []struct {
 		name    string
