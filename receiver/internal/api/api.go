@@ -72,6 +72,11 @@ type Server struct {
 	// when this build has no way to ask, which is treated as "no".
 	browserActive func() bool
 
+	// alignment reports how the camera was pointed for the most recent frame. It backs the aiming
+	// display: someone holding a phone at a monitor otherwise has nothing to go on but a decode rate
+	// that arrives seconds later and says nothing about which way to move.
+	alignment func() (pipeline.Alignment, bool)
+
 	// ingest runs one uploaded frame image through the live pipeline: store, decode, apply — the same
 	// path a captured frame takes, so acknowledgements, merge, and delivery all fire as normal. Nil when
 	// this build or deployment cannot take imports.
@@ -113,6 +118,10 @@ type Options struct {
 	// BrowserStats reports what the browser source has seen: frames handed to it, frames the blank-screen gate
 	// turned away, and frames dropped because the queue was full. Nil when this build has no way to ask.
 	BrowserStats func() (posted, gated, dropped int64)
+
+	// Alignment reports how the camera was pointed for the most recent frame, for the aiming display on
+	// the camera page. The bool is false before any frame has been decoded.
+	Alignment func() (pipeline.Alignment, bool)
 }
 
 // New returns a server.
@@ -131,6 +140,7 @@ func New(opts Options) *Server {
 		probe:         opts.Probe,
 		browserActive: opts.BrowserActive,
 		browserStats:  opts.BrowserStats,
+		alignment:     opts.Alignment,
 	}
 }
 
@@ -173,6 +183,10 @@ func (s *Server) Routes() http.Handler {
 
 	// The blank-screen threshold. Adjustable while aiming a camera, because when it is set too high there is
 	// nothing to look at: rejected frames reach neither the decoder nor the failure log.
+	// How the camera is pointed, for aiming it. Polled while someone is physically moving a phone,
+	// so it reports the last frame rather than an average: an average describes where the camera was.
+	mux.HandleFunc("GET /api/v1/capture/alignment", s.getAlignment)
+
 	mux.HandleFunc("GET /api/v1/capture/gate", s.getCaptureGate)
 	mux.HandleFunc("PUT /api/v1/capture/gate", s.setCaptureGate)
 

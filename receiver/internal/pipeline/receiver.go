@@ -51,6 +51,15 @@ type Receiver struct {
 	// rather than every attempt since the process started.
 	session atomic.Pointer[uuid.UUID]
 
+	// layout is the grid the last resolvable frame used, handed to the decoder so it can skip the
+	// descriptor read. See prepare for why that matters. Atomic for the same reason session is:
+	// every decode worker reads it for every frame.
+	layout atomic.Pointer[protocol.Layout]
+
+	// alignment is what the most recent frame said about how the camera is pointed, for the aiming
+	// display on the camera page. Last frame only, deliberately — see Alignment.
+	alignment atomic.Pointer[Alignment]
+
 	// started records when the first frame of a transmission was seen, so the result record can
 	// report throughput measured rather than estimated.
 	started map[uuid.UUID]time.Time
@@ -101,7 +110,7 @@ type Receiver struct {
 // New returns a receiver.
 func New(st *store.Store, objects, acks objectstore.Store, source Source, cfg *config.Watcher, log *zap.Logger) *Receiver {
 	current := cfg.Current()
-	return &Receiver{
+	r := &Receiver{
 		store:    st,
 		objects:  objects,
 		acks:     acks,
@@ -114,6 +123,27 @@ func New(st *store.Store, objects, acks objectstore.Store, source Source, cfg *c
 		injected: make(chan injectedFrame),
 		runDone:  make(chan struct{}),
 	}
+
+	// Seed the layout hint from configuration, when one is named.
+	//
+	// The hint is normally learned from the first frame that resolves, and that is the better source
+	// because it needs no configuration and follows the sender. But learning cannot start from
+	// nothing: the descriptor block is what a frame is discarded for failing, so a camera that has
+	// never once managed a clean read never learns and stays stuck there. Measured on a real
+	// installation, 33 of 54 frames located their geometry perfectly and every one of them died on
+	// the descriptor — the learned hint had nothing to learn from.
+	//
+	// Seeding breaks that circle without weakening anything. It is still only a hint: Locate tries
+	// it first and falls through to the descriptor search when it does not fit, and the first frame
+	// that resolves overwrites it.
+	if layout := current.Decoder.ExpectedLayout(); layout != nil {
+		r.layout.Store(layout)
+		r.log.Info("seeded the decoder's layout hint from configuration",
+			zap.Int("grid_width", layout.GridWidth),
+			zap.Int("grid_height", layout.GridHeight),
+			zap.Int("cell_pixels", layout.CellPixels))
+	}
+	return r
 }
 
 // Session is the capture session this receiver is recording under.
@@ -123,6 +153,21 @@ func (r *Receiver) Session() uuid.UUID {
 	}
 	return uuid.Nil
 }
+
+// Alignment is what the most recent captured frame said about how the camera is pointed.
+//
+// The second return is false when no frame has been decoded yet, which the caller must distinguish
+// from a frame that found nothing: "the camera has not started" and "the camera is running and sees
+// nothing" call for opposite responses from whoever is holding it.
+func (r *Receiver) Alignment() (Alignment, bool) {
+	if a := r.alignment.Load(); a != nil {
+		return *a, true
+	}
+	return Alignment{}, false
+}
+
+// ptr returns a pointer to v, for storing a freshly computed value in an atomic.Pointer.
+func ptr[T any](v T) *T { return &v }
 
 // RotateSession closes the current capture session and starts a new one.
 //
@@ -144,6 +189,14 @@ func (r *Receiver) RotateSession(ctx context.Context) (uuid.UUID, error) {
 	// Published before the old one is closed, so no frame is ever attributed to a session that has ended.
 	r.session.Store(&next.ID)
 	r.capturedSequence.Store(0)
+
+	// The aiming display describes a camera that is no longer running. Cleared rather than left, so
+	// that pressing Start shows "looking for the frame" instead of the verdict on the last frame of
+	// the previous attempt — which would be advice about where the camera used to be pointed.
+	//
+	// The learned layout is deliberately kept: it describes the sender's grid, which a new capture
+	// session on this side does not change.
+	r.alignment.Store(nil)
 
 	if previous != uuid.Nil {
 		if err := r.store.Sessions.Finish(ctx, previous, "stopped", "capture source changed"); err != nil {
@@ -508,8 +561,39 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 	}
 
 	cfg := r.cfg.Current()
-	frame, geometry, decodeErr := decodeFrame(capture.Image, cfg.LocateOptions())
+
+	// Hand the decoder the layout the last readable frame used.
+	//
+	// Without it every frame re-reads the grid descriptor from scratch, and the descriptor is a
+	// few dozen cells in the corner of the header band — small, and no more legible than anything
+	// else on a marginal capture. A frame whose fiducials were found and whose homography is
+	// perfectly good is thrown away entirely because that one block failed its CRC, which is a
+	// large loss for a small cause: it was measured turning nine of thirty otherwise-locatable
+	// frames into nothing.
+	//
+	// Learned rather than configured because the sender's grid is the sender's business and can
+	// change between transmissions, and a stale hint costs nothing: Locate tries it first and falls
+	// through to the descriptor search when it does not fit, so a wrong layout is one wasted
+	// attempt rather than a wrong read.
+	opts := cfg.LocateOptions()
+	if learned := r.layout.Load(); learned != nil {
+		opts.ExpectedLayout = learned
+	}
+
+	frame, geometry, decodeErr := decodeFrame(capture.Image, opts)
 	finder, timing, contrast := decodeQuality(geometry)
+
+	// Remember the layout of anything that resolved, including a frame that located and then failed
+	// its payload: the geometry was still read correctly, and that is all this is.
+	if geometry != nil {
+		layout := geometry.Layout
+		r.layout.Store(&layout)
+	}
+
+	// Recorded before the confidence floors below reject anything, because a frame held back for a
+	// low fiducial score is exactly the case the operator needs told about — it is the difference
+	// between "nearly aimed" and "not aimed", and the floors erase it.
+	r.alignment.Store(ptr(measureAlignment(capture.Image, geometry, decodeErr == nil)))
 
 	// The confidence floors are applied here rather than inside the decoder, because how much
 	// confidence is enough is a judgement about this installation rather than a property of the

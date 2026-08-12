@@ -266,6 +266,9 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 				last := browser.LastSeen()
 				return !last.IsZero() && time.Since(last) < browserActiveWindow
 			},
+			// Alignment is how the camera was pointed for the last frame, which is what turns aiming
+			// one at a display from guesswork into a direction to move in.
+			Alignment: receiver.Alignment,
 			// Imports replay a frame archive into the live pipeline, exactly as though a camera had
 			// seen each frame. Ingest is a method value on the running receiver, so it needs no
 			// wrapping — its signature already matches what the API package wants.
