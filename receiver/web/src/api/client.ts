@@ -48,6 +48,33 @@ export interface GateView {
   note: string
 }
 
+/** How the camera is pointed, as measured from the most recent captured frame. */
+export type AlignmentStatus = 'searching' | 'too_far' | 'too_close' | 'off_axis' | 'marginal' | 'good'
+
+export interface AlignmentView {
+  /** False before any frame has been measured in this session, and after a restart. */
+  live: boolean
+  locked: boolean
+  decoded: boolean
+  /** How much of the view the grid spans, 0..1. */
+  fill: number
+  module_pixels: number
+  /** What this frame's encoding needs. Colour needs several times what black and white does. */
+  required_module_pixels: number
+  /** Upper end of the target band; 0 when the encoding has no useful upper bound. */
+  max_module_pixels: number
+  /** 0 for square-on, rising as the camera moves off-axis. */
+  perspective: number
+  finder_score: number
+  timing_score: number
+  contrast: number
+  /** Fiducial centres normalised to 0..1 of the frame: top-left, top-right, bottom-left, bottom-right. */
+  corners: [number, number][]
+  status: AlignmentStatus
+  advice: string
+  at: string
+}
+
 export interface Chunk {
   id: string
   chunk_number: number
@@ -258,6 +285,10 @@ export const api = {
   // The blank-screen threshold: how much of a captured image must be dark, and how much light, before the
   // receiver bothers decoding it. Worth surfacing because when it is set too high nothing is observable — a
   // rejected frame reaches neither the decoder nor the failure log, so frames are posted, counted, and vanish.
+  // Where the camera is pointed, polled several times a second while someone is aiming one. It reports the
+  // last frame rather than an average, because an average describes where the camera used to be.
+  alignment: () => request<AlignmentView>('/api/v1/capture/alignment'),
+
   captureGate: () => request<GateView>('/api/v1/capture/gate'),
   setCaptureGate: (minToneFraction: number) =>
     request<GateView>('/api/v1/capture/gate', {

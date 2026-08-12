@@ -21,6 +21,7 @@ import VideocamOffIcon from '@mui/icons-material/VideocamOff'
 
 import * as camera from '../lib/browserCamera'
 import { previewAspect } from '../lib/previewBox'
+import { AlignmentGuide, AlignmentOverlay, useAlignment } from './AlignmentGuide'
 
 // Capturing with this browser's camera.
 //
@@ -44,6 +45,10 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
   const state = useSyncExternalStore(camera.subscribe, camera.snapshot)
   const theme = useTheme()
   const onPhone = useMediaQuery(theme.breakpoints.down('sm'))
+
+  // Only polled while the camera is running. Aiming advice about a camera that is not capturing is
+  // both useless and misleading, and the request would run for as long as the tab stayed open.
+  const alignment = useAlignment(state.running)
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
   const [chosen, setChosen] = useState('')
@@ -202,12 +207,21 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
             />
           )}
 
+          {/* The measured grid, drawn over the live preview. This is the part that makes aiming direct
+              rather than inferential: the outline turns green the moment the frame actually decodes, so
+              "is it working" is answered by looking at the screen instead of by reading a counter. */}
+          {state.running && <AlignmentOverlay alignment={alignment.data} />}
+
           {!state.running && (
             <Typography variant="body2" color="text.secondary">
               no camera running
             </Typography>
           )}
         </Box>
+
+        {state.running && (
+          <AlignmentGuide alignment={alignment.data} steadiness={state.steadiness} blurred={state.blurred} />
+        )}
 
         {state.running && (
           <Typography variant="caption" color="text.secondary">
