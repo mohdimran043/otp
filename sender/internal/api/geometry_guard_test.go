@@ -77,3 +77,36 @@ func TestTheCheckIsSkippedWithoutACamera(t *testing.T) {
 	err := validateGeometryForCamera(req, cfg, uint8(req.BitDepth))
 	require.NoError(t, err)
 }
+
+// TestASingleOptionDepthIsResolvedRatherThanRefused covers the upload that was blocked by a field the caller
+// had no say in.
+//
+// Switching the encoder on the send form leaves the bit depth beside it holding the previous encoder's value,
+// so "binary at depth 3" arrives — which is not a request for something unavailable, it is a request for
+// binary carrying a leftover 3 from colour8. Binary offers only depth 1, so there is nothing to preserve.
+func TestASingleOptionDepthIsResolvedRatherThanRefused(t *testing.T) {
+	cfg := guardConfig()
+	// 192 cells in binary is readable on a 1080 capture — 5.5 px/cell against the 4 binary needs — so this
+	// case tests the depth resolution and not the geometry guard.
+	req := TransferRequest{
+		Filename: "x.bin", GridWidth: 192, GridHeight: 192, CellPixels: 4,
+		Encoder: "binary", BitDepth: 3, Compression: "none", FECCodec: "none",
+	}
+
+	out, err := resolveEncoderDepth(req)
+	require.NoError(t, err, "binary offers only depth 1, so a leftover 3 must be resolved, not refused")
+	require.Equal(t, 1, out.BitDepth)
+
+	// And the geometry is genuinely fine at that depth, which is the point of choosing binary for a dense grid.
+	require.NoError(t, validateGeometryForCamera(out, cfg, uint8(out.BitDepth)))
+}
+
+// TestAmbiguousDepthIsStillRefused is the other half, and the reason the resolution above is narrow.
+// Grayscale offers two depths and three, so a caller asking for four has made a real mistake between real
+// options — picking one for them would be deciding, not helping.
+func TestAmbiguousDepthIsStillRefused(t *testing.T) {
+	req := TransferRequest{Encoder: "grayscale", BitDepth: 4}
+	_, err := resolveEncoderDepth(req)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "only")
+}

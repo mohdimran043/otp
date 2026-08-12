@@ -415,18 +415,12 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 		return request, fmt.Errorf("encoder %q is not one of %s",
 			request.Encoder, strings.Join(encoding.Names(), ", "))
 	}
-	if request.BitDepth != 0 {
-		supported := false
-		for _, d := range encoder.SupportedBitDepths() {
-			if int(d) == request.BitDepth {
-				supported = true
-			}
-		}
-		if !supported {
-			return request, fmt.Errorf("the %s encoder does not offer bit depth %d",
-				request.Encoder, request.BitDepth)
-		}
+	resolved, err := resolveEncoderDepth(request)
+	if err != nil {
+		return request, err
 	}
+	request = resolved
+
 	if _, err := compress.ByName(request.Compression); err != nil {
 		return request, fmt.Errorf("compression %q is not one of %s",
 			request.Compression, strings.Join(compress.Names(), ", "))
@@ -1011,4 +1005,33 @@ func queryInt(r *http.Request, field string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// resolveEncoderDepth settles the bit depth against the encoder named, resolving the one case where there is
+// nothing to settle and refusing the rest.
+//
+// Split out so the cases can be exercised directly: they are specific encoder-and-depth pairs, and reaching
+// them through the multipart form would test the parser instead.
+func resolveEncoderDepth(request TransferRequest) (TransferRequest, error) {
+	if request.BitDepth == 0 {
+		return request, nil
+	}
+	encoder, err := encoding.ByName(request.Encoder)
+	if err != nil {
+		return request, fmt.Errorf("encoder %q is not one of %s",
+			request.Encoder, strings.Join(encoding.Names(), ", "))
+	}
+
+	depths := encoder.SupportedBitDepths()
+	for _, d := range depths {
+		if int(d) == request.BitDepth {
+			return request, nil
+		}
+	}
+	if len(depths) == 1 {
+		request.BitDepth = int(depths[0])
+		return request, nil
+	}
+	return request, fmt.Errorf("the %s encoder does not offer bit depth %d, only %v",
+		request.Encoder, request.BitDepth, depths)
 }
