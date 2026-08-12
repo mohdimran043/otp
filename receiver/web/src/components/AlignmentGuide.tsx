@@ -4,6 +4,7 @@ import SearchIcon from '@mui/icons-material/Search'
 import ZoomInIcon from '@mui/icons-material/ZoomIn'
 import ZoomOutIcon from '@mui/icons-material/ZoomOut'
 import ScreenRotationIcon from '@mui/icons-material/ScreenRotation'
+import GridOffIcon from '@mui/icons-material/GridOff'
 import WarningAmberIcon from '@mui/icons-material/WarningAmber'
 import { useQuery } from '@tanstack/react-query'
 
@@ -27,6 +28,10 @@ const presentation: Record<AlignmentStatus, { colour: string; label: string; Ico
   too_far: { colour: '#fb8c00', label: 'Move closer', Icon: ZoomInIcon },
   too_close: { colour: '#fb8c00', label: 'Move back', Icon: ZoomOutIcon },
   off_axis: { colour: '#fb8c00', label: 'Square up', Icon: ScreenRotationIcon },
+  // Red rather than amber, and its own label. The amber states are all "adjust your aim and it will
+  // come right"; this one means aiming cannot fix it and the sender has to change, so presenting it in
+  // the same colour as "move closer" would send an operator on the walk that does not work.
+  too_dense: { colour: '#e53935', label: 'Grid too dense', Icon: GridOffIcon },
   marginal: { colour: '#fdd835', label: 'Almost', Icon: WarningAmberIcon },
   good: { colour: '#43a047', label: 'Good', Icon: CheckCircleIcon },
 }

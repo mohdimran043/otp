@@ -64,7 +64,7 @@ export interface GateView {
 }
 
 /** How the camera is pointed, as measured from the most recent captured frame. */
-export type AlignmentStatus = 'searching' | 'too_far' | 'too_close' | 'off_axis' | 'marginal' | 'good'
+export type AlignmentStatus = 'searching' | 'too_far' | 'too_close' | 'off_axis' | 'marginal' | 'good' | 'too_dense'
 
 export interface AlignmentView {
   /** False before any frame has been measured in this session, and after a restart. */
@@ -78,6 +78,16 @@ export interface AlignmentView {
   required_module_pixels: number
   /** Upper end of the target band; 0 when the encoding has no useful upper bound. */
   max_module_pixels: number
+  /**
+   * The best this capture could resolve at this geometry, with the frame filling the short side. Below
+   * required_module_pixels no amount of aiming helps and the sender's grid is the fault — which is the
+   * opposite conclusion from too_far, and the numbers alone cannot tell them apart.
+   */
+  achievable_module_pixels: number
+  /** The same figure with the camera turned sideways, so the long side bounds the frame instead. */
+  rotated_module_pixels: number
+  /** The largest grid this capture could resolve at this encoding. */
+  max_grid_for_capture: number
   /** 0 for square-on, rising as the camera moves off-axis. */
   perspective: number
   finder_score: number

@@ -3,6 +3,7 @@ package pipeline
 import (
 	"fmt"
 	"image"
+	"math"
 	"time"
 
 	"github.com/opticaltransport/otp/shared/protocol"
@@ -47,6 +48,18 @@ type Alignment struct {
 	// pixel structure and a cell stops being one colour. See maxColourModulePixels.
 	MaxModulePixels float64 `json:"max_module_pixels"`
 
+	// AchievableModulePixels is the most this capture could resolve at this geometry, with the frame
+	// filling the short side. When it is below RequiredModulePixels no amount of aiming will do, and the
+	// fault is the sender's grid rather than the operator's hands.
+	AchievableModulePixels float64 `json:"achievable_module_pixels"`
+
+	// RotatedModulePixels is the same figure with the camera turned sideways, so the long side of the
+	// picture bounds the frame instead of the short one.
+	RotatedModulePixels float64 `json:"rotated_module_pixels"`
+
+	// MaxGridForCapture is the largest grid this capture could resolve at this encoding.
+	MaxGridForCapture int `json:"max_grid_for_capture"`
+
 	// Perspective is 0 for a square-on view and rises as the camera moves off-axis.
 	Perspective float64 `json:"perspective"`
 
@@ -87,6 +100,18 @@ const (
 
 	// StatusOffAxis is a grid found at too steep an angle.
 	StatusOffAxis AlignmentStatus = "off_axis"
+
+	// StatusTooDense is a grid the camera cannot resolve at any distance.
+	//
+	// It exists because the advice for it is the opposite of the advice for too_far, and the two are
+	// indistinguishable from the numbers alone: both are "cells are smaller than this encoding needs".
+	// The difference is whether moving would help. A square frame's width is bounded by the capture's
+	// short side, so once it fills the view the pixels per cell are fixed by arithmetic — grid plus quiet
+	// zone against that short side — and no amount of walking forward changes it.
+	//
+	// Telling someone to move closer when they are already at 86% of the view is worse than saying
+	// nothing: they will keep trying, the numbers will not move, and the fault is in the sender's grid.
+	StatusTooDense AlignmentStatus = "too_dense"
 
 	// StatusMarginal is aimed well enough to find the grid and not well enough to read it. This is
 	// the state that most needs saying out loud, because it looks identical to failure from the
@@ -150,6 +175,31 @@ const (
 	maxColourModulePixels = 13.0
 )
 
+// denseAdvice explains a grid the capture cannot resolve, and names the two things that would fix it.
+//
+// Rotation first when it would be enough, because it costs the operator a wrist movement and nothing else:
+// a square frame in a portrait capture is bounded by the 1080-pixel width, and the same frame in landscape
+// gets the 1920. That is the difference between 8.2 pixels a cell and 14.5 at a 128 grid, which is the
+// difference between never decoding and decoding everything.
+func denseAdvice(a Alignment, w, h float64) string {
+	base := fmt.Sprintf(
+		"The grid is too dense for this camera — cells can only reach %.1f pixels even with the frame "+
+			"filling the view, and this encoding needs about %.0f. Moving closer cannot help: a square "+
+			"frame is bounded by the short side of the picture, so the figure is fixed by the grid size.",
+		a.AchievableModulePixels, a.RequiredModulePixels)
+
+	if a.RotatedModulePixels >= a.RequiredModulePixels && math.Abs(w-h) > 1 {
+		return base + fmt.Sprintf(
+			" Turn the camera sideways and it becomes %.1f — that alone is enough.",
+			a.RotatedModulePixels)
+	}
+	if a.MaxGridForCapture > 0 {
+		return base + fmt.Sprintf(
+			" Lower the sender's grid to about %d cells or fewer.", a.MaxGridForCapture)
+	}
+	return base
+}
+
 // requiredModule is the cell size this frame's encoding needs, in captured pixels.
 //
 // Read from the header the decoder just recovered rather than configured, so it follows the sender
@@ -212,6 +262,22 @@ func measureAlignment(img image.Image, g *protocol.Geometry, decoded bool) Align
 		a.MaxModulePixels = maxColourModulePixels
 	}
 
+	// The best this capture could ever manage at this geometry: the frame filling the short side,
+	// divided by how many cells span it. The frame is square, so the short side is what bounds it
+	// however the camera is held — which is why a portrait capture of a dense grid is hopeless while
+	// the same grid in landscape is fine.
+	cellsAcross := float64(g.Layout.GridWidth + 2*g.Layout.QuietZone)
+	if short := math.Min(w, h); cellsAcross > 0 && short > 0 {
+		a.AchievableModulePixels = short / cellsAcross
+		// And what a rotation would buy, since the long side is usually half again as much.
+		a.RotatedModulePixels = math.Max(w, h) / cellsAcross
+		// The largest grid that could reach the requirement on this capture, as a number an operator
+		// can act on rather than a ratio they have to solve.
+		if a.RequiredModulePixels > 0 {
+			a.MaxGridForCapture = int(short/a.RequiredModulePixels) - 2*g.Layout.QuietZone
+		}
+	}
+
 	switch {
 	case a.Fill > maxFill:
 		a.Status = StatusTooClose
@@ -223,6 +289,12 @@ func measureAlignment(img image.Image, g *protocol.Geometry, decoded bool) Align
 				"resolving the screen's own pixels rather than the frame on it, which stops each cell "+
 				"being one colour. Closer is not better here.",
 			a.ModulePixels, a.MaxModulePixels)
+	// Tested before too_far, because when both apply this is the true fault and the other is advice
+	// that cannot be followed.
+	case a.AchievableModulePixels > 0 && a.RequiredModulePixels > 0 &&
+		a.AchievableModulePixels < a.RequiredModulePixels:
+		a.Status = StatusTooDense
+		a.Advice = denseAdvice(a, w, h)
 	case a.Fill < minFill || a.ModulePixels < a.RequiredModulePixels:
 		a.Status = StatusTooFar
 		a.Advice = fmt.Sprintf(
