@@ -148,15 +148,81 @@ So the regime this layer targets — a handful of ambiguous cells in an otherwis
 occur under synthetic degradation at any locatable geometry. Degradation here is bimodal: zero errors,
 or hundreds.
 
+
+## The real corpus: recovery recovers nothing, and geometry explains everything
+
+Measured 2026-08-12 against 180 stored captures from a real handheld session (`48cb6970`, 1210 frames,
+1080x1920 JPEG from a phone camera) — 150 frames the receiver had recorded as `payload_crc` failures plus
+30 it had decoded, replayed through the same `encoding.Decode` and the same engine the receiver runs:
+
+```
+frames 180   engine go (margin-ordered-subset/1)
+decoded first pass  30 (16.7%)
+recovered by engine 0 (+0.0 points -> 16.7%)
+
+first-pass buckets:
+  decoded                 30
+  payload_crc            150
+
+by geometry:
+  layout           frames  decoded  recovered    finder marginal/frame
+  128x128@1px         154     4(  3%)          0     0.998     1001 of 12096 (8.3%)
+  80x80@8px            26    26(100%)          0     0.988       30 of 2340 (1.3%)
+
+mean clipped fraction 0.006
+decode 39.6s total, recovery 50.0s total
+```
+
+Three things follow, and the third is the one that matters.
+
+**1. Real failures are in recovery's target bucket, and recovery still cannot fix them.** Every failure
+was `payload_crc` at a finder score of 0.998 — geometry essentially perfect, both bands read, only the
+payload wrong. That is exactly the bucket this layer was built for, and it recovered **0 of 150**. The
+reason is the marginal-cell count: these frames carry around a thousand ambiguous cells each, and the
+search corrects twelve. The best frame in the sample had 292. Even it was 24 times beyond reach.
+
+**2. The search's operating window is empty here.** At 80x80 every frame decoded on the first pass with
+about 30 marginal cells — already more than the twelve the search covers, but read correctly anyway. At
+128x128 there were a thousand. So the corpus contains no frames in the band where a bounded search helps:
+below it they decode unaided, above it they are out of range. That band may exist at some intermediate
+geometry, but nothing in this corpus lands in it.
+
+**3. Geometry explains the whole decode rate.** 100% at 80x80@8px against 3% at 128x128@1px, from the same
+camera in the same session. A single pixel per cell on the sender's display cannot survive a camera at any
+distance, and that is a configuration decision, not a processing problem. **This is worth 30x more than
+any recovery layer, and it costs nothing to change.**
+
+A caveat on what was measured. For real captures there is no ground truth payload, so the figures above
+count *marginal* cells — cells read with a margin under a quarter of the palette separation — not cells
+read *wrongly*. A marginal cell may still be correct, and at 80x80 all 30 of them were. What can be said
+without ground truth is bounded but sufficient: the search exhaustively tried every correction over the
+twelve least confident cells of each frame and none verified, so more than twelve cells were wrong, or
+the wrong ones were not among the twelve least confident. With a thousand cells ambiguous, it is the
+former.
+
+### Reproducing it
+
+```bash
+OTP_CORPUS_DIR=/path/to/captures OTP_CORPUS_GRID=80 OTP_CORPUS_CELL=8 \
+  go test ./ai/corpus/ -run TestCorpusReplay -v -count=1 -timeout 900s
+```
+
+Captures come from the receiver's own object store, which persists every frame before deciding whether it
+could read it. Pull a session out with `mc cp` against the `otp-receiver` bucket under
+`captures/<session>/`. Stored objects are keyed `.png` but hold whatever the camera posted — a browser
+posts JPEG — so decode by content, not by extension.
+
 ## What that implies, stated plainly
 
-Recovery is correct and it is cheap, and on this evidence it is also **narrow**. It is proven to work
-when a frame has a few wrong cells; nothing yet shows that real frames often do.
+Recovery is correct and it is cheap, and on the evidence now in hand it is **not earning its place on
+this channel**. It is proven to work when a frame has a few wrong cells — byte-exact at every grid from
+80 to 1024 — and measured against 150 real failures it recovered none, because real failures carry
+hundreds to a thousand ambiguous cells rather than a few.
 
-The one real-camera datapoint on record points the same way rather than the other: at 5.9 px/cell the
-mean distance to the nearest palette entry measured 53 against a margin of 86, with frames locating
-perfectly and then failing their payload CRC. A whole frame sitting that close to the boundary is the
-many-errors regime, not the few-errors one.
+That is a statement about this corpus, not a proof about all cameras. But it is the corpus this
+deployment produces, and it agrees with the synthetic sweep and with the earlier channel measurements:
+at 5.9 px/cell the mean distance to the nearest palette entry was 53 against a margin of 86, which is a
+whole frame sitting on the decision boundary.
 
 Consequences for what to build next:
 
@@ -167,9 +233,12 @@ Consequences for what to build next:
   reach of parity spent *within* the frame; the existing FEC operates across chunks, so a frame that
   misses its CRC is lost whole no matter how few or many cells were wrong. That is a protocol change
   and out of scope here, but it is where the measured evidence points.
-- **The remaining unknown worth measuring is the real corpus.** The receiver already stores every
-  capture with its decode outcome, so the bucket distribution and symbol error rate of real failures
-  can be computed without any new capture work. Do that before building anything larger.
+- **The cheapest win available is a configuration change, and it is large.** 80x80@8px decoded 100% of
+  its frames in the same session where 128x128@1px decoded 3%. Before any further engineering, stop
+  offering one- and two-pixel cells for a camera channel, or bound them the way `COLOUR_GRID_CEILING`
+  already bounds colour density for the Auto chooser.
+- **The real corpus is now measured, and `ai/corpus` keeps it measurable.** Re-run it after any change
+  that claims to improve recovery; a claim without a number from it is not a claim.
 
 ## Configuration
 

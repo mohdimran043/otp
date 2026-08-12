@@ -206,7 +206,7 @@ export function ScanFeedback() {
           <Stat
             label="Recovered"
             value={recovery.recovered.toLocaleString()}
-            hint={`of ${recovery.attempted.toLocaleString()} frames retried${
+            hint={`of ${recovery.attempted.toLocaleString()} failed frames offered${
               recovered === null ? '' : ` (${formatPercent(recovered)})`
             }, ${perRecovery} candidates each`}
             accent={recovered !== null && recovered > 0 ? 'success' : undefined}

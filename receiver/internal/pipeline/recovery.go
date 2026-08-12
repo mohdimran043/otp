@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/opticaltransport/otp/receiver/ai/classify"
+	"github.com/opticaltransport/otp/receiver/ai/engine"
 )
 
 // recoveryCounters is what the recovery layer did during this capture session.
@@ -38,8 +39,20 @@ func (c *recoveryCounters) count(b classify.Bucket) {
 
 // RecoveryStats is the recovery layer's report, for the API and the operator's panel.
 type RecoveryStats struct {
-	// Attempted is how many failed frames were searched, Recovered how many of those verified,
-	// and Candidates the total corrections tried across all of them.
+	// Attempted is how many failed frames were offered to the engine — not how many it worked on.
+	//
+	// The distinction is deliberate and worth knowing when reading the ratio. Which failures an engine
+	// can help is the engine's own business: a candidate search needs a geometry and declines without
+	// one, while a model server may make fiducials findable where they were not, so it wants exactly
+	// the frames the search refuses. The pipeline therefore offers everything and lets each engine
+	// decide, which keeps the decode path free of knowledge about what is installed behind it.
+	//
+	// The consequence is that Attempted includes frames no engine could ever have helped, so the
+	// recovered-of-attempted ratio is a floor rather than a hit rate. Buckets is where the real
+	// reading is: it says which stages the failures were at, and RecoveredFrom on the corpus report
+	// says which of those the engine actually rescued.
+	//
+	// Recovered is how many verified, and Candidates the total corrections tried across all of them.
 	//
 	// Candidates matters more than it looks: rising candidates per recovery means the channel is
 	// getting worse even while the recovered count holds up, which is the earliest warning
@@ -53,6 +66,12 @@ type RecoveryStats struct {
 	// figure means aim the camera when the failures sit in no_quad and lower the density when they
 	// sit in payload_crc, and those call for opposite actions.
 	Buckets map[string]uint64 `json:"buckets"`
+
+	// Engine and Version name what did the recovering. Reported so a change in the recovered count is
+	// attributable: the same figure under "go" and under "sidecar+go" is the finding that a model is
+	// earning nothing.
+	Engine  string `json:"engine"`
+	Version string `json:"version"`
 }
 
 // stats snapshots the counters.
@@ -86,5 +105,29 @@ func (c *recoveryCounters) reset() {
 	c.buckets = nil
 }
 
-// RecoveryStats reports what recovery has done in this capture session.
-func (r *Receiver) RecoveryStats() RecoveryStats { return r.recovery.stats() }
+// RecoveryStats reports what recovery has done in this capture session, and which engine did it.
+func (r *Receiver) RecoveryStats() RecoveryStats {
+	out := r.recovery.stats()
+	out.Engine, out.Version = r.EngineInfo()
+	return out
+}
+
+// EngineInfo names the engine and version in force, for the API and the logs.
+func (r *Receiver) EngineInfo() (name, version string) {
+	if r.engine == nil {
+		return "none", "0"
+	}
+	return r.engine.Name(), r.engine.Version()
+}
+
+// UseEngine replaces the recovery engine.
+//
+// Called before Run, from the startup path that resolved the configured engine and is willing to fail
+// on it. Not safe to call while frames are being decoded, and not needed there: the engine is a
+// property of the deployment, not of a session.
+func (r *Receiver) UseEngine(e engine.Engine) {
+	if e == nil {
+		return
+	}
+	r.engine = e
+}

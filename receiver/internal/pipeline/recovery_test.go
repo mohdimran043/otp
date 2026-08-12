@@ -148,10 +148,13 @@ func TestRecoveryBucketsAFrameItCannotFix(t *testing.T) {
 	require.NotEmpty(t, stats.Buckets)
 }
 
-// TestRecoveryIsNotAttemptedWithoutGeometry guards the gate on the failure bucket. A frame with no
-// fiducials has no geometry to search at, and attempting anyway would spend a sampling pass on an
-// image that is not a frame — the case the tone gate exists to keep off the decoder entirely.
-func TestRecoveryIsNotAttemptedWithoutGeometry(t *testing.T) {
+// TestRecoveryDeclinesWithoutGeometry guards the gate — which lives in the engine, not in the pipeline.
+//
+// The pipeline offers every failure to the engine and lets it decide, because which failures are worth
+// working on depends on what is installed: a candidate search needs a geometry, while a model server
+// wants precisely the frames that have none, since enhancement may make fiducials findable. So the
+// assertion is that nothing was recovered and no sampling pass was wasted, not that nothing was offered.
+func TestRecoveryDeclinesWithoutGeometry(t *testing.T) {
 	blank := image.NewRGBA(image.Rect(0, 0, 640, 480))
 	for y := 0; y < 480; y++ {
 		for x := 0; x < 640; x++ {
@@ -162,8 +165,12 @@ func TestRecoveryIsNotAttemptedWithoutGeometry(t *testing.T) {
 	r := recoveryFixture(t, config.Recovery{Enabled: true, MaxCells: 12, MaxCandidates: 4096})
 	result := r.prepare(context.Background(), Capture{Image: blank})
 	require.Error(t, result.decodeErr)
-	require.Equal(t, uint64(0), r.RecoveryStats().Attempted)
-	require.Equal(t, uint64(1), r.RecoveryStats().Buckets[string(classify.BucketNoQuad)])
+
+	stats := r.RecoveryStats()
+	require.Equal(t, uint64(0), stats.Recovered, "there is no geometry to search at")
+	require.Equal(t, uint64(0), stats.Candidates, "and so no candidates should have been tried")
+	require.Equal(t, uint64(1), stats.Buckets[string(classify.BucketNoQuad)])
+	require.Equal(t, "go", stats.Engine, "the engine in force is reported alongside its results")
 }
 
 // TestRecoveryCountersResetWithTheSession records that the figures are session-scoped, because a

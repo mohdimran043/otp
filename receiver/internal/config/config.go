@@ -18,6 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/opticaltransport/otp/receiver/ai/engine"
 	"github.com/opticaltransport/otp/receiver/ai/soft"
 	"github.com/opticaltransport/otp/shared/protocol"
 )
@@ -240,14 +241,37 @@ type Recovery struct {
 	// candidates always runs once the read is done rather than paying for it and returning nothing.
 	// See receiver/ai/soft for the measurements.
 	Budget time.Duration `yaml:"budget"`
+
+	// Engine names which implementation reads rejected frames: "go" for the deterministic candidate
+	// search, "sidecar" for a model server with that search in front of it, "none" for nothing.
+	//
+	// Named rather than inferred from whether a URL is set, because "I configured a model server and
+	// got the baseline" must not be a thing that can happen quietly. A sidecar named and unreachable
+	// stops the receiver at startup instead.
+	Engine string `yaml:"engine"`
+
+	// SidecarURL and SidecarTimeout configure the model server. The timeout bounds one enhance call,
+	// so a stalled service cannot stall the decode path with it.
+	SidecarURL     string        `yaml:"sidecar_url"`
+	SidecarTimeout time.Duration `yaml:"sidecar_timeout"`
 }
 
-// Options converts the configuration into the search's own bounds.
-func (r Recovery) Options() soft.Options {
-	return soft.Options{
-		MaxCells:      r.MaxCells,
-		MaxCandidates: r.MaxCandidates,
-		Budget:        r.Budget,
+// Settings converts the configuration into what the engine package needs.
+//
+// The translation lives here rather than in the engine package so that the engine tree depends on
+// nothing of the receiver's — which is what lets a benchmark or a corpus analysis build an engine
+// without a configuration file to hand.
+func (r Recovery) Settings() engine.Settings {
+	return engine.Settings{
+		Enabled:        r.Enabled,
+		Engine:         r.Engine,
+		SidecarURL:     r.SidecarURL,
+		SidecarTimeout: r.SidecarTimeout,
+		Search: soft.Options{
+			MaxCells:      r.MaxCells,
+			MaxCandidates: r.MaxCandidates,
+			Budget:        r.Budget,
+		},
 	}
 }
 
@@ -362,10 +386,12 @@ func Default() Config {
 			MinFinderScore: 0.75,
 			MinTimingScore: 0.6,
 			Recovery: Recovery{
-				Enabled:       true,
-				MaxCells:      12,
-				MaxCandidates: 4096,
-				Budget:        50 * time.Millisecond,
+				Enabled:        true,
+				MaxCells:       12,
+				MaxCandidates:  4096,
+				Budget:         50 * time.Millisecond,
+				Engine:         "go",
+				SidecarTimeout: 2 * time.Second,
 			},
 		},
 		Ack: Ack{
@@ -516,6 +542,16 @@ func (c Config) Validate() error {
 		// is not: it would silently disable the search on the first candidate.
 		if c.Decoder.Recovery.Budget < 0 {
 			add("decoder.recovery.budget %s cannot be negative", c.Decoder.Recovery.Budget)
+		}
+		switch c.Decoder.Recovery.Engine {
+		case "", "go", "none":
+		case "sidecar":
+			if c.Decoder.Recovery.SidecarURL == "" {
+				add("decoder.recovery.engine is sidecar but no sidecar_url is set")
+			}
+		default:
+			add("decoder.recovery.engine %q is not one of %v",
+				c.Decoder.Recovery.Engine, engine.AvailableEngines())
 		}
 	}
 	if c.Decoder.EncryptionKeyHex != "" {
@@ -695,6 +731,9 @@ func applyEnv(c *Config) error {
 	integer("DECODER_RECOVERY_MAX_CELLS", &c.Decoder.Recovery.MaxCells)
 	integer("DECODER_RECOVERY_MAX_CANDIDATES", &c.Decoder.Recovery.MaxCandidates)
 	dur("DECODER_RECOVERY_BUDGET", &c.Decoder.Recovery.Budget)
+	str("DECODER_RECOVERY_ENGINE", &c.Decoder.Recovery.Engine)
+	str("DECODER_RECOVERY_SIDECAR_URL", &c.Decoder.Recovery.SidecarURL)
+	dur("DECODER_RECOVERY_SIDECAR_TIMEOUT", &c.Decoder.Recovery.SidecarTimeout)
 	str("ENCRYPTION_KEY_HEX", &c.Decoder.EncryptionKeyHex)
 
 	str("ACK_DIR", &c.Ack.Dir)

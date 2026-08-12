@@ -22,7 +22,7 @@ import (
 	"github.com/opticaltransport/otp/shared/protocol"
 
 	"github.com/opticaltransport/otp/receiver/ai/classify"
-	"github.com/opticaltransport/otp/receiver/ai/soft"
+	"github.com/opticaltransport/otp/receiver/ai/engine"
 	"github.com/opticaltransport/otp/receiver/internal/config"
 	"github.com/opticaltransport/otp/receiver/internal/objectstore"
 	"github.com/opticaltransport/otp/receiver/internal/store"
@@ -110,6 +110,10 @@ type Receiver struct {
 
 	// recovery counts what the soft-decision retry did this session. See recovery.go.
 	recovery recoveryCounters
+
+	// engine reads frames the decoder rejected. Never nil — "off" is engine.Null, so the decode path
+	// has no branch to forget. See receiver/ai/engine.
+	engine engine.Engine
 }
 
 // New returns a receiver.
@@ -127,6 +131,16 @@ func New(st *store.Store, objects, acks objectstore.Store, source Source, cfg *c
 		finished: map[uuid.UUID]bool{},
 		injected: make(chan injectedFrame),
 		runDone:  make(chan struct{}),
+	}
+
+	// The engine that never fails to construct, so this constructor cannot either and no caller ends
+	// up with a nil one. A deployment naming a model server overrides it with UseEngine before Run,
+	// and if that server is unreachable the process stops there rather than quietly running the
+	// baseline while an operator reads the numbers as a model's work.
+	if current.Decoder.Recovery.Enabled {
+		r.engine = engine.NewGo(current.Decoder.Recovery.Settings().Search)
+	} else {
+		r.engine = engine.NewNull()
 	}
 
 	// Seed the layout hint from configuration, when one is named.
@@ -632,18 +646,27 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 	// Placed after the confidence floors, so a frame held back for a low fiducial score is a
 	// recovery candidate too. Its payload may well be intact; the floors are a judgement about how
 	// much to trust the read, and a footer that verifies is a better answer than either.
-	if decodeErr != nil && geometry != nil && cfg.Decoder.Recovery.Enabled &&
-		classify.Recoverable(classify.Of(decodeErr)) {
+	if decodeErr != nil && cfg.Decoder.Recovery.Enabled {
+		bucket := classify.Of(decodeErr)
 		r.recovery.attempted.Add(1)
-		if res, rerr := soft.Recover(geometry, capture.Image, cfg.Decoder.Recovery.Options()); rerr == nil {
+		res, rerr := r.engine.Recover(ctx, engine.Request{
+			Image:    capture.Image,
+			Geometry: geometry,
+			Bucket:   bucket,
+			Clipped:  classify.Clipped(capture.Image),
+		})
+		if rerr == nil {
 			r.recovery.recovered.Add(1)
-			r.recovery.candidates.Add(uint64(res.Candidates))
+			r.recovery.candidates.Add(uint64(res.Report.Candidates))
 			r.log.Info("recovered a frame the decoder rejected",
-				zap.Int("flips", res.Flips),
-				zap.Int("candidates", res.Candidates),
-				zap.Float64("worst_margin", res.WorstMargin),
-				zap.Duration("took", res.Elapsed),
-				zap.String("bucket", string(classify.Of(decodeErr))))
+				zap.String("engine", res.Report.Engine),
+				zap.String("version", res.Report.Version),
+				zap.String("stage", res.Report.Stage),
+				zap.Int("flips", res.Report.Flips),
+				zap.Int("candidates", res.Report.Candidates),
+				zap.Float64("worst_margin", res.Report.WorstMargin),
+				zap.Duration("took", res.Report.Elapsed),
+				zap.String("bucket", string(bucket)))
 			frame, decodeErr = res.Frame, nil
 		}
 	}

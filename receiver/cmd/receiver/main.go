@@ -18,6 +18,7 @@ import (
 
 	"github.com/opticaltransport/otp/shared/protocol"
 
+	"github.com/opticaltransport/otp/receiver/ai/engine"
 	"github.com/opticaltransport/otp/receiver/internal/api"
 	"github.com/opticaltransport/otp/receiver/internal/camera"
 	"github.com/opticaltransport/otp/receiver/internal/config"
@@ -208,6 +209,23 @@ func run(configPath string, migrateOnly, checkOnly bool) error {
 	watcher := config.NewWatcher(configPath, cfg)
 	st := store.New(pool)
 	receiver := pipeline.New(st, objects, acks, channel, watcher, log.Logger)
+
+	// Resolve the recovery engine here, where a failure can still stop the process.
+	//
+	// A deployment that names a model server and cannot reach it must not start. The alternative is a
+	// receiver quietly running the deterministic baseline while an operator reads the recovery numbers
+	// as a model's work — and there is nothing in those numbers to say otherwise. Reporting honestly
+	// what this binary can do is the same principle the capture sources follow.
+	recoveryEngine, err := engine.Open(ctx, cfg.Decoder.Recovery.Settings())
+	if err != nil {
+		return err
+	}
+	receiver.UseEngine(recoveryEngine)
+	name, version := receiver.EngineInfo()
+	log.Logger.Info("recovery engine ready",
+		zap.String("engine", name),
+		zap.String("version", version),
+		zap.Bool("enabled", cfg.Decoder.Recovery.Enabled))
 
 	server := &http.Server{
 		Addr: cfg.Addr(),
