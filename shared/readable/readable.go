@@ -205,3 +205,76 @@ func (a Assessment) Explain(gridWidth int, bitDepth uint8) string {
 				"things that move this number.", max(a.MaxGrid, 0))
 	}
 }
+
+// PostRate is how many photographs a second the capture side offers, and it is the budget every
+// frame rate below is spent out of.
+//
+// Ten, because that is what the browser camera posts. A direct camera source offers more, but this
+// figure only has to be right about the ratio it produces: what matters is shots per displayed
+// frame, and a source that supplies twice as many simply gets twice as many per frame.
+const PostRate = 10.0
+
+// Shots per displayed frame at each level of difficulty. See ShotsNeeded for why these numbers.
+const (
+	// ShotsComfortable is the floor, and it is two rather than one for a reason that has nothing to do
+	// with how readable the geometry is. At one shot a frame, a single hand tremor, a rolling-shutter
+	// tear, or one badly timed refresh loses that frame outright and it must be retransmitted. Two is
+	// the smallest number at which a frame survives one bad photograph.
+	ShotsComfortable = 2
+
+	// ShotsReadable is for a geometry that clears its floor without much to spare.
+	ShotsReadable = 3
+
+	// ShotsMarginal is for one below its floor. This is where combining stops being insurance and
+	// becomes the thing that makes the transfer work at all: measured on real captures at 6.95 pixels
+	// a cell, combining shots read frames that no single photograph could.
+	ShotsMarginal = 5
+
+	// ShotsDesperate is for a geometry well below its floor. It will still mostly fail — no number of
+	// shots recovers cells the optics never separated — but it is the most that can be tried.
+	ShotsDesperate = 10
+)
+
+// ShotsNeeded is how many photographs of one displayed frame this geometry needs before it is worth
+// moving on to the next.
+//
+// The tighter a geometry sits against what its encoding needs, the more photographs it takes to read
+// one frame reliably, because the shortfall shows up as cells read wrongly and independent shots
+// disagree about which ones. Combining them is what recovers the frame; how many it takes depends on
+// how far short the geometry falls.
+func ShotsNeeded(a Assessment) int {
+	if a.Required <= 0 {
+		return ShotsComfortable
+	}
+	switch ratio := a.ModulePixels / a.Required; {
+	case ratio >= 1.5:
+		return ShotsComfortable
+	case ratio >= 1.0:
+		return ShotsReadable
+	case ratio >= 0.8:
+		return ShotsMarginal
+	default:
+		return ShotsDesperate
+	}
+}
+
+// DisplayFPS is how fast a frame of this geometry should be shown.
+//
+// It is a division and nothing cleverer: the capture side offers a fixed number of photographs a
+// second, each displayed frame needs several of them, so the rate a frame can be replaced is the one
+// divided by the other. Showing frames faster than that does not transfer more — it transfers the
+// same frames with fewer photographs each, and fewer photographs is precisely what makes a frame
+// fail.
+//
+// This is why the sender's old default of ten was close to unusable at any real geometry. Ten frames
+// a second against ten photographs a second is one photograph per frame, so every frame rested on a
+// single photograph being good, and one shake lost it.
+//
+// The counter-intuitive part is that a *denser* grid wants a *slower* rate, which sounds like it
+// would transfer less. It does not: a denser frame carries proportionally more, so fewer frames a
+// second move the same bytes. A 384-cell colour frame carries eleven times what an 80-cell one does,
+// so four a second is a faster transfer than thirty of the smaller — and four a second leaves room
+// for the shots it needs.
+func DisplayFPS(gridWidth, quietZone int, bitDepth uint8, captureW, captureH int) float64 {
+	return PostRate / float64(ShotsNeeded(Assess(gridWidth, quietZone, bitDepth, captureW, captureH)))
+}

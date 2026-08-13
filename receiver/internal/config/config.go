@@ -186,27 +186,6 @@ type Decoder struct {
 	MinFinderScore float64 `yaml:"min_finder_score"`
 	MinTimingScore float64 `yaml:"min_timing_score"`
 
-	// ExpectedGridWidth, ExpectedGridHeight and ExpectedCellPixels name the sender's grid, so the
-	// decoder can try it directly instead of reading the descriptor block out of every frame.
-	//
-	// The receiver learns this by itself from the first frame that resolves, and that is the normal
-	// path — but learning cannot start from nothing. The descriptor is a few dozen cells in the
-	// corner of the header band, no more legible than anything else on a marginal capture, and a
-	// frame whose fiducials were found and whose homography is perfectly good is discarded outright
-	// when that one block fails its CRC. A camera that has never once managed a clean read therefore
-	// never learns, and stays stuck: measured on a real installation, 33 of 54 frames located their
-	// geometry and every one of them died on the descriptor, so the learned hint had nothing to
-	// learn from.
-	//
-	// Naming the grid here breaks that circle. It is a hint and never a requirement: Locate tries it
-	// first and falls through to the descriptor search when it does not fit, so a value left over
-	// from a sender that has since been reconfigured costs one wasted attempt rather than a wrong
-	// read — and the first frame that does resolve replaces it. Zero for any of the three means no
-	// hint, which is the correct default for a receiver that does not know what will be sent.
-	ExpectedGridWidth  int `yaml:"expected_grid_width"`
-	ExpectedGridHeight int `yaml:"expected_grid_height"`
-	ExpectedCellPixels int `yaml:"expected_cell_pixels"`
-
 	// EncryptionKeyHex decrypts payloads, and must match the sender's. Sixty-four hex characters.
 	EncryptionKeyHex string `yaml:"encryption_key_hex"`
 
@@ -273,22 +252,6 @@ func (r Recovery) Settings() engine.Settings {
 			Budget:        r.Budget,
 		},
 	}
-}
-
-// ExpectedLayout is the sender's grid as configured, or nil when it has not been named.
-//
-// Errors are swallowed deliberately. This is a hint whose only effect is to save the decoder a
-// descriptor read, so an unusable one must leave the receiver working exactly as it would without
-// it — refusing to start over a wrong hint would turn a small optimisation into an outage.
-func (d Decoder) ExpectedLayout() *protocol.Layout {
-	if d.ExpectedGridWidth <= 0 || d.ExpectedGridHeight <= 0 || d.ExpectedCellPixels <= 0 {
-		return nil
-	}
-	layout, err := protocol.NewLayout(d.ExpectedGridWidth, d.ExpectedGridHeight, d.ExpectedCellPixels)
-	if err != nil {
-		return nil
-	}
-	return &layout
 }
 
 // Ack configures the acknowledgement channel.
@@ -722,9 +685,6 @@ func applyEnv(c *Config) error {
 	float("CAPTURE_FPS", &c.Capture.FPS)
 
 	integer("DECODER_CELL_PIXELS_HINT", &c.Decoder.CellPixelsHint)
-	integer("DECODER_EXPECTED_GRID_WIDTH", &c.Decoder.ExpectedGridWidth)
-	integer("DECODER_EXPECTED_GRID_HEIGHT", &c.Decoder.ExpectedGridHeight)
-	integer("DECODER_EXPECTED_CELL_PIXELS", &c.Decoder.ExpectedCellPixels)
 	float("DECODER_MIN_FINDER_SCORE", &c.Decoder.MinFinderScore)
 	float("DECODER_MIN_TIMING_SCORE", &c.Decoder.MinTimingScore)
 	boolean("DECODER_RECOVERY_ENABLED", &c.Decoder.Recovery.Enabled)

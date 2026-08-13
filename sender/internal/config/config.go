@@ -249,6 +249,16 @@ type Display struct {
 	// marginal geometry.
 	FPS float64 `yaml:"fps"`
 
+	// FPSExplicit records that a rate was asked for rather than defaulted to, so the scheduler can
+	// tell "two a second, because nobody said" from "two a second, because someone chose it".
+	//
+	// It exists because the rate is now derived from each transmission's geometry when nobody has
+	// expressed a preference, and a derived rate must never override an operator who has. Turning
+	// the rate down while watching a receiver fall behind is their main lever, and silently
+	// recomputing it would take that lever away — which is worse than the wrong default this
+	// replaces, because it would be wrong on purpose.
+	FPSExplicit bool `yaml:"-"`
+
 	// Brightness and Gamma adjust the rendered frame for the panel in use. Both
 	// reloadable: they are what an operator tunes while watching decode quality.
 	Brightness float64 `yaml:"brightness"`
@@ -644,6 +654,11 @@ func applyEnv(c *Config) error {
 
 	str("DISPLAY_SINK", &c.Display.Sink)
 	str("DISPLAY_DIR", &c.Display.Dir)
+	// Marked explicit when it is present, so a rate named in the environment is honoured rather than
+	// recomputed from geometry. See Display.FPSExplicit.
+	if _, ok := os.LookupEnv(envPrefix + "DISPLAY_FPS"); ok {
+		c.Display.FPSExplicit = true
+	}
 	float("DISPLAY_FPS", &c.Display.FPS)
 	float("DISPLAY_BRIGHTNESS", &c.Display.Brightness)
 	float("DISPLAY_GAMMA", &c.Display.Gamma)

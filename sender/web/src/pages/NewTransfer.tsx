@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Accordion,
   AccordionDetails,
@@ -179,6 +179,12 @@ export function NewTransfer() {
 
   const resolved = fitGridAndCell(grid, cell, encoder)
 
+  // Set when the sender has refused a geometry as unreadable and the operator has chosen to send it
+  // regardless. Deliberately not sticky: it is cleared whenever the geometry or encoder changes, so an
+  // override granted for one grid cannot silently carry to a different one.
+  const [sendAnyway, setSendAnyway] = useState(false)
+  useEffect(() => setSendAnyway(false), [grid, cell, encoder])
+
   const submit = useMutation({
     mutationFn: async () => {
       if (!file) throw new Error('Choose a file first')
@@ -213,6 +219,7 @@ export function NewTransfer() {
       form.append('grid_width', String(resolved.grid))
       form.append('grid_height', String(resolved.grid))
       form.append('cell_pixels', String(resolved.cell))
+      if (sendAnyway) form.append('send_anyway', 'true')
       return api.submit(form)
     },
     onSuccess: (accepted) => {
@@ -240,6 +247,34 @@ export function NewTransfer() {
       <Typography variant="h5">Send a file</Typography>
 
       <ErrorNotice error={profiles.error ?? submit.error} />
+
+      {/* A refusal an operator can act on.
+
+          The check behind it rests on the receiving camera's resolution, which the sender is told
+          rather than able to measure — so it can be wrong in a way only the person holding the camera
+          knows about. Leaving them with a message and no button turns a good estimate into a wall. */}
+      {submit.isError && !sendAnyway && /cannot be read|too dense/i.test(String(submit.error)) && (
+        <Alert
+          severity="warning"
+          variant="outlined"
+          action={
+            <Button
+              size="small"
+              color="warning"
+              onClick={() => {
+                setSendAnyway(true)
+                submit.reset()
+              }}
+            >
+              Send anyway
+            </Button>
+          }
+        >
+          That estimate assumes what the receiving camera can resolve, which this side is told rather
+          than able to measure. If your camera captures more than the sender has been configured for,
+          correct it there — otherwise send it and watch what actually arrives.
+        </Alert>
+      )}
 
       <Card variant="outlined">
         <CardContent>

@@ -21,6 +21,7 @@ import VideocamOffIcon from '@mui/icons-material/VideocamOff'
 
 import * as camera from '../lib/browserCamera'
 import { previewAspect } from '../lib/previewBox'
+import type { CaptureDetail } from '../lib/videoConstraints'
 import { AlignmentGuide, AlignmentOverlay, useAlignment } from './AlignmentGuide'
 
 // Capturing with this browser's camera.
@@ -55,6 +56,10 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
   // Rear camera by default on a phone: the point is to photograph a display, and the front camera points at the
   // person holding it. On a laptop there is no rear camera and the preference is simply ignored.
   const [rearFacing, setRearFacing] = useState(onPhone)
+  // Balanced by default, because colour is the fragile case and 1080p is what colour needs. Raising it
+  // is the right move for a binary payload at a dense grid and the wrong one otherwise, so it is a
+  // decision put in front of the operator rather than guessed at.
+  const [detail, setDetail] = useState<CaptureDetail>('balanced')
 
   useEffect(() => setRearFacing(onPhone), [onPhone])
 
@@ -136,6 +141,24 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
               </FormControl>
             )}
 
+            <FormControl size="small" sx={{ maxWidth: 460 }}>
+              <InputLabel id="capture-detail">Capture detail</InputLabel>
+              <Select
+                labelId="capture-detail"
+                label="Capture detail"
+                value={detail}
+                onChange={(e) => setDetail(e.target.value as CaptureDetail)}
+              >
+                <MenuItem value="balanced">Balanced — 1080p, best for colour</MenuItem>
+                <MenuItem value="maximum">Maximum — full sensor, for dense binary grids</MenuItem>
+              </Select>
+            </FormControl>
+            <Typography variant="body2" color="text.secondary">
+              {detail === 'balanced'
+                ? 'More pixels are not better for a colour payload: past 1080p the sensor resolves the panel’s own pixel grid and a cell stops being one colour.'
+                : 'Full sensor gives a dense grid the pixels per cell it needs. A binary cell is thresholded rather than measured, so the panel’s subpixels barely touch it.'}
+            </Typography>
+
             {!chosen && (
               <FormControlLabel
                 control={
@@ -189,23 +212,6 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
             }}
           />
 
-          {/* A framing guide, because "is the whole pattern inside the shot" is the question the preview exists
-              to answer and it is surprisingly hard to judge by eye. The decoder needs all four corner finder
-              patterns, so a frame touching any edge cannot be read at all. Fit the pattern inside this box and
-              it has the margin it needs. */}
-          {state.running && (
-            <Box
-              aria-hidden
-              sx={{
-                position: 'absolute',
-                inset: '12%',
-                border: '2px dashed',
-                borderColor: 'rgba(255,255,255,0.45)',
-                borderRadius: 1,
-                pointerEvents: 'none',
-              }}
-            />
-          )}
 
           {/* The measured grid, drawn over the live preview. This is the part that makes aiming direct
               rather than inferential: the outline turns green the moment the frame actually decodes, so
@@ -225,9 +231,9 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
 
         {state.running && (
           <Typography variant="caption" color="text.secondary">
-            Posting {state.width}x{state.height} — this preview is exactly what is being sent. Fit the whole
-            pattern inside the dashed guide: the decoder needs all four corners, so anything touching an edge
-            cannot be read.
+            Posting {state.width}x{state.height} — this preview is exactly what is being sent. The outline
+            is the grid the decoder found: keep all four corners inside the frame, and aim for the reading
+            below rather than for how it looks here.
           </Typography>
         )}
 
@@ -254,7 +260,7 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
               disabled={!secure}
               onClick={() =>
                 void camera
-                  .start({ deviceId: chosen || undefined, rearFacing, prepare: onStart })
+                  .start({ deviceId: chosen || undefined, rearFacing, detail, prepare: onStart })
                   .then(enumerate)
                   .catch(() => undefined)
               }

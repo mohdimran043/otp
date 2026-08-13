@@ -35,6 +35,12 @@ func (c Config) WithOverrides(stored map[string]string) (Config, error) {
 	// overlaid. c is already a value, but Optical and Display are reached through it.
 	next := c
 
+	// A stored rate is one an operator chose through the settings page, so it counts as explicit and
+	// the scheduler must not recompute it from geometry. See Display.FPSExplicit.
+	if _, ok := stored["fps"]; ok {
+		next.Display.FPSExplicit = true
+	}
+
 	floats := map[string]*float64{
 		"fps":        &next.Display.FPS,
 		"brightness": &next.Display.Brightness,

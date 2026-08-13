@@ -51,3 +51,26 @@ describe('videoConstraints', () => {
     expect(v.facingMode).toBeUndefined()
   })
 })
+
+// The detail preference is the one control that decides whether a dense grid is readable at all.
+//
+// Balanced is 1080p because colour degrades past it — the sensor starts resolving the panel's pixel
+// grid. Maximum is for a binary payload, where a cell is thresholded rather than measured and pixels
+// per cell is the only thing that matters: a 256-cell grid is 4.2 px a cell at 1080p and 8.4 at 4K.
+describe('capture detail', () => {
+  it('defaults to 1080p when nothing is asked for', () => {
+    const v = videoConstraints({ rearFacing: true }) as MediaTrackConstraints
+    expect(v.width).toEqual({ ideal: 1920 })
+  })
+
+  it('asks for the full sensor when maximum detail is chosen', () => {
+    const v = videoConstraints({ rearFacing: true, detail: 'maximum' }) as MediaTrackConstraints
+    expect(v.width).toEqual({ ideal: 3840 })
+    expect(v.height).toEqual({ ideal: 2160 })
+  })
+
+  it('keeps 1080p on balanced, which is what colour needs', () => {
+    const v = videoConstraints({ rearFacing: true, detail: 'balanced' }) as MediaTrackConstraints
+    expect(v.width).toEqual({ ideal: 1920 })
+  })
+})

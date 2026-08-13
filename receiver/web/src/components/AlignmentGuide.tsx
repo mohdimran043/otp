@@ -1,59 +1,59 @@
-import { Box, Chip, LinearProgress, Paper, Stack, Typography } from '@mui/material'
-import CheckCircleIcon from '@mui/icons-material/CheckCircle'
-import SearchIcon from '@mui/icons-material/Search'
-import ZoomInIcon from '@mui/icons-material/ZoomIn'
-import ZoomOutIcon from '@mui/icons-material/ZoomOut'
-import ScreenRotationIcon from '@mui/icons-material/ScreenRotation'
-import GridOffIcon from '@mui/icons-material/GridOff'
-import WarningAmberIcon from '@mui/icons-material/WarningAmber'
+import { Box, Paper, Stack, Typography } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 
 import { api, type AlignmentStatus, type AlignmentView } from '../api/client'
+import { mono, signal } from '../theme'
 
-// Live aiming feedback.
+// Live aiming feedback: the instrument face of this application.
 //
-// Aiming a camera at a display is otherwise done blind: the only signal is a decode rate that
-// arrives seconds later and says nothing about which way to move. Everything shown here is measured
-// from the frame that was just captured, so moving the camera changes it immediately — which is
-// what makes it usable while someone is still moving.
+// Aiming a camera at a display is otherwise done blind. The only signal is a decode rate that arrives
+// seconds later and says nothing about which way to move, and an operator holding a phone at arm's
+// length cannot read prose while they do it. So this is built for a glance from a metre away: one word
+// large enough to read unfocused, one meter showing the number that decides whether anything decodes
+// at all, and the detail underneath for when a glance is not enough.
 //
-// It polls rather than streaming. A poll every 400ms is well inside the rate a person can react to,
-// and it costs one small request against a receiver that is already taking ten frames a second from
-// the same page.
+// It polls rather than streaming. Every 400ms is well inside human reaction time, and it costs one
+// small request against a receiver already taking ten photographs a second from the same page.
 const pollMs = 400
 
-/** How each verdict is presented. Kept in one place so the colour, the icon and the words agree. */
-const presentation: Record<AlignmentStatus, { colour: string; label: string; Icon: typeof SearchIcon }> = {
-  searching: { colour: '#78909c', label: 'Looking', Icon: SearchIcon },
-  too_far: { colour: '#fb8c00', label: 'Move closer', Icon: ZoomInIcon },
-  too_close: { colour: '#fb8c00', label: 'Move back', Icon: ZoomOutIcon },
-  off_axis: { colour: '#fb8c00', label: 'Square up', Icon: ScreenRotationIcon },
-  // Red rather than amber, and its own label. The amber states are all "adjust your aim and it will
-  // come right"; this one means aiming cannot fix it and the sender has to change, so presenting it in
-  // the same colour as "move closer" would send an operator on the walk that does not work.
-  too_dense: { colour: '#e53935', label: 'Grid too dense', Icon: GridOffIcon },
-  marginal: { colour: '#fdd835', label: 'Almost', Icon: WarningAmberIcon },
-  good: { colour: '#43a047', label: 'Good', Icon: CheckCircleIcon },
+// Words rather than sentences, because this is read while moving.
+//
+// Each verdict is one imperative and one clause of explanation. The imperative is what to do; the
+// clause is why, for the operator who has time to wonder. Icons were tried here and removed: at this
+// size the word is faster to read than a glyph, and a glyph beside it only competes with it.
+const verdict: Record<AlignmentStatus, { colour: string; word: string; sub: string }> = {
+  searching: { colour: signal.idle, word: 'SEARCHING', sub: 'no grid in view' },
+  too_far: { colour: signal.adjust, word: 'CLOSER', sub: 'cells too small to read' },
+  too_close: { colour: signal.adjust, word: 'BACK', sub: 'past the useful range' },
+  off_axis: { colour: signal.adjust, word: 'SQUARE UP', sub: 'angle too steep' },
+  marginal: { colour: signal.marginal, word: 'ALMOST', sub: 'found, not yet readable' },
+  too_dense: { colour: signal.fault, word: 'TOO DENSE', sub: 'no aim fixes this' },
+  good: { colour: signal.lock, word: 'LOCKED', sub: 'frames are decoding' },
+}
+
+function look(a: AlignmentView | undefined) {
+  return verdict[a?.status ?? 'searching'] ?? verdict.searching
 }
 
 /**
- * AlignmentOverlay draws the detected grid over the preview.
+ * AlignmentOverlay draws the grid the decoder actually found, over the live preview.
  *
- * Positioned as a percentage of the element rather than in pixels, because the corners arrive
- * normalised and the preview's size is a layout decision that has nothing to do with the capture's
- * resolution. An SVG with a viewBox of 0..1 does that conversion for free and stays correct when
- * the element is resized, rotated, or shown on a phone in either orientation.
+ * This is what makes aiming direct rather than inferential: the outline sits on the thing being aimed
+ * at, and turns green the moment frames decode, so "is it working" is answered by looking rather than
+ * by reading a counter.
+ *
+ * Drawn in a 0..1 viewBox because the corners arrive normalised and the preview's size is a layout
+ * decision with nothing to do with the capture's resolution. The SVG does that conversion for free and
+ * stays correct when the element resizes or the phone is turned.
  */
 export function AlignmentOverlay({ alignment }: { alignment: AlignmentView | undefined }) {
   if (!alignment?.live || !alignment.locked || alignment.corners?.length !== 4) return null
 
-  const { colour } = presentation[alignment.status] ?? presentation.searching
-  // Corners arrive top-left, top-right, bottom-left, bottom-right; a polygon needs them in
-  // perimeter order, so the last two are swapped rather than sorted. Filtered rather than indexed
-  // because the length check above is not something the type system carries across.
-  const corners = alignment.corners
-  const points = [corners[0], corners[1], corners[3], corners[2]]
-    .filter((c): c is [number, number] => Array.isArray(c))
+  const { colour } = look(alignment)
+  const c = alignment.corners
+  // Corners arrive top-left, top-right, bottom-left, bottom-right; a polygon needs perimeter order.
+  const points = [c[0], c[1], c[3], c[2]]
+    .filter((p): p is [number, number] => Array.isArray(p))
     .map(([x, y]) => `${x},${y}`)
     .join(' ')
 
@@ -67,23 +67,24 @@ export function AlignmentOverlay({ alignment }: { alignment: AlignmentView | und
     >
       <polygon
         points={points}
-        fill="none"
+        fill={`${colour}12`}
         stroke={colour}
-        strokeWidth={0.008}
+        strokeWidth={2}
         strokeLinejoin="round"
         vectorEffect="non-scaling-stroke"
       />
-      {alignment.corners.map(([x, y], i) => (
-        <circle key={i} cx={x} cy={y} r={0.012} fill={colour} />
+      {c.map(([x, y], i) => (
+        <circle key={i} cx={x} cy={y} r={0.011} fill={colour} />
       ))}
     </Box>
   )
 }
 
 /**
- * useAlignment polls the aiming state. Exported so the preview overlay and the panel below it read
- * the same reading rather than two polls a fraction of a second apart, which would let the border
- * and the words disagree.
+ * useAlignment polls the aiming state.
+ *
+ * Exported so the overlay and the panel read one reading rather than two polls a fraction of a second
+ * apart, which would let the outline and the words disagree about the same frame.
  */
 export function useAlignment(enabled: boolean) {
   return useQuery({
@@ -95,12 +96,95 @@ export function useAlignment(enabled: boolean) {
 }
 
 /**
- * AlignmentGuide is the panel of aiming advice shown under the preview.
+ * BandMeter shows one measurement against the window it has to land inside.
  *
- * `steadiness` and `blurred` come from the browser rather than the receiver, because they describe frames the
- * receiver never saw: a smeared frame is dropped before it is posted. They belong here anyway — from the
- * operator's side "my hand is shaking" and "I am too far away" are the same question, and answering them in two
- * different places would mean watching two different places while trying to hold a phone still.
+ * A progress bar is the wrong instrument here, and shipping one was a real mistake: it showed pixels
+ * per cell against a floor and turned green above it, so an operator sitting at nearly twice the
+ * useful figure was told everything was fine while nothing decoded. The target is a *window* — below
+ * it the cells are too small to read, above it the camera resolves the panel's own pixels instead of
+ * the frame drawn on them — so the instrument has to draw both edges, not one.
+ *
+ * The window is scaled to the middle half of the track, leaving room either side to show how far
+ * outside it you are. A meter that pins at its end stops being information exactly when the operator
+ * most needs to know which way to move.
+ */
+function BandMeter({ value, lo, hi }: { value: number; lo: number; hi: number }) {
+  const span = Math.max(hi - lo, 1)
+  const min = lo - span
+  const max = hi + span
+  const at = (v: number) => Math.min(100, Math.max(0, ((v - min) / (max - min)) * 100))
+
+  const inside = value >= lo && (hi <= 0 || value <= hi)
+  const colour = inside ? signal.lock : signal.adjust
+
+  return (
+    <Box sx={{ position: 'relative', height: 36 }}>
+      <Box sx={{ position: 'absolute', top: 16, left: 0, right: 0, height: 6, bgcolor: '#1e222a', borderRadius: 1 }} />
+      <Box
+        sx={{
+          position: 'absolute',
+          top: 16,
+          height: 6,
+          left: `${at(lo)}%`,
+          width: `${at(hi) - at(lo)}%`,
+          bgcolor: `${signal.lock}30`,
+          borderLeft: `2px solid ${signal.lock}99`,
+          borderRight: `2px solid ${signal.lock}99`,
+        }}
+      />
+      <Box
+        sx={{
+          position: 'absolute',
+          top: 8,
+          left: `${at(value)}%`,
+          width: 3,
+          height: 22,
+          bgcolor: colour,
+          borderRadius: 0.5,
+          transform: 'translateX(-1.5px)',
+          boxShadow: `0 0 12px ${colour}`,
+          transition: 'left 160ms linear, background-color 160ms linear',
+        }}
+      />
+      <Typography
+        sx={{
+          position: 'absolute',
+          top: 0,
+          left: `${at(value)}%`,
+          transform: 'translateX(-50%)',
+          fontFamily: mono,
+          fontSize: '0.62rem',
+          color: colour,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        {value.toFixed(1)}
+      </Typography>
+    </Box>
+  )
+}
+
+/** Readout is one labelled figure, set so a row of them lines up under its own digits. */
+function Readout({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <Box sx={{ minWidth: 78 }}>
+      <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', lineHeight: 1.7 }}>
+        {label}
+      </Typography>
+      <Typography sx={{ fontFamily: mono, fontSize: '0.95rem', color: tone ?? 'text.primary' }}>
+        {value}
+      </Typography>
+    </Box>
+  )
+}
+
+/**
+ * AlignmentGuide is the readout under the preview.
+ *
+ * `steadiness` and `blurred` come from the browser rather than the receiver, because they describe
+ * frames the receiver never saw. They belong beside the rest anyway: from the operator's side "my hand
+ * is shaking" and "I am too far away" are the same question, and answering them in two places means
+ * watching two places while trying to hold a phone still.
  */
 export function AlignmentGuide({
   alignment,
@@ -113,85 +197,78 @@ export function AlignmentGuide({
 }) {
   if (!alignment) return null
 
-  const base = presentation[alignment.status] ?? presentation.searching
-  // A marginal grid is softened from red to amber and renamed, because red plus "too dense" while chunks are
-  // being acknowledged is precisely the message that stopped being believed. Amber says "this will be slow",
-  // which is what a few frames in a hundred actually means.
-  const { colour, label, Icon } =
-    alignment.status === 'too_dense' && alignment.geometry_marginal
-      ? { ...base, colour: '#fb8c00', label: 'Grid marginal' }
-      : base
-  // Only worth mentioning once it is actually costing frames. A number that is always on screen is one nobody
-  // reads, and a little shake that the gate absorbs without dropping anything is not a problem to report.
+  const { colour, word, sub } = look(alignment)
+  const lo = alignment.required_module_pixels
+  const hi = alignment.max_module_pixels
+  // Only mentioned once it is costing frames. A figure that is always on screen is one nobody reads.
   const shaky = blurred > 0 && steadiness > 0 && steadiness < 0.85
 
   return (
-    <Paper variant="outlined" sx={{ p: 2, borderColor: colour, borderWidth: 2 }}>
-      <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 1 }}>
-        <Icon sx={{ color: colour }} />
-        <Typography variant="h6" sx={{ color: colour, fontWeight: 600 }}>
-          {label}
+    <Paper
+      sx={{
+        p: 2.5,
+        borderColor: `${colour}66`,
+        // The panel carries the state as well as stating it, so the verdict is legible in peripheral
+        // vision while the operator is looking at the phone rather than at this screen.
+        background: `linear-gradient(180deg, ${colour}0d 0%, transparent 55%)`,
+        transition: 'border-color 200ms linear',
+      }}
+    >
+      <Stack direction="row" alignItems="baseline" spacing={1.5} flexWrap="wrap" useFlexGap>
+        <Typography
+          sx={{
+            fontFamily: mono,
+            fontWeight: 600,
+            fontSize: 'clamp(1.6rem, 7vw, 2.4rem)',
+            letterSpacing: '-0.04em',
+            color: colour,
+            lineHeight: 1,
+            textShadow: `0 0 24px ${colour}55`,
+          }}
+        >
+          {word}
+        </Typography>
+        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+          {sub}
         </Typography>
       </Stack>
 
-      <Typography variant="body2" sx={{ mb: alignment.locked || shaky ? 2 : 0 }}>
+      <Typography variant="body2" sx={{ color: 'text.secondary', mt: 1.25 }}>
         {alignment.advice}
       </Typography>
 
       {shaky && (
-        <Typography variant="body2" sx={{ mb: alignment.locked ? 2 : 0, color: '#fb8c00' }}>
-          Hold steadier — {blurred} frame{blurred === 1 ? '' : 's'} dropped for movement. Bracing your elbows,
-          or resting the phone against something, is worth more here than any setting.
+        <Typography variant="body2" sx={{ mt: 1, color: signal.adjust }}>
+          Hold steadier — {blurred} frame{blurred === 1 ? '' : 's'} dropped for movement. Bracing your
+          elbows, or resting the phone against something, is worth more here than any setting.
         </Typography>
       )}
 
       {alignment.locked && (
-        <Stack spacing={1.5}>
-          {/* Fill is the one figure worth showing as a bar rather than a number: it is the thing
-              being adjusted, and a bar shows the target zone as well as the current value. */}
-          <Box>
-            <Stack direction="row" justifyContent="space-between">
-              <Typography variant="caption" color="text.secondary">
-                Frame fills the view
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                {Math.round(alignment.fill * 100)}%
-              </Typography>
-            </Stack>
-            <LinearProgress
-              variant="determinate"
-              value={Math.min(100, alignment.fill * 100)}
-              sx={{
-                height: 8,
-                borderRadius: 1,
-                '& .MuiLinearProgress-bar': { backgroundColor: colour },
-              }}
-            />
-            <Typography variant="caption" color="text.secondary">
-              aim for 35–90%
-            </Typography>
-          </Box>
+        <Stack spacing={2.5} sx={{ mt: 2.5 }}>
+          {lo > 0 && (
+            <Box>
+              <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }}>
+                <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                  pixels per cell
+                </Typography>
+                <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                  {hi > 0 ? `aim ${lo.toFixed(0)}–${hi.toFixed(0)}` : `aim ${lo.toFixed(0)}+`}
+                </Typography>
+              </Stack>
+              <BandMeter value={alignment.module_pixels} lo={lo} hi={hi} />
+            </Box>
+          )}
 
-          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-            <Chip
-              size="small"
-              color={
-                alignment.module_pixels >= alignment.required_module_pixels &&
-                (alignment.max_module_pixels <= 0 || alignment.module_pixels <= alignment.max_module_pixels)
-                  ? 'success'
-                  : 'warning'
-              }
-              label={
-                alignment.required_module_pixels > 0
-                  ? alignment.max_module_pixels > 0
-                    ? `${alignment.module_pixels.toFixed(1)} px per cell (aim ${alignment.required_module_pixels.toFixed(0)}–${alignment.max_module_pixels.toFixed(0)})`
-                    : `${alignment.module_pixels.toFixed(1)} / ${alignment.required_module_pixels.toFixed(0)} px per cell`
-                  : `${alignment.module_pixels.toFixed(1)} px per cell`
-              }
+          <Stack direction="row" spacing={2.5} flexWrap="wrap" useFlexGap>
+            <Readout label="fill" value={`${Math.round(alignment.fill * 100)}%`} />
+            <Readout
+              label="off-square"
+              value={`${Math.round(alignment.perspective * 100)}%`}
+              tone={alignment.perspective > 0.2 ? signal.adjust : undefined}
             />
-            <Chip size="small" label={`${Math.round(alignment.perspective * 100)}% off-square`} />
-            <Chip size="small" label={`fiducials ${Math.round(alignment.finder_score * 100)}%`} />
-            <Chip size="small" label={`contrast ${Math.round(alignment.contrast)}`} />
+            <Readout label="fiducials" value={`${Math.round(alignment.finder_score * 100)}%`} />
+            <Readout label="contrast" value={Math.round(alignment.contrast).toString()} />
           </Stack>
         </Stack>
       )}

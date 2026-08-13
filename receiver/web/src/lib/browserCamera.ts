@@ -1,4 +1,4 @@
-import { videoConstraints } from './videoConstraints'
+import { videoConstraints, type CaptureDetail } from './videoConstraints'
 // The browser's camera, owned outside React.
 //
 // It has to live here rather than in a component, and the reason is the bug this fixes: the stream was held by
@@ -349,7 +349,12 @@ async function tameExposure(track: MediaStreamTrack) {
  * `prepare` is called first so the receiver is taking posted frames before any are sent — the other order means
  * the first second of frames is refused.
  */
-export async function start(options: { deviceId?: string; rearFacing?: boolean; prepare: () => Promise<void> }) {
+export async function start(options: {
+  deviceId?: string
+  rearFacing?: boolean
+  detail?: CaptureDetail
+  prepare: () => Promise<void>
+}) {
   emit({ error: null, sent: 0, accepted: 0, idle: 0, blurred: 0, steadiness: 0 })
   // A new run measures its own sharpness from scratch: the last one may have been at a different distance, in
   // different light, or on a different camera entirely.
@@ -360,7 +365,11 @@ export async function start(options: { deviceId?: string; rearFacing?: boolean; 
     // See videoConstraints: the resolution asked for here decides which grids can be decoded at all, and it
     // used to be pinned to 1080p — under which a 384 grid is unreadable at any framing.
     const constraints: MediaStreamConstraints = {
-      video: videoConstraints({ deviceId: options.deviceId, rearFacing: options.rearFacing }),
+      video: videoConstraints({
+        deviceId: options.deviceId,
+        rearFacing: options.rearFacing,
+        detail: options.detail,
+      }),
       audio: false,
     }
 

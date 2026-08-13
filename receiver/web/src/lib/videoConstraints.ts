@@ -21,7 +21,26 @@
  */
 
 /** What the caller knows about the camera it wants. */
+export type CaptureDetail = 'balanced' | 'maximum'
+
 export interface CameraChoice {
+  /**
+   * How much sensor to ask for.
+   *
+   * 'balanced' is 1080p and the right answer for a colour payload: past it the sensor resolves the
+   * panel's own pixel grid, the two beat against each other, and a cell stops being one colour. Every
+   * frame that has ever decoded in colour here was captured at 1080p.
+   *
+   * 'maximum' asks for everything the sensor has, and is the right answer for a binary payload and a
+   * dense grid. A binary cell is thresholded rather than measured, so subpixel striping barely touches
+   * it, and pixels per cell is then the only thing that matters — a 256-cell grid is 4.2 pixels a cell
+   * at 1080p and 8.4 at 4K, which is the difference between unreadable and readable.
+   *
+   * It is a choice rather than something derived because the browser cannot know what it is about to
+   * be pointed at: the encoding lives in the frames, and the camera has to be opened before any of
+   * them can be read.
+   */
+  detail?: CaptureDetail
   /** A specific device the operator picked from the list, if any. */
   deviceId?: string
   /** Whether to prefer the rear camera, which is the one that can point at a display. Absent means no. */
@@ -36,9 +55,12 @@ export interface CameraChoice {
  * get no camera at all on the hardware that needed the most help.
  */
 export function videoConstraints(choice: CameraChoice): MediaTrackConstraints {
-  // 1080p, deliberately, and not the sensor's best. See above: past this the camera starts resolving the
-  // display's pixel grid rather than the frame drawn on it, and colour is the first casualty.
-  const resolution = { width: { ideal: 1920 }, height: { ideal: 1080 } }
+  // 1080p unless more was asked for. See CameraChoice.detail: more pixels help a binary payload and
+  // actively harm a colour one, and only the operator knows which is coming.
+  const resolution =
+    choice.detail === 'maximum'
+      ? { width: { ideal: 3840 }, height: { ideal: 2160 } }
+      : { width: { ideal: 1920 }, height: { ideal: 1080 } }
 
   // A named device wins outright, and deliberately carries no facingMode: the two can contradict each other —
   // the device the operator picked may be the front one — and an explicit choice should not be second-guessed.

@@ -143,25 +143,23 @@ func New(st *store.Store, objects, acks objectstore.Store, source Source, cfg *c
 		r.engine = engine.NewNull()
 	}
 
-	// Seed the layout hint from configuration, when one is named.
+	// The layout hint is learned and never configured.
 	//
-	// The hint is normally learned from the first frame that resolves, and that is the better source
-	// because it needs no configuration and follows the sender. But learning cannot start from
-	// nothing: the descriptor block is what a frame is discarded for failing, so a camera that has
-	// never once managed a clean read never learns and stays stuck there. Measured on a real
-	// installation, 33 of 54 frames located their geometry perfectly and every one of them died on
-	// the descriptor — the learned hint had nothing to learn from.
+	// It was briefly both: learned from the first frame that resolved, and seeded from configuration
+	// so that learning had somewhere to start. The seed was a mistake, and the way it failed is worth
+	// keeping. A receiver configured for one grid while the sender was sending another tried the wrong
+	// layout first on every single frame — 25 of 125 frames in one measured run failed on the grid
+	// descriptor for no other reason — and because a hint is meant to be harmless nobody suspected it.
+	// A stale hint looks exactly like a marginal channel.
 	//
-	// Seeding breaks that circle without weakening anything. It is still only a hint: Locate tries
-	// it first and falls through to the descriptor search when it does not fit, and the first frame
-	// that resolves overwrites it.
-	if layout := current.Decoder.ExpectedLayout(); layout != nil {
-		r.layout.Store(layout)
-		r.log.Info("seeded the decoder's layout hint from configuration",
-			zap.Int("grid_width", layout.GridWidth),
-			zap.Int("grid_height", layout.GridHeight),
-			zap.Int("cell_pixels", layout.CellPixels))
-	}
+	// It bought nothing in return. The case it was supposed to rescue is a camera that never resolves
+	// a frame cleanly, and a seed does not rescue that: the same run had the receiver seeded with a
+	// 96-cell grid against a 256-cell sender, and not one frame decoded either way. A geometry that
+	// never resolves is unreadable for reasons no hint reaches.
+	//
+	// So there is one source, and it is observation: any frame whose geometry resolves stores its
+	// layout for the next one, and the first frame that resolves after a change replaces it. Nothing
+	// to keep in step with the sender, and nothing to go stale.
 	return r
 }
 

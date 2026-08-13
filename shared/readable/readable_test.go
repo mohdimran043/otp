@@ -172,3 +172,39 @@ func TestTheBinaryFloorMatchesWhatWasObserved(t *testing.T) {
 	// And the floor itself has to sit above the failure, or the assessment above is accidental.
 	require.Greater(t, readable.BinaryPixels, 5.7)
 }
+
+// A denser grid must ask for a slower frame rate, not a faster one.
+//
+// This is the relationship the sender's old ten-a-second default got backwards. The capture side
+// offers a fixed number of photographs a second; a frame that needs more of them can be replaced
+// less often. It costs nothing in throughput because a denser frame carries proportionally more.
+func TestDisplayFPSSlowsAsTheGridTightens(t *testing.T) {
+	const qz, capW, capH = 2, 1920, 1080
+
+	last := 1e9
+	for _, grid := range []int{80, 96, 128, 192, 256} {
+		fps := readable.DisplayFPS(grid, qz, 3, capW, capH)
+		require.Greater(t, fps, 0.0, "grid %d must ask for some frame rate", grid)
+		require.LessOrEqual(t, fps, last,
+			"grid %d asked for %.2f fps, faster than the looser grid before it (%.2f)", grid, fps, last)
+		last = fps
+	}
+}
+
+// Never one shot a frame, however comfortable the geometry.
+//
+// At one photograph per frame a single tremor or rolling-shutter tear loses the frame outright, and
+// there is nothing to combine it with. Two is the least that survives one bad photograph.
+func TestDisplayFPSNeverLeavesAFrameOnOneShot(t *testing.T) {
+	fps := readable.DisplayFPS(80, 2, 1, 3840, 2160)
+	require.LessOrEqual(t, fps, readable.PostRate/2,
+		"a comfortable geometry still needs two shots a frame, so at most half the post rate")
+}
+
+// A geometry below its floor is where combining earns its keep, so it must ask for more shots.
+func TestDisplayFPSGivesAMarginalGeometryMoreShots(t *testing.T) {
+	comfortable := readable.DisplayFPS(80, 2, 3, 1920, 1080)
+	marginal := readable.DisplayFPS(192, 2, 3, 1920, 1080)
+	require.Less(t, marginal, comfortable,
+		"a marginal geometry must be shown more slowly so each frame gets more photographs")
+}

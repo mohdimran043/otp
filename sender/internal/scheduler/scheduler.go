@@ -213,9 +213,26 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 		return Stats{}, err
 	}
 
+	// How fast to show this transmission's frames, derived from its own geometry rather than taken
+	// from configuration.
+	//
+	// The rate and the geometry are not independent settings and treating them as two knobs is what
+	// made the old ten-a-second default unusable. The capture side takes a fixed number of
+	// photographs a second; a frame needs several of them to be read reliably, and a frame that sits
+	// closer to what its encoding needs takes more. So the fastest a frame may be replaced follows
+	// from the grid, and choosing it here means an operator who picks a dense grid cannot
+	// accidentally pair it with a rate that leaves every frame resting on one photograph.
+	//
+	// A rate set explicitly still wins — see displayInterval. This is the answer when nobody has
+	// given one, which is the usual case and the one that was silently wrong before.
+	interval := displayInterval(cfg, tx)
+	s.log.Info("frame rate chosen for this transmission's geometry",
+		zap.Int("grid", tx.GridWidth), zap.Int("bit_depth", tx.BitDepth),
+		zap.Duration("interval", interval), zap.Float64("fps", float64(time.Second)/float64(interval)))
+
 	stats := Stats{}
 	started := time.Now()
-	ticker := time.NewTicker(cfg.FrameInterval())
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	// The manifest is shown first and then periodically, so a receiver that came online mid-stream
@@ -246,7 +263,7 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 		// reloadable: an operator turning the rate down while a transmission runs is the main lever
 		// they have when the receiver reports it is falling behind.
 		cfg = s.cfg.Current()
-		ticker.Reset(cfg.FrameInterval())
+		ticker.Reset(displayInterval(cfg, tx))
 
 		// And so is the status, because that is how an operator stops a transfer. A stop is a row
 		// update rather than a signal to this goroutine, which means the API handler and this loop need

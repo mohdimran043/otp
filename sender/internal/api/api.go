@@ -193,6 +193,21 @@ type TransferRequest struct {
 	GridWidth  int `json:"grid_width,omitempty"`
 	GridHeight int `json:"grid_height,omitempty"`
 
+	// SendAnyway carries a geometry past the check that a receiving camera could resolve it.
+	//
+	// The check refuses only the band where the measurements say no frames decode at all, and refusing
+	// that is usually right: the alternative is a transfer that displays every frame, acknowledges
+	// nothing, and exhausts its retransmissions, which is a slow way of learning what the arithmetic
+	// would have said at once.
+	//
+	// It is overridable because the arithmetic rests on an assumption the sender cannot verify — the
+	// receiving camera's resolution, taken from configuration — and because "no frames decode" is a
+	// statement about the measurements behind it rather than a law. Someone testing a decoder change,
+	// running a channel this build has never seen, or simply wanting the evidence for themselves is
+	// better served by a warning they can pass than by a refusal they cannot. The check still runs and
+	// still says what it thinks; this decides who gets the last word.
+	SendAnyway bool `json:"send_anyway,omitempty"`
+
 	// CellPixels overrides the configured cell size for this transfer alone. Zero means
 	// the configured default. Unlike quiet zone — a property of the panel and camera —
 	// cell size trades off against grid: a caller who wants a bigger grid than the
@@ -348,10 +363,25 @@ func (s *Server) createTransfer(w http.ResponseWriter, r *http.Request) {
 		go s.transmit(context.WithoutCancel(ctx), transmission.ID)
 	}
 
+	// The resolved geometry is logged with the acceptance, not just the file, because without it an
+	// accepted transfer cannot be explained afterwards.
+	//
+	// A 256-cell transfer was accepted while the readability guard was live and refusing that exact
+	// geometry on three separate direct probes, and there was no way to tell from the log what the request
+	// had actually asked for — grid, cell size and depth all come from a mix of form fields and configured
+	// defaults, so "the caller sent 256" and "the caller sent nothing and the default was 256" are different
+	// faults with the same outcome. Logging what was resolved makes the next occurrence answerable in one
+	// line instead of unanswerable.
 	s.log.Info("transfer accepted",
 		zap.String("transmission", transmission.ID.String()),
 		zap.String("file", file.Filename),
 		zap.Int64("bytes", file.SizeBytes),
+		zap.String("encoder", request.Encoder),
+		zap.Int("bit_depth", request.BitDepth),
+		zap.Int("grid_width", request.GridWidth),
+		zap.Int("grid_height", request.GridHeight),
+		zap.Int("cell_pixels", request.CellPixels),
+		zap.Int("camera_short_side", cfg.Optical.CameraShortSidePixels),
 		zap.String("callback", request.CallbackURL))
 
 	s.respond(w, http.StatusAccepted, TransferResponse{
@@ -389,6 +419,7 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 		GridWidth:        formInt(r, "grid_width", cfg.Optical.GridWidth),
 		GridHeight:       formInt(r, "grid_height", cfg.Optical.GridHeight),
 		CellPixels:       formInt(r, "cell_pixels", cfg.Optical.CellPixels),
+		SendAnyway:       formBool(r, "send_anyway", false),
 	}
 
 	if request.Encoder == "" {
@@ -561,6 +592,12 @@ func validateGeometryForCamera(request TransferRequest, cfg config.Config, depth
 	}
 
 	assessment := readable.Assess(request.GridWidth, cfg.Optical.QuietZone, depth, short, long)
+	if request.SendAnyway {
+		// Asked for deliberately. The assessment is not suppressed — it is still computed, and the
+		// upload still records what it was — but the operator has the last word over an estimate that
+		// rests on a camera resolution this process cannot measure.
+		return nil
+	}
 	if assessment.Readable || assessment.Marginal {
 		// Marginal is allowed through, and the first version of this refused it — which turned a slow
 		// channel into a blocked one. An operator who has been told a geometry will decode a few frames in
