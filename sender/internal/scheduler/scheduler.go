@@ -344,7 +344,7 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 			}
 			if afterLastAck(len(manifests) > 0, complete == store.TxCompleted,
 				time.Since(lastAckAt), cfg.Ack.Timeout) == showManifest {
-				if err := s.show(ctx, manifests[0], PriorityKeepAlive); err != nil {
+				if err := s.show(ctx, manifests[0], displayInterval(cfg, tx), PriorityKeepAlive); err != nil {
 					return stats, err
 				}
 				stats.FramesShown++
@@ -378,7 +378,7 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 
 		if nextManifest <= 0 && len(manifests) > 0 {
 			frame := manifests[0]
-			if err := s.show(ctx, frame, PriorityKeepAlive); err != nil {
+			if err := s.show(ctx, frame, displayInterval(cfg, tx), PriorityKeepAlive); err != nil {
 				return stats, err
 			}
 			nextManifest = manifestEvery
@@ -442,7 +442,7 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 		// for the same reason the lane geometry does: a transfer rendered before the settings changed
 		// still has to be tiled at the size it was rendered at.
 		gapPx := protocol.DefaultLaneGapCells * tx.CellPixels
-		if err := s.showLanes(ctx, display, lanes, gapPx, priority); err != nil {
+		if err := s.showLanes(ctx, display, lanes, gapPx, displayInterval(cfg, tx), priority); err != nil {
 			return stats, err
 		}
 		// Every lane that went out is a symbol the receiver may now acknowledge, so all of them are
@@ -639,8 +639,28 @@ func (s *Scheduler) choose(ctx context.Context, pending []store.Chunk, byChunk m
 	return nil, PriorityKeepAlive, nil
 }
 
+// paced is a sink that can keep the screen for a frame for as long as it was meant to be visible.
+//
+// An interface rather than a concrete type so the file and none sinks, and every test double, stay
+// unchanged: they display into somewhere nobody is photographing, where taking turns means nothing.
+type paced interface {
+	ShowFor(ctx context.Context, frame optical.Frame, hold time.Duration) error
+}
+
+// display puts a frame on the screen, reserving it for hold if the sink can do that.
+//
+// The reservation is what lets two transfers share one display. Without it each scheduler shows on
+// its own ticker and replaces whatever the other just put up, often before a camera could photograph
+// it — so neither transfer's chunks get acknowledged and both retransmit for ever. See Live.ShowFor.
+func (s *Scheduler) display(ctx context.Context, frame optical.Frame, hold time.Duration) error {
+	if p, ok := s.sink.(paced); ok && hold > 0 {
+		return p.ShowFor(ctx, frame, hold)
+	}
+	return s.sink.Show(ctx, frame)
+}
+
 // show displays one frame and records that it went out.
-func (s *Scheduler) show(ctx context.Context, frame store.Frame, priority Priority) error {
+func (s *Scheduler) show(ctx context.Context, frame store.Frame, hold time.Duration, priority Priority) error {
 	body, err := objectstore.GetBytes(ctx, s.objects, frame.StoredPath, 64<<20)
 	if err != nil {
 		return err
@@ -648,14 +668,14 @@ func (s *Scheduler) show(ctx context.Context, frame store.Frame, priority Priori
 
 	// No sequence is passed: the display assigns it. A scheduler runs per transmission and two of them
 	// counting separately is how concurrent transfers came to overwrite each other's frames.
-	if err := s.sink.Show(ctx, optical.Frame{
+	if err := s.display(ctx, optical.Frame{
 		Number:       frame.FrameNumber,
 		Transmission: frame.TransmissionID,
 		Manifest:     frame.IsManifest,
 		WidthPx:      frame.WidthPx,
 		HeightPx:     frame.HeightPx,
 		PNG:          body,
-	}); err != nil {
+	}, hold); err != nil {
 		return err
 	}
 

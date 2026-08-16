@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"image"
 	"image/png"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -130,7 +131,9 @@ func composeLanes(ctx context.Context, objects objectstore.Store, frames []store
 // The display is told about the round as a whole: one image, one sequence number, and the leading
 // frame's identity for the logs and for anything watching over HTTP. The other lanes are on the same
 // picture and are found by the receiver from their own fiducials, so there is nothing to describe.
-func (s *Scheduler) showLanes(ctx context.Context, frames []store.Frame, lanes, gapPx int, priority Priority) error {
+func (s *Scheduler) showLanes(ctx context.Context, frames []store.Frame, lanes, gapPx int,
+	hold time.Duration, priority Priority,
+) error {
 	body, width, height, err := composeLanes(ctx, s.objects, frames, lanes, gapPx)
 	if err != nil {
 		return err
@@ -139,14 +142,14 @@ func (s *Scheduler) showLanes(ctx context.Context, frames []store.Frame, lanes, 
 	lead := frames[0]
 	// No sequence is passed: the display assigns it. A scheduler runs per transmission and two of them
 	// counting separately is how concurrent transfers came to overwrite each other's frames.
-	if err := s.sink.Show(ctx, optical.Frame{
+	if err := s.display(ctx, optical.Frame{
 		Number:       lead.FrameNumber,
 		Transmission: lead.TransmissionID,
 		Manifest:     lead.IsManifest,
 		WidthPx:      width,
 		HeightPx:     height,
 		PNG:          body,
-	}); err != nil {
+	}, hold); err != nil {
 		return err
 	}
 

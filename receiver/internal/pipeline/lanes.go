@@ -89,6 +89,17 @@ func (r *Receiver) prepareAll(ctx context.Context, capture Capture) []prepared {
 		}
 
 		frame, err := encoding.DecodeAt(g, capture.Image, opts)
+
+		// The same read the lead lane gets, not a bare decode.
+		//
+		// This is where a tiled transfer was quietly losing most of its lanes. A raw decode is not the
+		// ordinary way a real frame succeeds — on a camera it is the lucky way. Nearly every capture
+		// lands just past its payload CRC and is rescued by the merge across shots or by the recovery
+		// engine, and neither of those ran here, so the lead lane recovered and every other lane was
+		// thrown away with the payload_crc it would have survived. Measured over one 775-capture
+		// session: 205 photographs read one of their two lanes, and 3 read both.
+		frame, err = r.readLane(ctx, cfg, capture, g, frame, err)
+
 		readings = append(readings, laneReading{geometry: g, decoded: err == nil})
 		if err != nil {
 			// Located but unreadable. Recorded as its own failure rather than dropped: a lane that

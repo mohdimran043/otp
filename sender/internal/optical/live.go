@@ -43,6 +43,14 @@ type Live struct {
 	held      bool
 	heldSince time.Time
 
+	// turnstile and freeAt are how concurrent transfers take turns on the one screen.
+	//
+	// freeAt is when the frame currently up has had the time it was given and may be replaced. Kept
+	// under its own lock rather than mu: a caller waiting for the screen must not block a browser
+	// asking what is on it, and holding mu across a wait would do exactly that.
+	turnstile sync.Mutex
+	freeAt    time.Time
+
 	// next assigns display sequence numbers, and it lives here because there is exactly one display.
 	//
 	// This was a per-scheduler counter, and that was a real bug rather than an untidiness. A scheduler
@@ -68,10 +76,63 @@ func (l *Live) Name() string { return l.inner.Name() }
 // Inner returns the wrapped sink, for callers that need the concrete channel.
 func (l *Live) Inner() Sink { return l.inner }
 
+// ShowFor displays a frame and keeps the screen for it for at least hold.
+//
+// There is one screen and there can be several schedulers, one per transfer. Show on its own only
+// stops them corrupting each other's *bookkeeping*; it does nothing about the screen itself, so two
+// concurrent transfers each put a frame up on their own ticker and each replaced the other's — often
+// within milliseconds. A frame the camera never had time to photograph is a chunk that is never
+// acknowledged, so both transfers retransmit indefinitely and neither finishes. Two files together
+// went slower than the same two files one after the other.
+//
+// So a frame reserves the display for the time it was meant to be visible, and the next caller waits.
+// That is what makes concurrent transfers interleave rather than collide: each scheduler still runs
+// its own loop and asks for the screen when it has something to show, and the turnstile hands it over
+// one whole frame at a time. Total display bandwidth is fixed and is now *shared* rather than
+// contended — two transfers each get half the frames, which is the honest division of one screen.
+//
+// A zero or negative hold is the old behaviour and reserves nothing, for callers that are not pacing
+// a transfer: a manual step from the operator's display page should not be made to queue.
+func (l *Live) ShowFor(ctx context.Context, frame Frame, hold time.Duration) error {
+	if hold > 0 {
+		if err := l.reserve(ctx, hold); err != nil {
+			return err
+		}
+	}
+	return l.Show(ctx, frame)
+}
+
+// reserve waits for the current frame's time to run out and claims the next slot.
+//
+// The wait is on the context as well as the clock, so a cancelled transfer does not sit here holding a
+// slot it will never use.
+func (l *Live) reserve(ctx context.Context, hold time.Duration) error {
+	for {
+		l.turnstile.Lock()
+		wait := time.Until(l.freeAt)
+		if wait <= 0 {
+			l.freeAt = time.Now().Add(hold)
+			l.turnstile.Unlock()
+			return nil
+		}
+		l.turnstile.Unlock()
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
+	}
+}
+
 // Show assigns the frame its display sequence, displays it, and publishes it as the current one.
 //
 // The sequence is assigned here rather than taken from the caller, so that a caller cannot get it wrong
 // and two callers cannot collide. Whatever a scheduler put in the field is overwritten.
+//
+// Show does not reserve the screen. A caller pacing a transfer wants ShowFor.
 func (l *Live) Show(ctx context.Context, frame Frame) error {
 	frame.Sequence = l.next.Add(1)
 
