@@ -6,6 +6,7 @@ import {
   displayedEdgePx,
   frameEdgePx,
   minRenderedCell,
+  usableFrameArea,
 } from './cellFit'
 
 const CELLS = [1, 2, 3, 4, 6, 8]
@@ -147,5 +148,54 @@ describe('the geometry Auto resolves to', () => {
     // Four lanes on a 1080 panel leave 540 each, and the answer must still fit that share.
     const chosen = chooseGeometry('auto', 'auto', GRIDS, CELLS, 540, 'color8', COLOUR_CEILING)
     expect(frameEdgePx(chosen.grid, chosen.cell)).toBeLessThanOrEqual(540)
+  })
+})
+
+// Predicting what the Display page can actually show.
+//
+// The form used to measure the physical screen while the page measures the browser's viewport times the
+// room it keeps for a caption. The screen is always larger, so the form could choose a geometry the page
+// could not show — and the page will not rescue it by scaling fractionally, because a cell resampled across
+// a fractional boundary is a cell the decoder reads wrongly.
+describe('the area a frame actually has', () => {
+  it('is smaller than the screen, because the page is not the panel', () => {
+    const screen = 1080
+    expect(usableFrameArea(1920, screen, 1)).toBeLessThan(screen)
+  })
+
+  it('stops grid 512 from choosing a frame that overflows every real viewport', () => {
+    const usable = usableFrameArea(1920, 1080, 1)
+    const cell = bestCellFor(512, CELLS, usable)
+
+    // Whatever it picks must fit the space the page will give it.
+    expect(cell).not.toBeNull()
+    expect(frameEdgePx(512, cell!)).toBeLessThanOrEqual(usable)
+
+    // The old answer, against the raw screen, was 2 — and 516*2 = 1032 does not fit.
+    expect(frameEdgePx(512, 2)).toBe(1032)
+    expect(1032).toBeGreaterThan(usable)
+  })
+
+  it('leaves every offered grid showable at a whole multiple', () => {
+    const usable = usableFrameArea(1920, 1080, 1)
+    for (const grid of GRIDS) {
+      const chosen = bestCellFor(grid, CELLS, usable)
+      if (chosen === null) continue // too large for this panel at any offered cell, which is honest
+      expect(displayedEdgePx(grid, chosen, usable)).toBeGreaterThan(0)
+      expect(frameEdgePx(grid, chosen)).toBeLessThanOrEqual(usable)
+    }
+  })
+
+  it('divides the panel between lanes', () => {
+    const one = usableFrameArea(1920, 1080, 1)
+    const four = usableFrameArea(1920, 1080, 4)
+    expect(four).toBeLessThan(one)
+    // Four lanes are two across and two down, so each gets about half of each axis.
+    expect(four).toBeCloseTo(one / 2, -1)
+  })
+
+  it('never returns a negative or absurd area from an odd screen', () => {
+    expect(usableFrameArea(320, 100, 1)).toBeGreaterThan(0)
+    expect(usableFrameArea(0, 0, 4)).toBeGreaterThanOrEqual(0)
   })
 })

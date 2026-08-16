@@ -154,3 +154,52 @@ export function chooseGeometry(
   }
   return best ?? { grid: fallbackGrid, cell: cells[0]! }
 }
+
+/**
+ * displayRoom is the fraction of the viewport's height the Display page leaves for a frame.
+ *
+ * The rest is the caption and the controls above it. Exported so the page that reserves it and the form that
+ * has to predict it use one number: they were two, and the disagreement is the bug below.
+ */
+export const displayRoom = 0.82
+
+/**
+ * chromeAllowance is what the browser's own furniture takes off the screen's height.
+ *
+ * A guess, and it only has to be roughly right — tab strip, address bar, bookmarks, and the operating
+ * system's own bar. Guessing high costs a slightly smaller frame; guessing low costs a frame that does not
+ * fit, which is the failure this exists to prevent, so it is deliberately generous.
+ */
+const chromeAllowance = 120
+
+/**
+ * usableFrameArea is the space one lane may occupy, measured the way the Display page will measure it.
+ *
+ * The form used to measure `window.screen` — the physical panel — while the Display page measures
+ * `window.innerHeight` times displayRoom. The screen is always the larger of the two, so the form could
+ * choose a geometry the page then could not show: at grid 512 the only cell size fitting a 1080-pixel screen
+ * is 2, which renders 1032 px, and 1032 exceeds the display's usable height at every realistic viewport.
+ * The page will not scale by a fraction — a cell resampled across a fractional boundary is a cell the
+ * decoder reads wrongly — so it clamps to one times and the frame hangs off the edge.
+ *
+ * This is still a prediction rather than a measurement, and it is only right when the upload and the display
+ * are the same screen. Uploading from a laptop to display on a phone is the case it cannot see, and there
+ * the geometry has to be chosen by hand.
+ */
+export function usableFrameArea(
+  screenWidth: number,
+  screenHeight: number,
+  lanes: number,
+  room = displayRoom,
+  chrome = chromeAllowance,
+): number {
+  // Lanes are tiled, so four of them span two lane-widths across and two down.
+  const columns = lanes >= 4 ? 2 : Math.max(lanes, 1)
+  const rows = lanes >= 4 ? 2 : 1
+
+  // Never below a floor: a tiny reported screen — a headless browser, an unusual device — should produce a
+  // small frame rather than a negative one.
+  const viewportHeight = Math.max(screenHeight - chrome, 240)
+
+  return Math.floor(Math.min(screenWidth / columns, (viewportHeight * room) / rows))
+}

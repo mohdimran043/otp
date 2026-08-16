@@ -18,6 +18,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 
 import { api, formatBytes, type DisplayFrame } from '../api/client'
+import { displayRoom } from '../lib/cellFit'
 
 // The display: the page a camera is pointed at.
 //
@@ -263,7 +264,9 @@ export function Display() {
   // and cropped rather than shrunk, because shrinking is the fractional scaling this must not do.
   const fitted = useMemo(() => {
     if (!width || !height) return 1
-    const room = camera ? 1 : 0.82 // Leave space for the caption when there is one.
+    // Shared with the upload form, which has to predict this to choose a geometry the page can show.
+    // Two copies of the number is what let the two disagree. See lib/cellFit.
+    const room = camera ? 1 : displayRoom
     return Math.max(1, Math.floor(Math.min(viewport.w / width, (viewport.h * room) / height)))
   }, [width, height, viewport, camera])
 

@@ -20,7 +20,7 @@ import {
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import UploadFileIcon from '@mui/icons-material/UploadFile'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { chooseGeometry } from '../lib/cellFit'
+import { chooseGeometry, usableFrameArea } from '../lib/cellFit'
 import { useNavigate } from 'react-router-dom'
 
 import { api, formatBytes } from '../api/client'
@@ -134,11 +134,13 @@ function fitGridAndCell(
   //
   // Whole multiples are not negotiable — a cell resampled across a fractional boundary is a cell the
   // decoder reads wrongly — so the fit has to be right here rather than corrected by scaling later.
-  const columns = lanes >= 4 ? 2 : lanes
-  const rows = lanes >= 4 ? 2 : 1
-  const usable = Math.floor(
-    Math.min(window.screen.width / columns, window.screen.height / rows),
-  )
+  // Measured the way the Display page will measure it, not against the raw screen.
+  //
+  // Those are different numbers and the difference was a bug: the screen is the physical panel, the page
+  // has the browser's viewport minus the room it keeps for the caption. Sizing against the screen chose
+  // geometries the page could not then show — grid 512 rendered 1032 px, which fits a 1080 screen and
+  // overflows every real viewport, and the page will not scale by a fraction to rescue it.
+  const usable = usableFrameArea(window.screen.width, window.screen.height, lanes)
 
   return chooseGeometry(grid, cell, GRID_PRESETS, CELL_PRESETS, usable, encoder, COLOUR_GRID_CEILING)
 }
