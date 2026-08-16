@@ -45,11 +45,20 @@ The form asks for a file and nothing else. Everything the curl example cannot ex
 encoding, compression, error correction, encryption, and the geometry — is behind **Advanced**, closed by
 default, because the defaults are the measured ones and most transfers should not touch them.
 
-Inside it, **grid and cell size are both per transfer**: presets from 128×128 to 1024×1024, cells of 1 to 8
-pixels, and either can be left on **"Auto — fit my screen,"** computed in your browser from the panel it is
-actually open on. Fixing one auto-sizes the other; leaving both on Auto searches every combination that fits
-and prefers the larger cell, then the larger grid — a bigger cell is worth more to a camera than a bigger
-grid, because it is the blur budget that fails first. The deployment-wide values in `.env` remain the
+Inside it, **grid and cell size are both per transfer**: presets from 64×64 to 512×512, cells of 1 to 8
+pixels, and either can be left on **"Auto — fit my screen,"** computed in your browser from the space the
+Display page will actually give a frame — the panel less the browser's own furniture, less the room the page
+keeps for its caption, divided between the lanes.
+
+Only grids that screen can show are offered. One that cannot be displayed at any offered cell size renders a
+frame the Display page pins at 1× and hangs off the edge, since it scales by whole numbers and will not
+resample a cell across a fractional boundary to make it fit.
+
+Fixing the grid sizes the cell for it, and *not* by taking the largest that fits — that is usually the
+smaller picture as well as the slower one. An 80-cell grid at 8 px renders 672 and is shown at 672 on a 1080
+panel, because twice 672 does not fit; at 4 px it renders 336 and is shown at 1008. Same picture to a camera,
+a quarter of the pixels to draw and compress. Leaving both on Auto takes the largest grid the encoding can
+still be read at, then sizes its cell the same way. The deployment-wide values in `.env` remain the
 default for any transfer that does not choose.
 
 ## Transfer speed

@@ -203,3 +203,18 @@ export function usableFrameArea(
 
   return Math.floor(Math.min(screenWidth / columns, (viewportHeight * room) / rows))
 }
+
+/**
+ * showableGrids is the offered grids this screen can actually display, largest last.
+ *
+ * A grid that cannot be shown at any offered cell size has nothing to offer an operator: choosing it renders
+ * a frame the display page pins at one times and hangs off the edge, since the page scales by whole numbers
+ * and will not resample a cell across a fractional boundary to make it fit. Better not to offer it than to
+ * offer it and then explain the overflow.
+ *
+ * Filtered per screen rather than hard-coded, because the answer genuinely differs: a 512 grid is unshowable
+ * on a 1366-pixel laptop, comfortable on a 1440p panel, and the same list cannot be right for both.
+ */
+export function showableGrids(grids: number[], cells: number[], usable: number, quietZone = 2): number[] {
+  return grids.filter((g) => bestCellFor(g, cells, usable, quietZone) !== null)
+}

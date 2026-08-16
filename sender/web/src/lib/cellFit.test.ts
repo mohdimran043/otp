@@ -6,6 +6,7 @@ import {
   displayedEdgePx,
   frameEdgePx,
   minRenderedCell,
+  showableGrids,
   usableFrameArea,
 } from './cellFit'
 
@@ -97,7 +98,7 @@ describe('cell size for a grid', () => {
 // The presets and the ceiling are the page's, repeated here rather than imported, because these tests are
 // about the resolved *answer* and not about the constants. If the page changes them, this should be read
 // again rather than quietly following along.
-const GRIDS = [64, 80, 96, 128, 192, 256, 384, 512, 1024]
+const GRIDS = [64, 80, 96, 128, 192, 256, 384, 512]
 const COLOUR_CEILING = 80
 
 describe('the geometry Auto resolves to', () => {
@@ -197,5 +198,45 @@ describe('the area a frame actually has', () => {
   it('never returns a negative or absurd area from an odd screen', () => {
     expect(usableFrameArea(320, 100, 1)).toBeGreaterThan(0)
     expect(usableFrameArea(0, 0, 4)).toBeGreaterThanOrEqual(0)
+  })
+})
+
+// Only offering grids this screen can show.
+describe('which grids are offered', () => {
+  it('drops the ones that cannot be displayed at any offered cell size', () => {
+    // A 720p panel: the page has 492 px, and a 512 grid needs 516 even at one pixel a cell.
+    const small = usableFrameArea(1280, 720, 1)
+    expect(small).toBeLessThan(frameEdgePx(512, 1))
+    expect(showableGrids(GRIDS, CELLS, small)).not.toContain(512)
+
+    // The same grid on a larger panel is fine, so this cannot be a fixed list.
+    const large = usableFrameArea(2560, 1440, 1)
+    expect(showableGrids(GRIDS, CELLS, large)).toContain(512)
+  })
+
+  it('keeps the working grids on an ordinary screen', () => {
+    const usable = usableFrameArea(1920, 1080, 1)
+    const offered = showableGrids(GRIDS, CELLS, usable)
+
+    for (const grid of [64, 80, 96, 128]) expect(offered).toContain(grid)
+    // And everything offered is genuinely showable, which is the property that matters.
+    for (const grid of offered) {
+      const cell = bestCellFor(grid, CELLS, usable)
+      expect(cell).not.toBeNull()
+      expect(displayedEdgePx(grid, cell!, usable)).toBeGreaterThan(0)
+    }
+  })
+
+  it('no longer offers 1024 at all', () => {
+    // Every screen it fits is a screen where a one-pixel cell cannot be read, and every screen where a
+    // larger cell would help is one it does not fit. The protocol still carries it; the dropdown does not.
+    expect(GRIDS).not.toContain(1024)
+    expect(showableGrids(GRIDS, CELLS, usableFrameArea(3840, 2160, 1))).not.toContain(1024)
+  })
+
+  it('leaves fewer lanes offering more grids, since a lane gets a share of the panel', () => {
+    const one = showableGrids(GRIDS, CELLS, usableFrameArea(1920, 1080, 1))
+    const four = showableGrids(GRIDS, CELLS, usableFrameArea(1920, 1080, 4))
+    expect(four.length).toBeLessThanOrEqual(one.length)
   })
 })

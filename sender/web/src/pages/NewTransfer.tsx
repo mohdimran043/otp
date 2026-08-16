@@ -20,7 +20,7 @@ import {
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import UploadFileIcon from '@mui/icons-material/UploadFile'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { chooseGeometry, usableFrameArea } from '../lib/cellFit'
+import { chooseGeometry, showableGrids, usableFrameArea } from '../lib/cellFit'
 import { useNavigate } from 'react-router-dom'
 
 import { api, formatBytes } from '../api/client'
@@ -28,13 +28,7 @@ import { ErrorNotice } from '../components/ErrorNotice'
 import { Grid } from '../components/Grid'
 import { useUi } from '../store/ui'
 
-// 1024 is a valid preset for display visibility, not a camera-proven one: it round-trips
-// byte-exact on the shared-directory (file-loopback) channel, which is how most operators
-// actually run this, but it has not been shown to survive a real camera capturing a real
-// panel. The cell-size control and the note below it exist so that distinction is visible
-// rather than assumed.
-//
-// 80 and 96 are at the other end, and they exist for the opposite reason: a colour payload
+// 80 and 96 are the small end, and they exist for the opposite reason: a colour payload
 // photographed off a panel needs pixels per cell far more than it needs cells. Each cell is
 // matched against eight palette entries rather than put on one side of a threshold, so its
 // accuracy comes from how many camera pixels were averaged to read it — and that is exactly what
@@ -52,7 +46,19 @@ import { useUi } from '../store/ui'
 // suggests. What it buys is cell size: four 64-cell lanes span the display like a single 136-cell
 // grid where four 96-cell lanes span it like a 200-cell one, and on a phone camera that difference
 // decides whether the cells can be read at all.
-const GRID_PRESETS = [64, 80, 96, 128, 192, 256, 384, 512, 1024]
+// 1024 is not offered, and its removal is worth recording rather than looking like an oversight.
+//
+// It was here for display visibility rather than for a camera: it round-trips byte-exact over the
+// shared-directory channel, and has never been shown to survive a real one. The arithmetic says why. A 1024
+// grid needs 1028 pixels at a single pixel a cell, which does not fit the space a display page has on a
+// 1080p panel at all — and where it does fit, on a larger panel, a one-pixel cell is the geometry this
+// project measured decoding one frame in thirty-one through a camera.
+//
+// So every screen it fits on is a screen where it cannot be read, and every screen where a bigger cell
+// would help is a screen it does not fit. The protocol still carries it — a file-loopback deployment can
+// set it through configuration or the API — but a dropdown should not offer a choice that is wrong either
+// way it goes.
+const GRID_PRESETS = [64, 80, 96, 128, 192, 256, 384, 512]
 const CELL_PRESETS = [1, 2, 3, 4, 6, 8]
 
 // The lane count is not chosen here, deliberately.
@@ -206,6 +212,15 @@ export function NewTransfer() {
   const hasValidKey = needsKey && (keySource === 'saved' ? keyId !== '' : keyValid)
 
   const resolved = fitGridAndCell(grid, cell, encoder, lanes)
+
+  // Only the grids this screen can actually show. One that cannot be displayed at any offered cell size
+  // renders a frame the display page pins at one times and hangs off the edge, so offering it and then
+  // explaining the overflow is worse than not offering it. See lib/cellFit.
+  const offeredGrids = showableGrids(
+    GRID_PRESETS,
+    CELL_PRESETS,
+    usableFrameArea(window.screen.width, window.screen.height, lanes),
+  )
 
   // Set when the sender has refused a geometry as unreadable and the operator has chosen to send it
   // regardless. Deliberately not sticky: it is cleared whenever the geometry or encoder changes, so an
@@ -532,7 +547,7 @@ export function NewTransfer() {
                         <MenuItem value="auto">
                           Auto — fit my screen ({resolved.grid} × {resolved.grid})
                         </MenuItem>
-                        {GRID_PRESETS.map((preset) => (
+                        {offeredGrids.map((preset) => (
                           <MenuItem key={preset} value={preset}>
                             {preset} × {preset}
                           </MenuItem>
