@@ -296,6 +296,32 @@ to give. Alongside them, frames decoded and the decode rate are shown rather tha
 falling is a lens drifting out of focus, visible long before a chunk stops arriving. The speaker icon silences
 it.
 
+## Printing the frames
+
+Alongside the frame archive, a transfer's frames can be downloaded as one PDF, a frame to a page:
+
+```bash
+curl -O -J localhost:1000/api/v1/transfers/<id>/frames/printable
+```
+
+or **Print as PDF** on the transfer page. The archive is for a machine — the receiver's import endpoint
+replays it into the same pipeline a camera feeds. This is for a person: print the sheets, hold them up,
+point a camera. It is the cheapest way to exercise the optical path with no display at all, and the only way
+to make a capture reproducible, since a sheet of paper is the same frame every time where a panel's
+brightness, refresh and viewing angle are not.
+
+Each page is captioned with its sheet number, frame number and what it carries, because a stack of printed
+QR codes is otherwise indistinguishable and the order matters for reading them back. The sheet number and the
+frame number differ — the manifest re-emissions are dropped, since a person reads the sheets in order and
+needs the manifest once — so a caption gives both.
+
+Images are placed with interpolation off. It is the one setting that decides whether a printed frame is
+readable: a reader that smooths the image as it scales spreads every cell into its neighbours, which is right
+for a photograph and ruins a QR code.
+
+Bounded at 500 sheets. A PDF records where every object begins in a table at the end, so it cannot be
+streamed and is built whole in memory; past that the archive is the thing to reach for.
+
 ## Production Camera Setup
 
 ![Production setup: a 4K panel showing four coloured QR codes, photographed by an RGB global-shutter camera](docs/screenshots/production-rgb-camera-setup.png)

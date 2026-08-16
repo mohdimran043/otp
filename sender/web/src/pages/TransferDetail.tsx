@@ -375,6 +375,21 @@ export function TransferDetail() {
           >
             Download frames
           </Button>
+          {/* The same frames as paper. An anchor rather than a fetch: the document belongs to the
+              browser's own download handling, and a large one should not be held open in a promise. */}
+          <Tooltip title="One frame to a page, captioned and sized to print. Hold the sheets up to a camera to test the optical path with no display at all.">
+            <span>
+              <Button
+                size="small"
+                variant="outlined"
+                component="a"
+                href={api.framePrintableUrl(id)}
+                disabled={(transfer.data?.frame_count ?? 0) === 0}
+              >
+                Print as PDF
+              </Button>
+            </span>
+          </Tooltip>
         </Stack>
         <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
           {(frames.data ?? []).length} rendered ·{' '}

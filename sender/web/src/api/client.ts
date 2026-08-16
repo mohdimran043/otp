@@ -322,6 +322,16 @@ export const api = {
   // has no camera at all.
   frameArchiveUrl: (id: string) => `/api/v1/transfers/${id}/frames/archive`,
 
+  /**
+   * framePrintableUrl is the same frames as one PDF, a frame to a page.
+   *
+   * The archive above is for a machine — the receiver's import endpoint replays it. This is for a person:
+   * print the sheets, hold them up, point a camera. It is the cheapest way to exercise the optical path
+   * with no display at all, and the only way to make a capture reproducible, since a sheet of paper is the
+   * same frame every time where a panel's brightness and refresh are not.
+   */
+  framePrintableUrl: (id: string) => `/api/v1/transfers/${id}/frames/printable`,
+
   // Stopping a transfer. A status change on the row, which the display loop reads every frame — so a stop
   // takes effect within one frame interval rather than needing the process restarted.
   cancel: (id: string) =>
