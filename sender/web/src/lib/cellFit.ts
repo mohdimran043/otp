@@ -62,9 +62,23 @@ export function bestCellFor(
   const fitting = cells.filter((c) => frameEdgePx(grid, c, quietZone) <= usable)
   if (fitting.length === 0) return null
 
-  // The best on-screen size any of them reaches.
+  // Only cell sizes at or above the floor are candidates, and the floor is applied *before* the comparison
+  // rather than as a filter on the winner. Applying it afterwards was subtly wrong and showed up at grid 96:
+  // the largest displayed size there is reached only by 1 and 2 px cells, both below the floor, so no
+  // candidate survived and the code fell through to "largest that fits" — 8 px, which displays at 800 and
+  // costs four times what 4 px does to reach the same 800.
+  const candidates = fitting.filter((c) => c >= minRenderedCell)
+
+  // Nothing at or above the floor fits at all: a large grid on a small panel, where every cell size that
+  // fits is tiny. Take the largest that does and let the readability check downstream have its say, rather
+  // than silently choosing a geometry from a different grid.
+  if (candidates.length === 0) {
+    return fitting.reduce((a, b) => (b > a ? b : a))
+  }
+
+  // The best on-screen size reachable at or above the floor.
   let reach = 0
-  for (const c of fitting) {
+  for (const c of candidates) {
     reach = Math.max(reach, displayedEdgePx(grid, c, usable, quietZone))
   }
 
@@ -74,19 +88,9 @@ export function bestCellFor(
   const goodEnough = reach * 0.95
 
   let chosen: number | null = null
-  for (const c of fitting) {
+  for (const c of candidates) {
     if (displayedEdgePx(grid, c, usable, quietZone) < goodEnough) continue
-    if (c < minRenderedCell) continue
     if (chosen === null || c < chosen) chosen = c
-  }
-
-  // Nothing at or above the floor reached it — a large grid on a small panel, where the only cell sizes
-  // that fit are tiny. Take the largest that fits and let the readability check downstream have its say,
-  // rather than silently choosing a geometry from a different grid.
-  if (chosen === null) {
-    for (const c of fitting) {
-      if (chosen === null || c > chosen) chosen = c
-    }
   }
   return chosen
 }

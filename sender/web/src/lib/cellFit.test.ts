@@ -33,6 +33,25 @@ describe('cell size for a grid', () => {
     expect(displayedEdgePx(80, chosen, 1080)).toBeGreaterThan(displayedEdgePx(80, naive, 1080))
   })
 
+  it('picks a small cell at 96, where the floor used to be applied too late', () => {
+    // The case that prompted this. At grid 96 the largest displayed size is reached only by 1 and 2 px
+    // cells, both under the floor — so filtering the *winner* by the floor left nothing, and the code fell
+    // through to "largest that fits". That was 8 px: it displays at 800, exactly what 4 px displays at, for
+    // four times the pixels to draw and compress.
+    expect(displayedEdgePx(96, 8, 1080)).toBe(800)
+    expect(displayedEdgePx(96, 4, 1080)).toBe(800)
+
+    expect(bestCellFor(96, CELLS, 1080)).toBe(4)
+  })
+
+  it('keeps every offered grid off the expensive end', () => {
+    // A cell size of 8 is never the right answer on a panel this size: whatever it reaches, a smaller cell
+    // reaches at least as much for a quarter of the work.
+    for (const grid of [64, 80, 96, 128, 192, 256]) {
+      expect(bestCellFor(grid, CELLS, 1080)).toBeLessThanOrEqual(4)
+    }
+  })
+
   it('never renders below the floor, where exact upscaling stops being a safe bet', () => {
     // 1 px a cell also reaches 1008 here, and is not chosen: the whole result would rest on every stage
     // from the browser to the panel scaling by nearest neighbour with no resampling.
