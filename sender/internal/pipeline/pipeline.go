@@ -532,95 +532,24 @@ func (p *Pipeline) render(ctx context.Context, jc *jobs.Context) error {
 
 	sessionID := uuid.New()
 	interval := cfg.Optical.ManifestInterval
-	frameNumber := 0
-	var frames []store.Frame
 
-	// The manifest is re-emitted every N frames rather than only sent first, so a receiver
-	// whose camera came online mid-transmission can join the stream instead of waiting for
-	// the next one. For a file that takes an hour to display, that is the difference between
-	// a working installation and an unusable one.
-	emitManifest := func() error {
-		header := protocol.Header{
-			TransmissionID: tx.ID,
-			SessionID:      sessionID,
-			FrameNumber:    uint32(frameNumber),
-			TotalChunks:    uint32(sourceChunks),
-		}
-		frame, err := protocol.NewManifestFrame(header, manifest)
-		if err != nil {
-			return jobs.Permanent(err)
-		}
-		record, err := p.renderFrame(ctx, encoder, layout, tx, frame, frameNumber, nil, true)
-		if err != nil {
-			return err
-		}
-		frames = append(frames, record)
-		frameNumber++
-		return nil
-	}
+	// The frames are planned first and rendered second, and the split is what makes rendering parallel.
+	//
+	// Encoding a frame is expensive and independent: a chunk is read from the object store, drawn cell by
+	// cell across the whole grid, PNG-compressed and written back. None of that touches anything another
+	// frame touches. What *is* sequential is deciding which frames exist and in what order — the frame
+	// numbering, and where the manifest is re-emitted — and that is arithmetic over a list, costing nothing.
+	//
+	// Done as one serial loop it was the slowest thing in the system by a wide margin, and worst exactly
+	// where it hurt most: a smaller grid carries less payload per frame, so it needs more frames for the
+	// same file, and the stage that was already slow got slower as the geometry got harder. A 60-cell grid
+	// produces roughly twice the frames of an 80-cell one for the same bytes, and every one of them waited
+	// for the last.
+	plan := planFrames(tx, manifest, sessionID, chunks, sourceChunks, interval)
 
-	if err := emitManifest(); err != nil {
+	frames := make([]store.Frame, len(plan))
+	if err := p.renderPlan(ctx, jc, encoder, layout, tx, manifest, sessionID, sourceChunks, plan, frames); err != nil {
 		return err
-	}
-
-	for i, c := range chunks {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if interval > 0 && frameNumber%interval == 0 {
-			if err := emitManifest(); err != nil {
-				return err
-			}
-		}
-
-		payload, err := objectstore.GetBytes(ctx, p.objects, c.StoredPath, int64(tx.ChunkSize)+1)
-		if err != nil {
-			return err
-		}
-
-		flags := protocol.Flags(0)
-		if c.IsParity {
-			flags |= protocol.FlagParity
-		}
-		if i == len(chunks)-1 {
-			flags |= protocol.FlagEndOfStream
-		}
-		if !c.IsParity && c.ESI == sourceChunks-1 {
-			flags |= protocol.FlagLastChunk
-		}
-
-		header := protocol.Header{
-			Flags:          flags,
-			CompressionID:  manifest.CompressionID,
-			FECID:          manifest.FEC.ID,
-			TransmissionID: tx.ID,
-			SessionID:      sessionID,
-			FrameNumber:    uint32(frameNumber),
-			ChunkNumber:    uint32(c.ESI),
-			TotalChunks:    uint32(sourceChunks),
-		}
-
-		var frame *protocol.Frame
-		if tx.EncryptionID != int(protocol.EncryptionNone) {
-			frame, err = protocol.NewEncryptedFrame(tx.EncryptionKey, uint8(tx.EncryptionID), header, payload)
-			if err != nil {
-				return jobs.Permanent(err)
-			}
-		} else {
-			frame = protocol.NewFrame(header, payload)
-		}
-
-		chunkID := c.ID
-		record, err := p.renderFrame(ctx, encoder, layout, tx, frame, frameNumber, &chunkID, false)
-		if err != nil {
-			return err
-		}
-		frames = append(frames, record)
-		frameNumber++
-
-		if i%64 == 0 {
-			jc.Progress(ctx, 50+45*i/len(chunks), "rendered %d of %d frames", frameNumber, len(chunks))
-		}
 	}
 
 	if err := p.store.Frames.InsertMany(ctx, frames); err != nil {

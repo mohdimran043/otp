@@ -2,6 +2,7 @@ package optical
 
 import (
 	"context"
+	"github.com/google/uuid"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -199,6 +200,42 @@ func (l *Live) Shown() int64 { return l.inner.Shown() }
 
 // Close releases the wrapped sink.
 func (l *Live) Close() error { return l.inner.Close() }
+
+// ClearFor blanks the display, if what is on it belongs to the transmission given.
+//
+// A finished transfer should leave nothing on the screen. Leaving its last frame up is not merely untidy:
+// the receiver keeps photographing it, keeps locating a perfectly good frame, and keeps reporting a chunk it
+// already has — so a completed transfer looks, from the camera page, exactly like one still running. An
+// operator watching the aiming display has no way to tell the difference.
+//
+// Conditional on the transmission because there may be another one displaying. Two transfers share this
+// screen by taking turns, so a scheduler finishing must not blank a frame its neighbour put up a moment ago
+// — it would cost that transfer a display slot and, if the camera happened to fire then, a chunk. Blanking
+// only what belongs to the caller means the last transfer to finish is the one that clears the screen, which
+// is the behaviour wanted in both cases.
+//
+// Returns whether it cleared, which is worth knowing at the call site: "cleared" and "someone else is still
+// using the screen" are both correct outcomes and a log line that could not tell them apart would make a
+// perfectly ordinary concurrent transfer look like a failure to tidy up.
+func (l *Live) ClearFor(transmission uuid.UUID) bool {
+	l.mu.Lock()
+	if !l.have || l.current.Cleared || l.current.Transmission != transmission {
+		l.mu.Unlock()
+		return false
+	}
+	// Published as a frame of its own, with a sequence, so a long poll sees the change. See Frame.Cleared.
+	l.current = Frame{Sequence: l.next.Add(1), Transmission: transmission, Cleared: true}
+	l.have, l.shownAt = true, time.Now()
+	previous := l.changed
+	l.changed = make(chan struct{})
+	l.mu.Unlock()
+
+	// Waking the long-poll matters as much as the state does. A viewer is parked in Next waiting for the
+	// screen to change, and clearing without this leaves it holding the frame that is no longer there until
+	// its own timeout expires.
+	close(previous)
+	return true
+}
 
 // Current returns the frame on display, when it was shown, and whether there is one at all.
 func (l *Live) Current() (Frame, time.Time, bool) {

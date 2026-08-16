@@ -367,6 +367,15 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 			if err := s.store.Sessions.Close(ctx, session.ID, "completed", ""); err != nil {
 				s.log.Warn("could not close the display session", zap.Error(err))
 			}
+
+			// Nothing left to show, so show nothing.
+			//
+			// Leaving the last frame up is not merely untidy. The receiver goes on photographing it, goes on
+			// locating a perfectly good frame, and goes on reporting a chunk it already holds — so from the
+			// camera page a finished transfer is indistinguishable from one still running, and an operator
+			// has no signal that they can stop.
+			s.clearDisplay(transmissionID)
+
 			s.log.Info("every chunk acknowledged",
 				zap.String("transmission", transmissionID.String()),
 				zap.Int("chunks", acked),
@@ -657,6 +666,35 @@ func (s *Scheduler) display(ctx context.Context, frame optical.Frame, hold time.
 		return p.ShowFor(ctx, frame, hold)
 	}
 	return s.sink.Show(ctx, frame)
+}
+
+// clearable is a sink that can blank the screen for one transfer.
+//
+// An interface, like paced above, so the file and none sinks and every test double stay unchanged: a sink
+// nobody is photographing has nothing to clear.
+type clearable interface {
+	ClearFor(transmission uuid.UUID) bool
+}
+
+// clearDisplay blanks the screen if this transfer's frame is the one on it.
+//
+// Conditional because the screen may belong to somebody else by now. Concurrent transfers take turns, so a
+// scheduler finishing must not blank a frame a neighbour put up a moment ago — that would cost the other
+// transfer a display slot and, if the camera fired just then, a chunk. The last transfer to finish clears
+// the screen, which is right in both cases.
+func (s *Scheduler) clearDisplay(transmission uuid.UUID) {
+	sink, ok := s.sink.(clearable)
+	if !ok {
+		return
+	}
+	if sink.ClearFor(transmission) {
+		s.log.Debug("display cleared", zap.String("transmission", transmission.String()))
+		return
+	}
+	// Not a failure. Another transfer is using the screen, which is the ordinary outcome when two are
+	// running, and saying so is what stops it reading as a tidy-up that did not happen.
+	s.log.Debug("display left as it was: another transfer is showing",
+		zap.String("transmission", transmission.String()))
 }
 
 // show displays one frame and records that it went out.

@@ -68,6 +68,13 @@ type displayFrame struct {
 	// a few of those turns a display into a slideshow. Base64 costs a third more bytes over a link that
 	// is either loopback or a cable, which is the cheaper of the two prices by a wide margin.
 	ImagePNG string `json:"image_png,omitempty"`
+
+	// Cleared marks the end of a transfer: there is no picture, and a viewer should show nothing.
+	//
+	// Carried as a frame rather than an absence so that a client following the display at frame rate
+	// learns about it the same way it learns about everything else — the sequence advanced, here is what
+	// is on screen now. An absence cannot be delivered down a long poll that is waiting for a sequence.
+	Cleared bool `json:"cleared,omitempty"`
 }
 
 // displayStatus is the display as a whole.
@@ -110,6 +117,22 @@ func (s *Server) frameView(frame optical.Frame, at time.Time, have, withImage bo
 	if !have {
 		return nil
 	}
+	// A cleared display carries its sequence and nothing else. There is no image to fetch and no
+	// geometry to lay out, and offering an image URL for it would have a viewer request a frame that was
+	// never stored.
+	if frame.Cleared {
+		view := &displayFrame{
+			Sequence: frame.Sequence,
+			Cleared:  true,
+			ShownAt:  at,
+			AgeMS:    time.Since(at).Milliseconds(),
+		}
+		if frame.Transmission != uuid.Nil {
+			view.TransmissionID = frame.Transmission.String()
+		}
+		return view
+	}
+
 	view := &displayFrame{
 		Sequence:    frame.Sequence,
 		FrameNumber: frame.Number,

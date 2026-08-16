@@ -12,6 +12,8 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material'
+import AddIcon from '@mui/icons-material/Add'
+import RemoveIcon from '@mui/icons-material/Remove'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 
@@ -39,6 +41,25 @@ type Scale = 'fit' | 1 | 2 | 3 | 4
 interface Shown {
   meta: DisplayFrame
   src: string
+}
+
+// The frame rates worth offering, and why they are steps rather than a free number.
+//
+// The useful range is narrow and the interesting choices within it are few. Below one the display stops
+// looking live; above about eight a camera posting on its own schedule photographs a frame that changed
+// mid-exposure, which costs the frame rather than gaining anything. A text box invites a number outside
+// that, and the number that makes the display unreadable looks exactly like the number that does not.
+const FPS_STEPS = [0.5, 1, 2, 3, 4, 6, 8, 12]
+
+/** nextFps is the next step up from whatever the display is running, which need not be a step itself. */
+function nextFps(current: number): number {
+  return FPS_STEPS.find((f) => f > current) ?? FPS_STEPS[FPS_STEPS.length - 1]!
+}
+
+/** previousFps is the next step down. */
+function previousFps(current: number): number {
+  const below = FPS_STEPS.filter((f) => f < current)
+  return below.at(-1) ?? FPS_STEPS[0]!
 }
 
 export function Display() {
@@ -75,6 +96,14 @@ export function Display() {
 
           sequence.current = frame.sequence
           setError(null)
+
+          // The transfer finished and the sender took its frame down. Showing nothing is the point:
+          // left up, the last frame goes on being photographed and go on being reported as a chunk
+          // already held, so a finished transfer looks exactly like a running one.
+          if (frame.cleared) {
+            setShown(null)
+            continue
+          }
 
           const src = frame.image_png
             ? `data:image/png;base64,${frame.image_png}`
@@ -145,6 +174,23 @@ export function Display() {
   })
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings })
   const lanes = settings.data?.lanes ?? 1
+
+  // Frame rate, changeable while a transfer runs and for the same reason lanes are: it is a property of
+  // the channel rather than of the file, so the frames already rendered are equally valid at any rate.
+  //
+  // It is the setting that decides how many chances each unique frame gets to be photographed. The
+  // receiver posts on its own schedule, so a display running faster does not transfer more — the surplus
+  // frames are photographed and thrown away, or worse, changed mid-exposure. Slower gives every frame
+  // more attempts and is the right direction when a camera is marginal; faster is only worth it once
+  // frames are decoding reliably.
+  const setFps = useMutation({
+    mutationFn: (fps: number) => api.updateSettings({ fps }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['settings'] }),
+    onError: (err: unknown) => setError(err instanceof Error ? err.message : String(err)),
+  })
+  // The rate in force, not a guess. Whatever the deployment is running is what the control opens on, so
+  // touching it can only be a deliberate change from a working state.
+  const fps = settings.data?.fps ?? 1
 
   const setHold = useMutation({
     mutationFn: (next: boolean) => (next ? api.holdDisplay() : api.releaseDisplay()),
@@ -334,6 +380,32 @@ export function Display() {
             </ToggleButton>
           ))}
         </ToggleButtonGroup>
+
+        {/* Frame rate. Stepped rather than free-form: the useful range is small, the interesting
+            choices are few, and a text field invites a number that makes the display unreadable. */}
+        <Stack direction="row" spacing={0.5} alignItems="center">
+          <Tooltip title="Slower gives every frame more chances to be photographed. Faster only helps once frames are decoding reliably.">
+            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+              {fps} fps
+            </Typography>
+          </Tooltip>
+          <IconButton
+            size="small"
+            aria-label="slower"
+            onClick={() => setFps.mutate(previousFps(fps))}
+            disabled={setFps.isPending || fps <= FPS_STEPS[0]!}
+          >
+            <RemoveIcon fontSize="inherit" />
+          </IconButton>
+          <IconButton
+            size="small"
+            aria-label="faster"
+            onClick={() => setFps.mutate(nextFps(fps))}
+            disabled={setFps.isPending || fps >= FPS_STEPS[FPS_STEPS.length - 1]!}
+          >
+            <AddIcon fontSize="inherit" />
+          </IconButton>
+        </Stack>
         <ToggleButtonGroup
           size="small"
           exclusive

@@ -20,6 +20,7 @@ import {
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import UploadFileIcon from '@mui/icons-material/UploadFile'
 import { useMutation, useQuery } from '@tanstack/react-query'
+import { bestCellFor } from '../lib/cellFit'
 import { useNavigate } from 'react-router-dom'
 
 import { api, formatBytes } from '../api/client'
@@ -118,11 +119,13 @@ function isColour(encoder: string | undefined): boolean {
 // pieces the operator left on "Auto". The server cannot do this — it runs with no display
 // attached — so the browser looking at its own screen has to.
 //
-// A grid fixed and cell on auto picks the largest cell that still fits, because a bigger cell is
-// what a camera needs to resolve — screen area is free once the grid decision is made. A cell
-// fixed and grid on auto picks the largest grid that fits at that cell. Both on auto searches
-// every combination and prefers the largest cell first, then the largest grid, because visibility
-// matters more than raw capacity when neither has been chosen deliberately.
+// A grid fixed and cell on auto asks lib/cellFit for the cheapest cell size that still reaches the
+// largest whole-number-scaled display — which is emphatically not the largest cell that fits. The
+// display scales by integers, so an 80-cell grid at 8 px renders 672 and is shown at 672, while the
+// same grid at 4 px renders 336 and is shown at 1008: the bigger cell gave the smaller picture and
+// four times the encoding work. A cell fixed and grid on auto picks the largest grid that fits at
+// that cell. Both on auto takes the largest grid that can be shown at all, since grid is what
+// carries payload, and then sizes its cell the same way.
 //
 // The encoder bounds that search rather than steering it: a colour payload cannot use the denser
 // grids at all on a camera channel, so they are removed from consideration before the preference
@@ -154,8 +157,10 @@ function fitGridAndCell(
   const grids = isColour(encoder) ? GRID_PRESETS.filter((g) => g <= COLOUR_GRID_CEILING) : GRID_PRESETS
 
   if (grid !== 'auto') {
-    const fits = CELL_PRESETS.filter((c) => frameEdgePx(grid, c) <= usable)
-    return { grid, cell: fits.at(-1) ?? CELL_PRESETS[0]! }
+    // Not the largest cell that fits. See lib/cellFit: the display scales by whole numbers, so a frame
+    // rendered small and scaled up is the same picture at a fraction of the encoding cost — and "largest
+    // that fits" was frequently the *smaller* display as well as the slower one.
+    return { grid, cell: bestCellFor(grid, CELL_PRESETS, usable) ?? CELL_PRESETS[0]! }
   }
 
   if (cell !== 'auto') {
@@ -163,14 +168,14 @@ function fitGridAndCell(
     return { grid: fits.at(-1) ?? grids[0]!, cell }
   }
 
+  // Both automatic: take the largest grid that can be shown at all, then choose its cell size the same
+  // way an explicit grid gets one. Grid is what carries payload, so it is the thing to maximise; cell size
+  // is a rendering cost that buys nothing beyond filling the panel.
   let best: { grid: number; cell: number } | null = null
   for (const g of grids) {
-    for (const c of CELL_PRESETS) {
-      if (frameEdgePx(g, c) > usable) continue
-      if (!best || c > best.cell || (c === best.cell && g > best.grid)) {
-        best = { grid: g, cell: c }
-      }
-    }
+    const c = bestCellFor(g, CELL_PRESETS, usable)
+    if (c === null) continue
+    if (!best || g > best.grid) best = { grid: g, cell: c }
   }
   return best ?? { grid: grids[0]!, cell: CELL_PRESETS[0]! }
 }

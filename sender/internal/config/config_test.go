@@ -43,9 +43,14 @@ func TestDefaultsAreUsableOnceSecretsAreSupplied(t *testing.T) {
 	require.False(t, cfg.TLSEnabled())
 
 	// The default geometry must actually build a layout, since every frame depends on it.
+	//
+	// Eighty rather than 128, and that is a camera decision: a 128 grid measured 8.6 px/cell on a 1080p
+	// capture and located 232 consecutive frames perfectly while every one failed its payload CRC. See
+	// Default for the whole reasoning, and for why the cell size beside it is 4 rather than 8.
 	layout, err := cfg.Layout()
 	require.NoError(t, err)
-	require.Equal(t, 128, layout.GridWidth)
+	require.Equal(t, 80, layout.GridWidth)
+	require.Equal(t, 4, layout.CellPixels)
 
 	// Two frames a second, not ten. A camera channel needs each frame photographed cleanly at least once
 	// rather than needing frames quickly, and the receiver posts about ten images a second — so this rate
@@ -322,7 +327,7 @@ optical:
 
 		// And the fields that cannot be reloaded are unchanged.
 		require.Equal(t, 8080, got.Server.Port, "the listener cannot move under a running server")
-		require.Equal(t, 128, got.Optical.GridWidth, "the grid is written into every frame header")
+		require.Equal(t, 80, got.Optical.GridWidth, "the grid is written into every frame header")
 	default:
 		t.Fatal("the reload did not notify its subscriber")
 	}

@@ -88,7 +88,12 @@ func TestParseTransferRequestEncryptionAndGrid(t *testing.T) {
 			// (600+4)*8 = 4832 px, past maxImagePixels (4320) but well inside
 			// NewLayoutQuiet's own 48..4096 cell bound — so this reaches the
 			// panel-size check specifically, not the earlier grid-bounds check.
-			"grid_width": "600", "grid_height": "600"}, wantErr: "larger than any panel"},
+			//
+			// The cell size is named rather than inherited from configuration. It used to be inherited,
+			// and the case stopped testing anything the day the default dropped from 8 to 4: at 4 the same
+			// grid is 2416 px, comfortably inside the limit, so the request was accepted and the assertion
+			// failed. What is under test is the panel check, not the default.
+			"cell_pixels": "8", "grid_width": "600", "grid_height": "600"}, wantErr: "larger than any panel"},
 		{name: "smaller cell fits a bigger grid on the same panel", fields: map[string]string{
 			// (512+4)*2 = 1032 px: a 512 grid that would be 4128 px at the
 			// configured 8 px/cell fits comfortably at 2 px/cell instead — this is

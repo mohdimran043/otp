@@ -64,6 +64,15 @@ type Frame struct {
 	// way, and re-encoding a frame on every display would spend real time producing identical bytes.
 	PNG []byte
 
+	// Cleared marks the end of a transfer rather than a picture: the screen is now empty.
+	//
+	// Published as a frame, with its own sequence, rather than by simply forgetting the last one. A
+	// viewer following the display is parked in a long poll waiting for the sequence to advance, so a
+	// clear that only dropped state would leave every watcher holding the frame that is no longer there
+	// until its own timeout expired — and the receiver would go on photographing a picture the sender
+	// had stopped showing.
+	Cleared bool
+
 	// Image is the decoded image, or nil. A sink that draws pixels needs it; a sink that writes
 	// files does not, so it is only decoded when something asks.
 	Image image.Image

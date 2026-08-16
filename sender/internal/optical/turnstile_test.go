@@ -2,6 +2,7 @@ package optical_test
 
 import (
 	"context"
+	"github.com/google/uuid"
 	"sync"
 	"testing"
 	"time"
@@ -151,4 +152,97 @@ func TestAManualShowDoesNotWait(t *testing.T) {
 	require.NoError(t, live.Show(ctx, optical.Frame{Number: 2}))
 	assert.Less(t, time.Since(start), 250*time.Millisecond,
 		"an operator stepping the display by hand should not wait behind a transfer's reservation")
+}
+
+// A finished transfer takes its frame down, and only its own.
+//
+// Left up, the last frame of a completed transfer goes on being photographed, goes on locating, and goes on
+// being reported as a chunk the receiver already holds — so from the camera page a finished transfer is
+// indistinguishable from a running one and an operator has no signal that they can stop.
+func TestAFinishedTransferClearsTheScreen(t *testing.T) {
+	inner := &countingSink{}
+	live := optical.NewLive(inner)
+	ctx := context.Background()
+
+	transfer := uuid.New()
+	require.NoError(t, live.Show(ctx, optical.Frame{Number: 3, Transmission: transfer}))
+
+	_, _, have := live.Current()
+	require.True(t, have)
+
+	assert.True(t, live.ClearFor(transfer), "the screen was showing this transfer's frame")
+
+	frame, _, have := live.Current()
+	require.True(t, have, "a clear is published as a frame, not as an absence — see Frame.Cleared")
+	assert.True(t, frame.Cleared, "and it says the screen is empty")
+	assert.Empty(t, frame.PNG, "with no picture on it")
+}
+
+// One transfer finishing must not blank another's frame.
+//
+// Two transfers share this screen by taking turns, so the one that finishes first would otherwise clear a
+// frame its neighbour put up a moment earlier — costing that transfer a display slot, and a chunk if the
+// camera happened to fire just then.
+func TestFinishingDoesNotBlankAnotherTransfersFrame(t *testing.T) {
+	inner := &countingSink{}
+	live := optical.NewLive(inner)
+	ctx := context.Background()
+
+	finishing, running := uuid.New(), uuid.New()
+
+	// The other transfer has the screen when this one finishes.
+	require.NoError(t, live.Show(ctx, optical.Frame{Number: 9, Transmission: running}))
+
+	assert.False(t, live.ClearFor(finishing), "the screen belongs to the other transfer")
+
+	frame, _, have := live.Current()
+	require.True(t, have)
+	assert.False(t, frame.Cleared, "the running transfer's frame stays up")
+	assert.Equal(t, running, frame.Transmission)
+
+	// And when that one finishes too, the screen does clear: the last to finish tidies up.
+	assert.True(t, live.ClearFor(running))
+	frame, _, _ = live.Current()
+	assert.True(t, frame.Cleared)
+}
+
+// A clear advances the sequence, so a viewer parked in a long poll learns about it.
+func TestClearingWakesAViewerWaitingForTheNextFrame(t *testing.T) {
+	inner := &countingSink{}
+	live := optical.NewLive(inner)
+	ctx := context.Background()
+
+	transfer := uuid.New()
+	require.NoError(t, live.Show(ctx, optical.Frame{Number: 1, Transmission: transfer}))
+	shown, _, _ := live.Current()
+
+	waited := make(chan optical.Frame, 1)
+	go func() {
+		next, _, ok := live.Next(ctx, shown.Sequence)
+		if ok {
+			waited <- next
+		}
+	}()
+
+	// Let the waiter park before the screen changes under it.
+	time.Sleep(20 * time.Millisecond)
+	require.True(t, live.ClearFor(transfer))
+
+	select {
+	case next := <-waited:
+		assert.True(t, next.Cleared, "the waiter should be told the screen is empty")
+		assert.Greater(t, next.Sequence, shown.Sequence, "which needs its own sequence to be delivered at all")
+	case <-time.After(2 * time.Second):
+		t.Fatal("a viewer following the display was never told it had been cleared")
+	}
+}
+
+// Clearing an already-clear screen does nothing, so a retry or a second scheduler cannot loop.
+func TestClearingTwiceIsHarmless(t *testing.T) {
+	live := optical.NewLive(&countingSink{})
+	transfer := uuid.New()
+
+	require.NoError(t, live.Show(context.Background(), optical.Frame{Transmission: transfer}))
+	require.True(t, live.ClearFor(transfer))
+	assert.False(t, live.ClearFor(transfer), "there is nothing left of this transfer to take down")
 }

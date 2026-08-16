@@ -1,0 +1,67 @@
+import { describe, expect, it } from 'vitest'
+
+import { bestCellFor, displayedEdgePx, frameEdgePx, minRenderedCell } from './cellFit'
+
+const CELLS = [1, 2, 3, 4, 6, 8]
+
+describe('cell size for a grid', () => {
+  it('does not pick the largest cell that fits, because that is often the smaller display', () => {
+    // The case that prompted this. On a 1080-pixel panel an 80-cell grid at 8 px renders 672 and scales by
+    // one; at 4 px it renders 336 and scales by three, to 1008. Bigger cell, smaller picture, four times
+    // the encoding work.
+    expect(displayedEdgePx(80, 8, 1080)).toBe(672)
+    expect(displayedEdgePx(80, 4, 1080)).toBe(1008)
+
+    expect(bestCellFor(80, CELLS, 1080)).toBe(4)
+  })
+
+  it('renders far fewer pixels for the same picture', () => {
+    const chosen = bestCellFor(80, CELLS, 1080)!
+    const naive = 8 // largest that fits, the old rule
+
+    const chosenPixels = frameEdgePx(80, chosen) ** 2
+    const naivePixels = frameEdgePx(80, naive) ** 2
+
+    expect(chosenPixels).toBeLessThan(naivePixels / 3)
+    // And the operator sees a larger frame, not a smaller one, which is what makes this free.
+    expect(displayedEdgePx(80, chosen, 1080)).toBeGreaterThan(displayedEdgePx(80, naive, 1080))
+  })
+
+  it('never renders below the floor, where exact upscaling stops being a safe bet', () => {
+    // 1 px a cell also reaches 1008 here, and is not chosen: the whole result would rest on every stage
+    // from the browser to the panel scaling by nearest neighbour with no resampling.
+    expect(displayedEdgePx(80, 1, 1080)).toBe(1008)
+    expect(bestCellFor(80, CELLS, 1080)).toBeGreaterThanOrEqual(minRenderedCell)
+  })
+
+  it('falls back to what fits when the grid is large for the panel', () => {
+    // A 512 grid on a 1080 panel: (512+4)*2 = 1032 fits, *3 does not. Below the floor, but the alternative
+    // is refusing a geometry the operator explicitly chose.
+    expect(bestCellFor(512, CELLS, 1080)).toBe(2)
+  })
+
+  it('reports nothing fitting rather than overflowing the panel', () => {
+    // A 1024 grid needs 1028 px at one pixel a cell, which does not fit a 640-pixel lane.
+    expect(bestCellFor(1024, CELLS, 640)).toBeNull()
+  })
+
+  it('accounts for lanes, since a lane gets a share of the panel and not all of it', () => {
+    // Four lanes on a 1080 panel leave 540 for each. The 80-cell grid at 6 px is 504 and scales by one;
+    // at 4 px it is 336 and also scales by one, to 336 — so the larger cell genuinely wins here.
+    expect(bestCellFor(80, CELLS, 540)).toBe(6)
+  })
+
+  it('is stable across the grids the sender offers', () => {
+    for (const grid of [64, 80, 96, 128, 192, 256]) {
+      const chosen = bestCellFor(grid, CELLS, 1080)
+      expect(chosen).not.toBeNull()
+      // Whatever it picks must actually fit, or the display overflows and a lane leaves the shot.
+      expect(frameEdgePx(grid, chosen!)).toBeLessThanOrEqual(1080)
+      // And it must be at least as large on screen as the old "largest that fits" rule managed.
+      const largestThatFits = CELLS.filter((c) => frameEdgePx(grid, c) <= 1080).at(-1)!
+      expect(displayedEdgePx(grid, chosen!, 1080)).toBeGreaterThanOrEqual(
+        displayedEdgePx(grid, largestThatFits, 1080),
+      )
+    }
+  })
+})

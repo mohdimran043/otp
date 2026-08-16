@@ -117,6 +117,15 @@ export interface DisplayFrame {
 
   // image_png is the frame itself, base64, present when the request asked for include=image.
   image_png?: string
+
+  /**
+   * cleared marks the end of a transfer: the screen is empty and a viewer should show nothing.
+   *
+   * Delivered as a frame rather than as an absence because the display is followed by a long poll
+   * waiting for the sequence to advance — there is no way to send "nothing" down a channel that is
+   * waiting for something. A cleared frame carries no image and no geometry.
+   */
+  cleared?: boolean
 }
 
 export interface DisplayStatus {

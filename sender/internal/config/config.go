@@ -456,9 +456,22 @@ func Default() Config {
 				ParityShards: 15,
 			},
 			Lanes:      4,
-			GridWidth:  128,
-			GridHeight: 128,
-			CellPixels: 8,
+			// Eighty, and four pixels a cell.
+			//
+			// Eighty because a colour payload photographed off a panel needs pixels per cell far more than
+			// it needs cells: 128 measured 8.6 px/cell on a 1080p capture and located 232 consecutive
+			// frames perfectly while every one failed its payload CRC, where 80 gives about 14 and is the
+			// geometry behind the only byte-exact camera transfer this project has recorded.
+			//
+			// Four rather than eight because the display scales by whole numbers and draws with nearest
+			// neighbour, so what a camera sees is the *scaled* size and not the rendered one. An 80-cell
+			// grid at 8 px renders 672 and is shown at 672 on a 1080 panel, because twice 672 does not
+			// fit; at 4 px it renders 336 and is shown at 1008. The larger cell gave the smaller picture
+			// and four times the pixels to draw and compress on every frame of every transfer. See
+			// sender/web/src/lib/cellFit.ts, which makes the same choice for the upload form.
+			GridWidth:  80,
+			GridHeight: 80,
+			CellPixels: 4,
 			QuietZone:  2,
 			// 1080, because the receiver browser capture is pinned to 1920x1080 and a square frame is
 			// bounded by the short side however the device is held. Raise it for a higher-resolution
