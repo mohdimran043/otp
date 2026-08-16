@@ -26,6 +26,7 @@ import { Compare } from '../components/Compare'
 import { Delivery } from '../components/Delivery'
 import { FilePreview } from '../components/FilePreview'
 import { Stat } from '../components/Stat'
+import { TransmissionFrames } from '../components/TransmissionFrames'
 import { useUi } from '../store/ui'
 
 export function TransmissionDetail() {
@@ -240,6 +241,8 @@ export function TransmissionDetail() {
           ))}
         </Box>
       </Paper>
+
+      <TransmissionFrames transmissionId={id} />
 
       {(missing.data?.missing ?? []).length > 0 && (
         <Paper variant="outlined" sx={{ p: 2, borderColor: 'warning.main' }}>

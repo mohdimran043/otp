@@ -140,9 +140,12 @@ export interface Chunk {
 
 export interface CapturedFrame {
   id: string
+  session_id?: string
   sequence: number
+  stored_path?: string
   decoded: boolean
   decode_error?: string
+  transmission_id?: string
   frame_number?: number
   chunk_number?: number
   is_manifest: boolean
@@ -152,6 +155,31 @@ export interface CapturedFrame {
   timing_score: number
   contrast: number
   captured_at: string
+
+  /**
+   * What happened on the way to the verdict, rather than only the verdict.
+   *
+   * All optional: a frame recorded before the receiver kept any of this reads as undefined, and the
+   * detail view says "not recorded" rather than inventing a zero that looks like a measurement.
+   */
+  failure_stage?: string
+  recovered?: boolean
+  recovery_engine?: string
+  recovery_stage?: string
+  recovery_candidates?: number
+  recovery_flips?: number
+  recovery_ms?: number
+  merged_shots?: number
+  /** Which frame of a tiled photograph this row describes, and how many it held. */
+  lane_index?: number
+  lane_count?: number
+  decode_ms?: number
+}
+
+/** One capture and every other lane read out of the same photograph. */
+export interface FrameDetail {
+  frame: CapturedFrame
+  lanes: CapturedFrame[]
 }
 
 export interface DecoderConfig {
@@ -395,6 +423,17 @@ export const api = {
   // goes into an <img>: a frame an operator is looking at is exactly what the camera saw, and re-encoding
   // it through JavaScript would be showing them something else.
   frameImageUrl: (id: string) => `/api/v1/frames/${id}/image`,
+
+  frame: (id: string) => request<FrameDetail>(`/api/v1/frames/${id}`),
+
+  transmissionFrames: (id: string, limit = 500) =>
+    request<{ frames: CapturedFrame[] | null }>(
+      `/api/v1/transmissions/${id}/frames?limit=${limit}`,
+    ).then((r) => r.frames ?? []),
+
+  /** A link rather than a fetch: the archive is hundreds of megabytes and belongs to the browser's
+   *  own download manager, not to a promise held in a component. */
+  transmissionFramesZipUrl: (id: string) => `/api/v1/transmissions/${id}/frames.zip`,
   downloadUrl: (id: string) => `/api/v1/transmissions/${id}/file`,
 
   // inlineUrl asks for the file to be shown in place rather than downloaded. The server honours it only for

@@ -7,10 +7,12 @@
 package api
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"net/http"
 	"runtime"
@@ -175,6 +177,9 @@ func (s *Server) Routes() http.Handler {
 	// Frames posted by a browser holding the camera — the path that can actually ask permission.
 	mux.HandleFunc("POST /api/v1/capture/frames", s.postFrame)
 	mux.HandleFunc("GET /api/v1/frames/{id}/image", s.frameImage)
+	mux.HandleFunc("GET /api/v1/frames/{id}", s.getFrame)
+	mux.HandleFunc("GET /api/v1/transmissions/{id}/frames", s.listTransmissionFrames)
+	mux.HandleFunc("GET /api/v1/transmissions/{id}/frames.zip", s.downloadTransmissionFrames)
 	// The sneakernet path: a frame archive replayed into the live pipeline exactly as though a
 	// camera had seen each frame.
 	mux.HandleFunc("POST /api/v1/import", s.postImport)
@@ -571,10 +576,184 @@ func (s *Server) frameImage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, http.StatusInternalServerError, "could not read the frame", err)
 		return
 	}
-	w.Header().Set("Content-Type", "image/png")
+	// Sniffed rather than declared. Captures are keyed .png because that is what the object layer
+	// names them, but they hold whatever the camera posted — a browser posts JPEG — and serving a JPEG
+	// labelled image/png works in a browser by luck and fails everywhere stricter.
+	w.Header().Set("Content-Type", http.DetectContentType(body))
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	if _, err := w.Write(body); err != nil {
 		s.log.Warn("could not write the frame", zap.Error(err))
+	}
+}
+
+// getFrame reports everything recorded about one captured frame.
+//
+// The siblings are the point as much as the frame itself. A tiled display puts several independent
+// frames in one photograph and each becomes its own row against the same stored image, so "what
+// happened to this picture" is a question about all of them: one lane reading and another failing at
+// the same instant, under the same exposure, is the single most useful thing this view can show.
+func (s *Server) getFrame(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.fail(w, http.StatusBadRequest, "the frame id is not a UUID", err)
+		return
+	}
+
+	frame, err := s.store.Frames.Get(r.Context(), id)
+	if err != nil {
+		s.fail(w, http.StatusNotFound, "no such frame", err)
+		return
+	}
+
+	// Everything else read out of the same photograph, this frame included, in lane order.
+	siblings, err := s.store.Frames.SharingImage(r.Context(), frame.SessionID, frame.StoredPath)
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, "could not read the other lanes", err)
+		return
+	}
+
+	s.respond(w, http.StatusOK, map[string]any{
+		"frame": frame,
+		"lanes": siblings,
+	})
+}
+
+// listTransmissionFrames reports the frames captured for one transfer.
+func (s *Server) listTransmissionFrames(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.fail(w, http.StatusBadRequest, "the transmission id is not a UUID", err)
+		return
+	}
+
+	limit := 500
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = min(parsed, 5000)
+		}
+	}
+
+	frames, err := s.store.Frames.ForTransmission(r.Context(), id, limit)
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, "could not read the transfer's frames", err)
+		return
+	}
+	if frames == nil {
+		frames = []store.CapturedFrame{}
+	}
+	s.respond(w, http.StatusOK, map[string]any{"frames": frames})
+}
+
+// downloadTransmissionFrames streams every captured photograph of a transfer as a zip.
+//
+// This exists so a transfer that went badly can be replayed offline against ai/corpus, which is the
+// only honest way to judge a change that claims to improve decoding. Reproducing a real channel from
+// a description is not possible; reproducing it from the actual photographs is exact.
+//
+// Streamed rather than assembled in memory. A session runs to hundreds of frames at half a megabyte
+// each, and buffering that to set a Content-Length would spend hundreds of megabytes to save the
+// client a progress bar.
+//
+// Each stored image appears once even though a tiled photograph has several rows against it, and a
+// manifest names which lanes came out of which file, so the set can be read without the database.
+func (s *Server) downloadTransmissionFrames(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		s.fail(w, http.StatusBadRequest, "the transmission id is not a UUID", err)
+		return
+	}
+
+	frames, err := s.store.Frames.ForTransmission(r.Context(), id, 5000)
+	if err != nil {
+		s.fail(w, http.StatusInternalServerError, "could not read the transfer's frames", err)
+		return
+	}
+	if len(frames) == 0 {
+		s.fail(w, http.StatusNotFound, "this transfer has no captured frames", nil)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition",
+		fmt.Sprintf("attachment; filename=%q", "captures-"+id.String()+".zip"))
+
+	zw := zip.NewWriter(w)
+	defer func() {
+		if err := zw.Close(); err != nil {
+			s.log.Warn("could not finish the capture archive", zap.Error(err))
+		}
+	}()
+
+	// The index is written first so a partial download is still readable: a transfer aborted halfway
+	// leaves the manifest and the frames that made it, rather than a zip whose only description of
+	// itself never arrived.
+	index, err := json.MarshalIndent(map[string]any{
+		"transmission": id,
+		"frames":       frames,
+	}, "", "  ")
+	if err != nil {
+		s.log.Warn("could not describe the capture archive", zap.Error(err))
+		return
+	}
+	if err := writeZipEntry(zw, "frames.json", index); err != nil {
+		s.log.Warn("could not write the capture index", zap.Error(err))
+		return
+	}
+
+	// One entry per stored image. Several lanes share a photograph, and writing it once per lane would
+	// multiply the archive by the lane count to carry identical copies.
+	written := map[string]bool{}
+	for _, f := range frames {
+		if written[f.StoredPath] || r.Context().Err() != nil {
+			continue
+		}
+		written[f.StoredPath] = true
+
+		body, err := objectstore.GetBytes(r.Context(), s.objects, f.StoredPath, 64<<20)
+		if err != nil {
+			// One unreadable object does not spoil the archive. The frame is in frames.json, so its
+			// absence is discoverable rather than silent.
+			s.log.Warn("could not read a frame for the archive",
+				zap.String("path", f.StoredPath), zap.Error(err))
+			continue
+		}
+
+		name := fmt.Sprintf("%012d%s", f.Sequence, captureExtension(body))
+		if err := writeZipEntry(zw, name, body); err != nil {
+			s.log.Warn("could not add a frame to the archive", zap.Error(err))
+			return
+		}
+	}
+}
+
+// writeZipEntry adds one already-compressed-or-not blob under a name.
+//
+// Stored rather than deflated: captures are JPEG or PNG, both already compressed, so deflating them
+// spends CPU on every frame to save a percent or two of a download that is already streaming.
+func writeZipEntry(zw *zip.Writer, name string, body []byte) error {
+	entry, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
+	if err != nil {
+		return err
+	}
+	_, err = entry.Write(body)
+	return err
+}
+
+// captureExtension names a stored capture by what it actually contains.
+//
+// Stored objects are keyed .png whatever the camera posted, and a browser posts JPEG. Naming the
+// archive's entries by the key would produce a directory of .png files that are not PNGs, which is
+// exactly the trap the corpus harness documents having fallen into.
+func captureExtension(body []byte) string {
+	switch http.DetectContentType(body) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".bin"
 	}
 }
 

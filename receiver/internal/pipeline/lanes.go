@@ -77,7 +77,7 @@ func (r *Receiver) prepareAll(ctx context.Context, capture Capture) []prepared {
 	// lane actually did rather than by what the capture as a whole did.
 	readings := make([]laneReading, 0, len(found))
 
-	for _, g := range found {
+	for lane, g := range found {
 		// The frame the ordinary path already produced. Compared by frame number rather than by
 		// geometry, because the two searches may have located the same frame from slightly different
 		// fiducial estimates and would not compare equal as structures.
@@ -85,6 +85,9 @@ func (r *Receiver) prepareAll(ctx context.Context, capture Capture) []prepared {
 			// Still an outline. It is a lane in the picture, and the overlay leaving a gap where the
 			// lead frame sits would read as that lane having been missed.
 			readings = append(readings, laneReading{geometry: g, decoded: first.decodeErr == nil})
+			// The lead row belongs to this photograph too, so it is told where it sits.
+			out[0].detail.laneIndex = lane
+			out[0].detail.laneCount = len(found)
 			continue
 		}
 
@@ -98,17 +101,23 @@ func (r *Receiver) prepareAll(ctx context.Context, capture Capture) []prepared {
 		// engine, and neither of those ran here, so the lead lane recovered and every other lane was
 		// thrown away with the payload_crc it would have survived. Measured over one 775-capture
 		// session: 205 photographs read one of their two lanes, and 3 read both.
-		frame, err = r.readLane(ctx, cfg, capture, g, frame, err)
+		frame, err, detail := r.readLane(ctx, cfg, capture, g, frame, err)
+
+		// Where in the picture this read came from. Several rows share one stored image, so without
+		// these the detail view can show four results against one photograph and say nothing about
+		// which part of it produced any of them.
+		detail.laneIndex = lane
+		detail.laneCount = len(found)
 
 		readings = append(readings, laneReading{geometry: g, decoded: err == nil})
 		if err != nil {
 			// Located but unreadable. Recorded as its own failure rather than dropped: a lane that
 			// finds its geometry and fails its payload is the state worth seeing, and lumping it in
 			// with the lanes that were never found at all is what hid this class of problem before.
-			out = append(out, r.laneResult(capture, first, g, nil, err))
+			out = append(out, r.laneResult(capture, first, g, nil, err, detail))
 			continue
 		}
-		out = append(out, r.laneResult(capture, first, g, frame, nil))
+		out = append(out, r.laneResult(capture, first, g, frame, nil, detail))
 	}
 
 	// The aiming display is re-measured across every lane, replacing the single-frame reading the
@@ -130,7 +139,7 @@ func (r *Receiver) prepareAll(ctx context.Context, capture Capture) []prepared {
 
 // laneResult builds a prepared for one additional lane of a capture already stored.
 func (r *Receiver) laneResult(capture Capture, first prepared, g *protocol.Geometry,
-	frame *protocol.Frame, decodeErr error,
+	frame *protocol.Frame, decodeErr error, detail laneDetail,
 ) prepared {
 	// Its own sequence number, because captured_frames is unique on (session, sequence) and each lane
 	// is its own row. The stored path is the first result's: one photograph, one image on disk.
@@ -148,6 +157,7 @@ func (r *Receiver) laneResult(capture Capture, first prepared, g *protocol.Geome
 		timing:    timing,
 		contrast:  contrast,
 		decodeErr: decodeErr,
+		detail:    detail,
 	}
 }
 

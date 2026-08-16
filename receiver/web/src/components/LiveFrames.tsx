@@ -1,8 +1,10 @@
 import { Alert, Box, Chip, Paper, Stack, Tooltip, Typography } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
 
 import { api, formatPercent, type CapturedFrame } from '../api/client'
 import { useUi } from '../store/ui'
+import { FrameDetailDialog } from './FrameDetail'
 
 // Frames arriving, as they arrive.
 //
@@ -25,6 +27,10 @@ function kindOf(frame: CapturedFrame): { label: string; colour: 'success' | 'sec
 
 export function LiveFrames() {
   const { refreshMs } = useUi()
+  // Which capture is open in the detail dialog. Held here rather than in the tile so that opening one
+  // closes any other, and so the grid can keep refreshing underneath without the dialog following it
+  // to a different frame.
+  const [open, setOpen] = useState<string | null>(null)
   const frames = useQuery({
     queryKey: ['recent-frames'],
     queryFn: () => api.recentFrames(48),
@@ -39,7 +45,7 @@ export function LiveFrames() {
       <Stack direction="row" alignItems="baseline" spacing={2} sx={{ mb: 1 }} flexWrap="wrap" useFlexGap>
         <Typography variant="subtitle1">Frames arriving</Typography>
         <Typography variant="caption" color="text.secondary" sx={{ flexGrow: 1 }}>
-          the newest captures, newest first — refreshing every {refreshMs}ms
+          the newest captures, newest first — click one to see what happened to it
         </Typography>
         {list.length > 0 && (
           <Chip
@@ -78,12 +84,27 @@ export function LiveFrames() {
                       frame.decoded ? kind.label : `unreadable: ${frame.decode_error ?? 'unknown'}`,
                       `fiducials ${formatPercent(frame.finder_score)} · timing ${formatPercent(frame.timing_score)}`,
                       `contrast ${formatPercent(frame.contrast)} · bit errors ${formatPercent(frame.bit_error_rate)}`,
+                      frame.recovered ? `recovered by ${frame.recovery_engine || 'the engine'}` : '',
                       new Date(frame.captured_at).toLocaleTimeString(),
-                    ].join('\n')}
+                      'click for detail',
+                    ]
+                      .filter(Boolean)
+                      .join('\n')}
                   </Box>
                 }
               >
-                <Box>
+                <Box
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setOpen(frame.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      setOpen(frame.id)
+                    }
+                  }}
+                  sx={{ cursor: 'pointer', '&:focus-visible': { outline: 2, outlineColor: 'primary.main' } }}
+                >
                   <Box
                     sx={{
                       border: 2,
@@ -92,6 +113,8 @@ export function LiveFrames() {
                       bgcolor: '#000',
                       aspectRatio: '1',
                       overflow: 'hidden',
+                      transition: 'transform 120ms ease',
+                      '&:hover': { transform: 'scale(1.04)' },
                     }}
                   >
                     {/* The stored capture, served straight from the object store: what the decoder was given,
@@ -117,6 +140,8 @@ export function LiveFrames() {
           })}
         </Box>
       )}
+
+      <FrameDetailDialog frameId={open} onClose={() => setOpen(null)} />
     </Paper>
   )
 }

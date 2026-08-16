@@ -587,6 +587,44 @@ type prepared struct {
 	// err is a failure of the preparation itself, such as the capture not being storable. Distinct from
 	// decodeErr: one is the channel being bad, the other is this process being unable to do its job.
 	err error
+
+	// detail is what the read did on its way to the verdict, for the row and the frame detail view.
+	detail laneDetail
+}
+
+// laneDetail is what happened while reading one lane, beyond whether it worked.
+//
+// Recorded because the verdict alone cannot answer any of the questions asked when a transfer goes
+// badly. "It failed" and "it failed at payload_crc after the classifier tried 40 candidates" call for
+// completely different actions, and the second was being written to a log where it could not be
+// joined to the photograph it describes.
+type laneDetail struct {
+	// failureStage is the bucket the read finally died at, or empty if it read. It is the stage after
+	// every rescue has had its turn, so it names what is actually wrong rather than what was wrong
+	// before recovery fixed it.
+	failureStage string
+
+	// recovered and the fields under it describe the rescue, when there was one. Kept apart from the
+	// verdict: a recovered frame decoded, but it did not decode on the first read, and a session whose
+	// successes are mostly recoveries is one nudge away from failing.
+	recovered          bool
+	recoveryEngine     string
+	recoveryStage      string
+	recoveryCandidates int
+	recoveryFlips      int
+	recoveryMS         float64
+
+	// mergedShots is how many photographs of this same displayed frame were combined to read it, when
+	// that is what read it.
+	mergedShots int
+
+	// laneIndex and laneCount place this read within its photograph. A tiled display yields several
+	// rows against one stored image and without these they cannot be told apart.
+	laneIndex int
+	laneCount int
+
+	// decodeMS is the decode itself, before any rescue.
+	decodeMS float64
 }
 
 // prepare persists and decodes one captured frame. It is safe to run on many frames at once.
@@ -652,7 +690,8 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 			break
 		}
 	}
-	r.recovery.decodeNanos.Add(int64(time.Since(decodeStarted)))
+	decodeTook := time.Since(decodeStarted)
+	r.recovery.decodeNanos.Add(int64(decodeTook))
 	r.recovery.decodeCount.Add(1)
 	finder, timing, contrast := decodeQuality(geometry)
 
@@ -668,13 +707,16 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 	// between "nearly aimed" and "not aimed", and the floors erase it.
 	r.alignment.Store(ptr(measureAlignment(capture.Image, geometry, decodeErr == nil)))
 
-	frame, decodeErr = r.readLane(ctx, cfg, capture, geometry, frame, decodeErr)
+	frame, decodeErr, detail := r.readLane(ctx, cfg, capture, geometry, frame, decodeErr)
+	detail.decodeMS = float64(decodeTook.Nanoseconds()) / 1e6
+	detail.laneCount = 1
 
 	return prepared{
 		capture: capture, key: key, sum: sum,
 		frame: frame, geometry: geometry,
 		finder: finder, timing: timing, contrast: contrast,
 		decodeErr: decodeErr,
+		detail:    detail,
 	}
 }
 
@@ -694,7 +736,8 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 // budget, off the capture hot path and across the decode workers.
 func (r *Receiver) readLane(ctx context.Context, cfg config.Config, capture Capture,
 	geometry *protocol.Geometry, frame *protocol.Frame, decodeErr error,
-) (*protocol.Frame, error) {
+) (*protocol.Frame, error, laneDetail) {
+	var detail laneDetail
 	finder, timing, _ := decodeQuality(geometry)
 
 	// The confidence floors are applied here rather than inside the decoder, because how much
@@ -747,6 +790,7 @@ func (r *Receiver) readLane(ctx context.Context, cfg config.Config, capture Capt
 						zap.Int("shots", res.Shots))
 					r.shots.Forget(uint64(geometry.Header.FrameNumber))
 					frame, decodeErr = f, nil
+					detail.mergedShots = res.Shots
 				}
 			}
 		}
@@ -754,6 +798,7 @@ func (r *Receiver) readLane(ctx context.Context, cfg config.Config, capture Capt
 
 	if decodeErr != nil && cfg.Decoder.Recovery.Enabled {
 		bucket := classify.Of(decodeErr)
+		detail.failureStage = string(bucket)
 		r.recovery.attempted.Add(1)
 		recoverStarted := time.Now()
 		res, rerr := r.engine.Recover(ctx, engine.Request{
@@ -776,11 +821,27 @@ func (r *Receiver) readLane(ctx context.Context, cfg config.Config, capture Capt
 				zap.Duration("took", res.Report.Elapsed),
 				zap.String("bucket", string(bucket)))
 			frame, decodeErr = res.Frame, nil
+			detail.recovered = true
+			detail.recoveryEngine = res.Report.Engine
+			detail.recoveryStage = res.Report.Stage
+			detail.recoveryCandidates = res.Report.Candidates
+			detail.recoveryFlips = res.Report.Flips
+			detail.recoveryMS = float64(res.Report.Elapsed.Nanoseconds()) / 1e6
 		}
 	}
-	r.recovery.count(classify.Of(decodeErr))
 
-	return frame, decodeErr
+	// The stage it finally died at, or empty for a frame that read. Recorded after every rescue has
+	// had its turn, so a frame recovered from payload_crc is not filed as a failure at payload_crc —
+	// detail.recovered above is what says it got there the hard way.
+	final := classify.Of(decodeErr)
+	r.recovery.count(final)
+	if decodeErr != nil {
+		detail.failureStage = string(final)
+	} else {
+		detail.failureStage = ""
+	}
+
+	return frame, decodeErr, detail
 }
 
 // apply records a prepared frame and acts on it. It must run one frame at a time.
@@ -802,6 +863,18 @@ func (r *Receiver) apply(ctx context.Context, p prepared) error {
 		FinderScore: finder,
 		TimingScore: timing,
 		Contrast:    contrast,
+
+		FailureStage:       p.detail.failureStage,
+		Recovered:          p.detail.recovered,
+		RecoveryEngine:     p.detail.recoveryEngine,
+		RecoveryStage:      p.detail.recoveryStage,
+		RecoveryCandidates: p.detail.recoveryCandidates,
+		RecoveryFlips:      p.detail.recoveryFlips,
+		RecoveryMS:         p.detail.recoveryMS,
+		MergedShots:        p.detail.mergedShots,
+		LaneIndex:          p.detail.laneIndex,
+		LaneCount:          p.detail.laneCount,
+		DecodeMS:           p.detail.decodeMS,
 	}
 
 	if decodeErr != nil {

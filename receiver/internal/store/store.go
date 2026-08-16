@@ -149,6 +149,24 @@ type CapturedFrame struct {
 	TimingScore    float64    `json:"timing_score"`
 	Contrast       float64    `json:"contrast"`
 	CapturedAt     time.Time  `json:"captured_at"`
+
+	// What happened on the way to the verdict above, kept so a frame can be asked about after the fact.
+	//
+	// The verdict alone answers "did this work" and nothing else, and every question worth asking when
+	// a transfer goes badly is underneath it: which stage it died at, whether anything rescued it and
+	// what, and on a tiled display which lane of the photograph this row is even describing. All of it
+	// is computed anyway; it used to go only to the log, where it cannot be joined to the picture.
+	FailureStage       string  `json:"failure_stage,omitempty"`
+	Recovered          bool    `json:"recovered"`
+	RecoveryEngine     string  `json:"recovery_engine,omitempty"`
+	RecoveryStage      string  `json:"recovery_stage,omitempty"`
+	RecoveryCandidates int     `json:"recovery_candidates,omitempty"`
+	RecoveryFlips      int     `json:"recovery_flips,omitempty"`
+	RecoveryMS         float64 `json:"recovery_ms,omitempty"`
+	MergedShots        int     `json:"merged_shots,omitempty"`
+	LaneIndex          int     `json:"lane_index"`
+	LaneCount          int     `json:"lane_count"`
+	DecodeMS           float64 `json:"decode_ms,omitempty"`
 }
 
 // Frames is the captured-frame repository.
@@ -181,13 +199,18 @@ func (r *Frames) Record(ctx context.Context, f CapturedFrame) error {
 	tag, err := r.pool.Exec(ctx, `
 		INSERT INTO captured_frames (id, session_id, sequence, stored_path, sha256, decoded,
 			decode_error, transmission_id, frame_number, chunk_number, is_manifest, is_parity,
-			bit_error_rate, finder_score, timing_score, contrast, captured_at)
+			bit_error_rate, finder_score, timing_score, contrast, captured_at,
+			failure_stage, recovered, recovery_engine, recovery_stage, recovery_candidates,
+			recovery_flips, recovery_ms, merged_shots, lane_index, lane_count, decode_ms)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-			COALESCE($17::timestamptz, now()))
+			COALESCE($17::timestamptz, now()),
+			$18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
 		ON CONFLICT (session_id, sequence) DO NOTHING`,
 		f.ID, f.SessionID, f.Sequence, f.StoredPath, f.SHA256, f.Decoded, f.DecodeError,
 		f.TransmissionID, f.FrameNumber, f.ChunkNumber, f.IsManifest, f.IsParity,
-		f.BitErrorRate, f.FinderScore, f.TimingScore, f.Contrast, capturedAt)
+		f.BitErrorRate, f.FinderScore, f.TimingScore, f.Contrast, capturedAt,
+		f.FailureStage, f.Recovered, f.RecoveryEngine, f.RecoveryStage, f.RecoveryCandidates,
+		f.RecoveryFlips, f.RecoveryMS, f.MergedShots, f.LaneIndex, max(f.LaneCount, 1), f.DecodeMS)
 	if err != nil {
 		return err
 	}
@@ -199,22 +222,20 @@ func (r *Frames) Record(ctx context.Context, f CapturedFrame) error {
 
 // Failed returns the frames of a session that could not be read, which is the evidence an
 // operator needs when a capture is going badly.
-// Recent returns the newest captures of a session, decoded or not.
+// frameColumns is every column a CapturedFrame reads, in the order scanFrames expects.
 //
-// Newest first, because the question a live page asks is "what is arriving now" — and the answer to that is the
-// last few frames, not the first. Both outcomes are included: a page showing only what decoded would look
-// healthy while a camera drifted out of focus, and one showing only failures would look broken during a perfect
-// transfer.
-func (r *Frames) Recent(ctx context.Context, sessionID uuid.UUID, limit int) ([]CapturedFrame, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT id, session_id, sequence, stored_path, sha256, decoded, decode_error,
-		       transmission_id, frame_number, chunk_number, is_manifest, is_parity,
-		       bit_error_rate, finder_score, timing_score, contrast, captured_at
-		FROM captured_frames WHERE session_id = $1
-		ORDER BY sequence DESC LIMIT $2`, sessionID, page(limit))
-	if err != nil {
-		return nil, err
-	}
+// One constant rather than a list per query. There were three copies and a fourth was about to be
+// added; the failure mode of copies is that a column added to some of them reads as its zero value
+// through the others, which looks like the pipeline never recorded it rather than like a query that
+// forgot to ask.
+const frameColumns = `id, session_id, sequence, stored_path, sha256, decoded, decode_error,
+	transmission_id, frame_number, chunk_number, is_manifest, is_parity,
+	bit_error_rate, finder_score, timing_score, contrast, captured_at,
+	failure_stage, recovered, recovery_engine, recovery_stage, recovery_candidates,
+	recovery_flips, recovery_ms, merged_shots, lane_index, lane_count, decode_ms`
+
+// scanFrames reads rows selected with frameColumns.
+func scanFrames(rows pgx.Rows) ([]CapturedFrame, error) {
 	defer rows.Close()
 
 	var out []CapturedFrame
@@ -223,7 +244,10 @@ func (r *Frames) Recent(ctx context.Context, sessionID uuid.UUID, limit int) ([]
 		if err := rows.Scan(&f.ID, &f.SessionID, &f.Sequence, &f.StoredPath, &f.SHA256,
 			&f.Decoded, &f.DecodeError, &f.TransmissionID, &f.FrameNumber, &f.ChunkNumber,
 			&f.IsManifest, &f.IsParity, &f.BitErrorRate, &f.FinderScore, &f.TimingScore,
-			&f.Contrast, &f.CapturedAt); err != nil {
+			&f.Contrast, &f.CapturedAt,
+			&f.FailureStage, &f.Recovered, &f.RecoveryEngine, &f.RecoveryStage, &f.RecoveryCandidates,
+			&f.RecoveryFlips, &f.RecoveryMS, &f.MergedShots, &f.LaneIndex, &f.LaneCount,
+			&f.DecodeMS); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -231,11 +255,26 @@ func (r *Frames) Recent(ctx context.Context, sessionID uuid.UUID, limit int) ([]
 	return out, rows.Err()
 }
 
+// Recent returns the newest captures of a session, decoded or not.
+//
+// Newest first, because the question a live page asks is "what is arriving now" — and the answer to that is the
+// last few frames, not the first. Both outcomes are included: a page showing only what decoded would look
+// healthy while a camera drifted out of focus, and one showing only failures would look broken during a perfect
+// transfer.
+func (r *Frames) Recent(ctx context.Context, sessionID uuid.UUID, limit int) ([]CapturedFrame, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT `+frameColumns+`
+		FROM captured_frames WHERE session_id = $1
+		ORDER BY sequence DESC LIMIT $2`, sessionID, page(limit))
+	if err != nil {
+		return nil, err
+	}
+	return scanFrames(rows)
+}
+
 func (r *Frames) Failed(ctx context.Context, sessionID uuid.UUID, limit int) ([]CapturedFrame, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT id, session_id, sequence, stored_path, sha256, decoded, decode_error,
-		       transmission_id, frame_number, chunk_number, is_manifest, is_parity,
-		       bit_error_rate, finder_score, timing_score, contrast, captured_at
+		SELECT `+frameColumns+`
 		FROM captured_frames WHERE session_id = $1 AND NOT decoded
 		-- Newest first by *time*, which is the whole point of the page this feeds. "Why is my camera not
 		-- reading this" is a question about the last few seconds.
@@ -248,20 +287,59 @@ func (r *Frames) Failed(ctx context.Context, sessionID uuid.UUID, limit int) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return scanFrames(rows)
+}
 
-	var out []CapturedFrame
-	for rows.Next() {
-		var f CapturedFrame
-		if err := rows.Scan(&f.ID, &f.SessionID, &f.Sequence, &f.StoredPath, &f.SHA256,
-			&f.Decoded, &f.DecodeError, &f.TransmissionID, &f.FrameNumber, &f.ChunkNumber,
-			&f.IsManifest, &f.IsParity, &f.BitErrorRate, &f.FinderScore, &f.TimingScore,
-			&f.Contrast, &f.CapturedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, f)
+// SharingImage returns every row read out of one stored photograph, in lane order.
+//
+// A tiled capture yields several rows against one image, and the detail view exists to compare them:
+// two lanes photographed in the same instant under the same exposure, one reading and one not, is the
+// most direct evidence there is about what the channel is actually doing.
+func (r *Frames) SharingImage(ctx context.Context, sessionID uuid.UUID, storedPath string) ([]CapturedFrame, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT `+frameColumns+`
+		FROM captured_frames WHERE session_id = $1 AND stored_path = $2
+		ORDER BY lane_index ASC, sequence ASC`, sessionID, storedPath)
+	if err != nil {
+		return nil, err
 	}
-	return out, rows.Err()
+	return scanFrames(rows)
+}
+
+// Get returns one captured frame by id, for the detail view.
+func (r *Frames) Get(ctx context.Context, id uuid.UUID) (CapturedFrame, error) {
+	rows, err := r.pool.Query(ctx, `SELECT `+frameColumns+` FROM captured_frames WHERE id = $1`, id)
+	if err != nil {
+		return CapturedFrame{}, err
+	}
+	found, err := scanFrames(rows)
+	if err != nil {
+		return CapturedFrame{}, err
+	}
+	if len(found) == 0 {
+		return CapturedFrame{}, ErrNotFound
+	}
+	return found[0], nil
+}
+
+// ForTransmission returns the frames captured for one transfer, oldest first.
+//
+// Oldest first, unlike the live views: this is read as the history of a completed transfer rather
+// than as a question about the last few seconds, and a history reads forwards.
+//
+// Frames that never decoded are absent by construction — a frame the receiver could not read carries
+// nothing saying which transfer it belonged to, so it is attributed to the session and not to any
+// transmission. That is a real limitation of asking this question and not a gap in the query: see the
+// session's own capture list for everything a camera photographed, readable or not.
+func (r *Frames) ForTransmission(ctx context.Context, transmissionID uuid.UUID, limit int) ([]CapturedFrame, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT `+frameColumns+`
+		FROM captured_frames WHERE transmission_id = $1
+		ORDER BY captured_at ASC, sequence ASC LIMIT $2`, transmissionID, page(limit))
+	if err != nil {
+		return nil, err
+	}
+	return scanFrames(rows)
 }
 
 // Manifest is what a transmission declared about itself.
