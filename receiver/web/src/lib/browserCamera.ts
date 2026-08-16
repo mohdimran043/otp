@@ -157,6 +157,19 @@ export function setSharpnessFloor(fraction: number): void {
 }
 
 /**
+ * captureType is the image format each photograph is posted as.
+ *
+ * Module-level and set from the page, matching sharpnessFloor above: the capture loop runs outside
+ * React, and reading a prop from inside it would mean threading state through every frame.
+ */
+let captureType: 'image/jpeg' | 'image/png' = 'image/jpeg'
+
+/** setCaptureFormat chooses how photographs are encoded. See UiState.captureFormat for the measurement. */
+export function setCaptureFormat(format: 'jpeg' | 'png'): void {
+  captureType = format === 'png' ? 'image/png' : 'image/jpeg'
+}
+
+/**
  * sharpnessDecay lets the reference fall when the scene genuinely changes, so moving to a new position does not
  * leave the camera permanently comparing against a sharpness it can no longer reach. At ten frames a second this
  * halves the reference in about two seconds.
@@ -254,9 +267,17 @@ async function postOneFrame() {
       emit({ steadiness })
     }
 
-    // JPEG rather than PNG: a PNG of a 1080p frame is megabytes, and the artefacts at this quality are far inside
-    // what the decoder tolerates — the optical envelope budgets for a lens.
-    const blob = await new Promise<Blob | null>((resolve) => canvas!.toBlob(resolve, 'image/jpeg', 0.92))
+    // The format is the operator's choice, and it is not cosmetic for a colour payload.
+    //
+    // JPEG subsamples chroma, storing colour at half resolution in each direction, and colour8 carries
+    // every symbol as a corner of the RGB cube — so the only thing distinguishing one symbol from
+    // another is recorded at half the resolution the cell was photographed at. Measured across the
+    // marginal band on a two-lane display, quality 92 roughly doubles the fraction of ambiguous cells.
+    //
+    // It remains the default because a lossless 1080p frame is megabytes rather than hundreds of
+    // kilobytes, and a link that cannot carry them drops whole frames, which costs more than the
+    // chroma does. The quality argument is ignored for PNG.
+    const blob = await new Promise<Blob | null>((resolve) => canvas!.toBlob(resolve, captureType, 0.92))
     if (!blob) return
 
     const response = await fetch('/api/v1/capture/frames', {

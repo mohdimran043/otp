@@ -5,6 +5,7 @@ import (
 	"image"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -57,6 +58,7 @@ func TestRealLanesWithRecovery(t *testing.T) {
 	t.Logf("engine=%s version=%s", eng.Name(), eng.Version())
 
 	var lanes, rawOK, afterRecovery int
+	var lostAmbiguity []float64
 	for _, f := range files {
 		fh, err := os.Open(f)
 		if err != nil {
@@ -92,11 +94,40 @@ func TestRealLanesWithRecovery(t *testing.T) {
 				perFile = append(perFile, "recovered("+res.Report.Engine+")")
 			} else {
 				perFile = append(perFile, "lost")
+				// How ambiguous was it? This is the number that decides whether any better reader
+				// could have helped: recovery corrects a handful of cells, so a frame with dozens of
+				// genuinely uncertain cells is not a search problem, it is a channel problem.
+				if soft, serr := encoding.SoftRead(g, img); serr == nil && len(soft.Cells) > 0 {
+					var ambiguous int
+					for _, c := range soft.Cells {
+						if c.Margin < 40 {
+							ambiguous++
+						}
+					}
+					lostAmbiguity = append(lostAmbiguity,
+						float64(ambiguous)/float64(len(soft.Cells)))
+				}
 			}
 			_ = frame
 		}
 		t.Logf("%-14s lanes=%d %v", filepath.Base(f)[:12], len(found), perFile)
 	}
 
-	t.Logf("TOTAL lanes=%d  raw-decode-ok=%d  after-recovery=%d", lanes, rawOK, afterRecovery)
+	t.Logf("TOTAL lanes=%d  raw-decode-ok=%d  after-recovery=%d  lost=%d",
+		lanes, rawOK, afterRecovery, lanes-afterRecovery)
+
+	// The ambiguity of what was lost, which is what says whether a better reader is the answer.
+	if len(lostAmbiguity) > 0 {
+		sort.Float64s(lostAmbiguity)
+		var sum float64
+		for _, v := range lostAmbiguity {
+			sum += v
+		}
+		t.Logf("LOST-LANE AMBIGUITY over %d lanes: min=%.2f%% median=%.2f%% mean=%.2f%% max=%.2f%%",
+			len(lostAmbiguity),
+			lostAmbiguity[0]*100,
+			lostAmbiguity[len(lostAmbiguity)/2]*100,
+			sum/float64(len(lostAmbiguity))*100,
+			lostAmbiguity[len(lostAmbiguity)-1]*100)
+	}
 }

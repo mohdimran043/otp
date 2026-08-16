@@ -20,6 +20,7 @@ import VideocamIcon from '@mui/icons-material/Videocam'
 import VideocamOffIcon from '@mui/icons-material/VideocamOff'
 
 import * as camera from '../lib/browserCamera'
+import { useUi } from '../store/ui'
 import { previewAspect } from '../lib/previewBox'
 import type { CaptureDetail } from '../lib/videoConstraints'
 import { AlignmentGuide, AlignmentOverlay, useAlignment } from './AlignmentGuide'
@@ -60,6 +61,7 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
   // is the right move for a binary payload at a dense grid and the wrong one otherwise, so it is a
   // decision put in front of the operator rather than guessed at.
   const [detail, setDetail] = useState<CaptureDetail>('balanced')
+  const { captureFormat, setCaptureFormat } = useUi()
 
   useEffect(() => setRearFacing(onPhone), [onPhone])
 
@@ -75,6 +77,13 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
   useEffect(() => {
     void enumerate()
   }, [enumerate])
+
+  // The capture loop lives outside React, so the chosen format is pushed to it rather than read from
+  // here. Applied on change and on mount, so a preference restored from storage takes effect without
+  // the operator having to touch the control again.
+  useEffect(() => {
+    camera.setCaptureFormat(captureFormat)
+  }, [captureFormat])
 
   const secure = typeof window !== 'undefined' && window.isSecureContext
 
@@ -157,6 +166,24 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
               {detail === 'balanced'
                 ? 'More pixels are not better for a colour payload: past 1080p the sensor resolves the panel’s own pixel grid and a cell stops being one colour.'
                 : 'Full sensor gives a dense grid the pixels per cell it needs. A binary cell is thresholded rather than measured, so the panel’s subpixels barely touch it.'}
+            </Typography>
+
+            <FormControl size="small" sx={{ maxWidth: 460 }}>
+              <InputLabel id="capture-format">Capture format</InputLabel>
+              <Select
+                labelId="capture-format"
+                label="Capture format"
+                value={captureFormat}
+                onChange={(e) => setCaptureFormat(e.target.value as 'jpeg' | 'png')}
+              >
+                <MenuItem value="jpeg">JPEG — small frames, loses colour detail</MenuItem>
+                <MenuItem value="png">Lossless — large frames, best for colour</MenuItem>
+              </Select>
+            </FormControl>
+            <Typography variant="body2" color="text.secondary">
+              {captureFormat === 'jpeg'
+                ? 'JPEG stores colour at half resolution in each direction, and a colour payload carries its symbols entirely in colour — so a cell photographed at ten pixels has the thing that identifies it recorded at five. Measured on a two-lane display, this roughly doubles the fraction of cells left ambiguous. Keep it only if the link cannot carry lossless frames.'
+                : 'Lossless keeps the colour detail the payload is actually carried in. Frames are several megabytes rather than several hundred kilobytes, so prefer this on a local link and watch for dropped frames over a tunnel.'}
             </Typography>
 
             {!chosen && (
