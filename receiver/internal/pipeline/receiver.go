@@ -782,13 +782,17 @@ func (r *Receiver) readLane(ctx context.Context, cfg config.Config, capture Capt
 	// never displace a verified one.
 	if decodeErr != nil && geometry != nil {
 		if soft, serr := encoding.SoftRead(geometry, capture.Image); serr == nil {
-			res := r.shots.Add(uint64(geometry.Header.FrameNumber), soft)
+			key := shotKey{
+				transmission: geometry.Header.TransmissionID,
+				frame:        uint64(geometry.Header.FrameNumber),
+			}
+			res := r.shots.Add(key, soft)
 			if res.Reading != nil && res.Shots > 1 {
 				if f, verr := res.Reading.Verify(res.Symbols); verr == nil {
 					r.log.Info("read a frame by combining several photographs of it",
 						zap.Uint64("frame", uint64(geometry.Header.FrameNumber)),
 						zap.Int("shots", res.Shots))
-					r.shots.Forget(uint64(geometry.Header.FrameNumber))
+					r.shots.Forget(key)
 					frame, decodeErr = f, nil
 					detail.mergedShots = res.Shots
 				}

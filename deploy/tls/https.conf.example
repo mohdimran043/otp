@@ -1,0 +1,125 @@
+# HTTPS for a production deployment. Copy into the container's /etc/nginx/tls/ to enable.
+#
+# Not enabled by default and not commented out inside the main config, which is the same decision made twice:
+# development runs on plain HTTP with no edits, and production adds a file rather than modifying one that the
+# next image build would overwrite.
+#
+# To use it:
+#
+#   1. Put the certificate and key where the container can read them. The compose files mount
+#      ./tls into /etc/nginx/tls for exactly this, so a certificate placed beside this file is already there.
+#   2. Copy this file to https.conf in the same directory, and set server_name and the two paths below.
+#   3. Publish 443 from the service in docker-compose.yml — the container already listens on 80 only because
+#      nothing was terminating TLS.
+#   4. Restart. `nginx -t` inside the container will tell you about a bad path before the restart does.
+#
+# The application needs no change. It already trusts X-Forwarded-Proto for building absolute URLs, so it
+# reports https addresses the moment this is in place.
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name _;
+
+    ssl_certificate     /etc/nginx/tls/fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/privkey.pem;
+
+    # TLS 1.2 and 1.3 only. Everything below has known weaknesses and nothing an operator would deploy this
+    # for still requires it.
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # OCSP stapling. Needs a resolver, which the including configuration already sets.
+    ssl_stapling on;
+    ssl_stapling_verify on;
+
+    # HSTS is deliberately absent rather than forgotten. It is a promise a browser remembers for months, and
+    # committing to it from an example file — on a deployment that may be reached by IP, or share a hostname
+    # with something served over HTTP — is how a working system becomes unreachable. Add it once the hostname
+    # is settled:
+    #
+    #   add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    client_max_body_size 64G;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    proxy_http_version 1.1;
+
+    proxy_connect_timeout 30s;
+    proxy_send_timeout 30m;
+    proxy_read_timeout 30m;
+    send_timeout 30m;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Request-Id $request_id;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+    gzip_min_length 1024;
+
+    # Sender: sender_api. Receiver: receiver_api. Set whichever this deployment is.
+    location = /api/v1/display/next {
+        proxy_pass http://sender_api;
+        proxy_buffering off;
+        proxy_read_timeout 60s;
+        access_log off;
+    }
+
+    location /api/ {
+        proxy_pass http://sender_api;
+    }
+
+    location /health {
+        proxy_pass http://sender_api;
+        access_log off;
+    }
+
+    location /metrics {
+        proxy_pass http://sender_api;
+        access_log off;
+    }
+
+    include /etc/nginx/admin.conf;
+
+    location /assets/ {
+        root /usr/share/nginx/html;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    location / {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-cache";
+    }
+}
+
+# Sending HTTP to HTTPS, once there is an HTTPS to send it to.
+#
+# Left commented because enabling it changes what the *existing* port 80 does, and a deployment that adds
+# TLS while something still reaches it over HTTP — a health probe, a sibling container, an ngrok tunnel
+# terminating its own TLS and forwarding plain HTTP — would break that the moment this file lands. Enable it
+# deliberately, after checking what actually talks to port 80.
+#
+# server {
+#     listen 80;
+#     server_name _;
+#
+#     # ACME challenges stay on HTTP, or renewal cannot complete.
+#     location /.well-known/acme-challenge/ {
+#         root /var/www/certbot;
+#     }
+#
+#     location / {
+#         return 301 https://$host$request_uri;
+#     }
+# }

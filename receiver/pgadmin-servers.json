@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "OTP Receiver",
+      "Group": "OTP",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "otp_sender",
+      "Username": "otp",
+      "SSLMode": "prefer",
+      "Comment": "The receiver's own database, which is named otp_sender: docker-compose.yml sets POSTGRES_DB and the receiver's DATABASE_URL to that on both sides. Harmless but confusing, and named here as it actually is rather than as it reads. Reached over the compose network; Postgres is not published on any port."
+    }
+  }
+}

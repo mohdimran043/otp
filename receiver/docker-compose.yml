@@ -64,6 +64,10 @@ services:
       # Bind-mounted rather than a named volume, because this is the one path an operator has to be able to
       # point at the same place on both machines — an NFS mount, a SAN share, a synced directory.
       - ${OTP_SHARED_DIR:-./shared}:/var/lib/otp/shared
+      # Certificates and the HTTPS server block, when a deployment has them. The directory is empty
+      # in development and nginx's include globs it to nothing, so this mount changes nothing until
+      # something is put in it. See deploy/tls/https.conf.example.
+      - ./tls:/etc/nginx/tls:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -109,6 +113,10 @@ services:
     environment:
       MINIO_ROOT_USER: ${OTP_RECEIVER_MINIO_ACCESS_KEY:-otpreceiver}
       MINIO_ROOT_PASSWORD: ${OTP_RECEIVER_MINIO_SECRET_KEY:-otpreceiver-dev-secret}
+      # Where the console is reached from the outside, which it needs in order to write its own links.
+      # nginx serves it under /minio on the application's origin; this is the same address said again, and
+      # the two have to agree. A deployment reached at more than one origin can only name one here.
+      MINIO_BROWSER_REDIRECT_URL: ${OTP_RECEIVER_MINIO_BROWSER_URL:-http://localhost:2000/minio}
     volumes:
       - receiver-minio:/data
     restart: unless-stopped
@@ -135,7 +143,46 @@ services:
         done
         mc mb -p local/otp-receiver
 
+  # pgAdmin, reachable at /pgadmin on the application's own origin.
+  #
+  # Not published on a port of its own, deliberately. It reaches Postgres over the compose network, which is
+  # the only thing that can — the database has never been published and still is not — so the whole of its
+  # exposure is the path nginx gives it, and a deployment that wants it gone removes this service and loses
+  # that path and nothing else.
+  #
+  # SCRIPT_NAME is what makes the subpath work: pgAdmin builds its own URLs from it, and without it the login
+  # page loads and posts to the origin root. It has to agree with the location block in deploy/nginx-admin.conf.
+  pgadmin:
+    image: dpage/pgadmin4:8.12
+    environment:
+      # Development credentials, and named as such. pgAdmin refuses to start without them, so there is no
+      # option to leave them unset — which makes overriding them in .env the thing to do before this is
+      # reachable from anywhere but a laptop.
+      #
+      # example.com rather than something like otp.local: pgAdmin validates the address against real TLDs
+      # even with deliverability checking off, and rejects .local by restarting forever with the reason on
+      # stdout and nothing on the page.
+      PGADMIN_DEFAULT_EMAIL: ${OTP_RECEIVER_PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${OTP_RECEIVER_PGADMIN_PASSWORD:-otp-dev-password}
+      SCRIPT_NAME: /pgadmin
+      # The setup wizard asks for a master password on every login otherwise, which is friction with no
+      # security value on a console that is already behind its own login.
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      # pgAdmin checks the Host header against its own idea of where it is; behind a proxy that check fails
+      # every request. nginx forwards the real host, so the check is redundant here rather than skipped.
+      PGADMIN_CONFIG_PROXY_X_HOST_COUNT: "1"
+      PGADMIN_CONFIG_PROXY_X_PREFIX_COUNT: "1"
+    volumes:
+      - receiver-pgadmin:/var/lib/pgadmin
+      # The server is pre-registered so the console opens on this deployment's database rather than on an
+      # empty list and a form asking for a hostname the operator has to know.
+      - ./pgadmin-servers.json:/pgadmin4/servers.json:ro
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
 volumes:
   receiver-storage:
   receiver-postgres:
   receiver-minio:
+  receiver-pgadmin:

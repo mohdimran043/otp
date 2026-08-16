@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/opticaltransport/otp/shared/encoding"
 )
 
@@ -72,18 +74,34 @@ type merged struct {
 	at time.Time
 }
 
-// merger holds the frames currently being accumulated.
+// shotKey identifies the displayed frame a photograph is of.
 //
-// Keyed by the frame number the header declares, which is the only identifier available: the header
-// is binary, written several times over and majority-voted, so it survives photographs whose payload
-// does not. That a shot can say which frame it is of, even when it cannot be read, is what makes
-// grouping possible without any protocol change.
-type merger struct {
-	mu sync.Mutex
-	by map[uint64]*merged
+// The transmission belongs in the key and its absence was a real fault. Every transfer numbers its
+// frames from zero, so with two files on the display at once, frame 5 of one and frame 5 of the other
+// landed in the same accumulator and were averaged together as though they were two photographs of one
+// picture. They are not: the mean of two unrelated frames reads as neither.
+//
+// It could not corrupt a file — a merged reading is still checked against the footer's CRC32 and
+// SHA-256, so the nonsense simply failed to verify. What it did was disable merging outright whenever
+// two transfers overlapped, and silently: each transfer poisoned the other's accumulator, so one of
+// the two mechanisms that rescue a marginal frame stopped working exactly when the channel was busiest.
+//
+// The header carries the transmission, it is covered by the header's own CRC32, and the header band is
+// written several times over and majority-voted — so it survives photographs whose payload does not,
+// which is the same property that made the frame number usable. The earlier comment here claimed the
+// frame number was "the only identifier available"; it was simply the only one being read.
+type shotKey struct {
+	transmission uuid.UUID
+	frame        uint64
 }
 
-func newMerger() *merger { return &merger{by: map[uint64]*merged{}} }
+// merger holds the frames currently being accumulated.
+type merger struct {
+	mu sync.Mutex
+	by map[shotKey]*merged
+}
+
+func newMerger() *merger { return &merger{by: map[shotKey]*merged{}} }
 
 // mergeResult is what adding one photograph produced.
 type mergeResult struct {
@@ -103,7 +121,7 @@ type mergeResult struct {
 // The caller decides what to do with it. This does not verify, because verification belongs where the
 // decision about a frame is made, and because a merged reading that fails is not an error — it is one
 // more photograph short.
-func (m *merger) Add(frameNumber uint64, r *encoding.SoftReading) mergeResult {
+func (m *merger) Add(key shotKey, r *encoding.SoftReading) mergeResult {
 	if r == nil || len(r.Cells) == 0 {
 		return mergeResult{}
 	}
@@ -112,7 +130,7 @@ func (m *merger) Add(frameNumber uint64, r *encoding.SoftReading) mergeResult {
 	defer m.mu.Unlock()
 	m.evictLocked()
 
-	e := m.by[frameNumber]
+	e := m.by[key]
 	if e == nil || len(e.n) != len(r.Cells) {
 		// A different cell count means the sender's geometry changed under us. Start again rather than
 		// average across two shapes, which would be arithmetic on unrelated things.
@@ -124,7 +142,7 @@ func (m *merger) Add(frameNumber uint64, r *encoding.SoftReading) mergeResult {
 		if len(m.by) >= mergeCapacity {
 			m.dropOldestLocked()
 		}
-		m.by[frameNumber] = e
+		m.by[key] = e
 	}
 	e.at = time.Now()
 	e.shots++
@@ -169,17 +187,17 @@ func (m *merger) Add(frameNumber uint64, r *encoding.SoftReading) mergeResult {
 }
 
 // Forget drops a frame's accumulator, once it has been read and there is nothing left to improve.
-func (m *merger) Forget(frameNumber uint64) {
+func (m *merger) Forget(key shotKey) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.by, frameNumber)
+	delete(m.by, key)
 }
 
 // Reset abandons everything, for a new capture session.
 func (m *merger) Reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.by = map[uint64]*merged{}
+	m.by = map[shotKey]*merged{}
 }
 
 // evictLocked removes entries the display has long moved past.
@@ -194,7 +212,7 @@ func (m *merger) evictLocked() {
 
 // dropOldestLocked makes room, preferring to lose the frame least likely to still be on screen.
 func (m *merger) dropOldestLocked() {
-	var oldest uint64
+	var oldest shotKey
 	var at time.Time
 	for k, e := range m.by {
 		if at.IsZero() || e.at.Before(at) {

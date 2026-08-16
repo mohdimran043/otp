@@ -38,3 +38,10 @@ docker-compose.test.yml
 # large; the training report beside them is what is worth reading and it is small enough to keep.
 receiver/ai/service/models/*/*/weights.pt
 receiver/ai/service/__pycache__/
+
+# Certificates a deployment supplies. The directory is mounted into nginx and globbed by its TLS include,
+# so it must exist and must not carry anybody's private key into the repository.
+sender/tls/*
+receiver/tls/*
+!sender/tls/.gitkeep
+!receiver/tls/.gitkeep

@@ -41,6 +41,11 @@ RUN apk add --no-cache ca-certificates tzdata su-exec
 COPY --from=build /out/receiver /usr/local/bin/receiver
 COPY --from=web /web/dist /usr/share/nginx/html
 COPY receiver/nginx.conf /etc/nginx/conf.d/default.conf
+# The admin paths are shared by both applications, so they live in one file rather than two that drift.
+COPY deploy/nginx-admin.conf /etc/nginx/admin.conf
+# Empty, and deliberately so: the TLS include globs this directory, matching nothing in development.
+# A deployment mounts its certificate and server block over it. See deploy/tls/https.conf.example.
+RUN mkdir -p /etc/nginx/tls
 COPY receiver/docker-entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

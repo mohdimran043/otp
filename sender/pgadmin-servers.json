@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "OTP Sender",
+      "Group": "OTP",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "otp_sender",
+      "Username": "otp",
+      "SSLMode": "prefer",
+      "Comment": "This deployment's own database. Reached over the compose network; Postgres is not published on any port."
+    }
+  }
+}
