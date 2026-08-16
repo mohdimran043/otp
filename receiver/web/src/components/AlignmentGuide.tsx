@@ -2,6 +2,7 @@ import { Box, Paper, Stack, Typography } from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 
 import { api, type AlignmentStatus, type AlignmentView } from '../api/client'
+import { laneOutlines } from '../lib/laneOutlines'
 import { mono, signal } from '../theme'
 
 // Live aiming feedback: the instrument face of this application.
@@ -36,26 +37,31 @@ function look(a: AlignmentView | undefined) {
 }
 
 /**
- * AlignmentOverlay draws the grid the decoder actually found, over the live preview.
+ * AlignmentOverlay draws every frame the decoder found, over the live preview.
  *
  * This is what makes aiming direct rather than inferential: the outline sits on the thing being aimed
  * at, and turns green the moment frames decode, so "is it working" is answered by looking rather than
  * by reading a counter.
+ *
+ * One outline per lane, and the count is whatever the receiver found — two, four, sixteen — because a
+ * tiling is only worth aiming at as a whole. Outlining one lane of a tiled display was actively
+ * misleading: the unmarked lanes look unseen, which is the exact question the operator is pointing the
+ * camera to answer.
+ *
+ * Each lane is coloured by its own result rather than by the capture's. A lane that decoded is green
+ * even while the panel says CLOSER, and a lane that is found but not reading keeps the verdict's own
+ * colour — so a tiling where one corner of the screen is glared out shows as one amber box among green
+ * ones, and the operator knows which way to move without reading anything.
  *
  * Drawn in a 0..1 viewBox because the corners arrive normalised and the preview's size is a layout
  * decision with nothing to do with the capture's resolution. The SVG does that conversion for free and
  * stays correct when the element resizes or the phone is turned.
  */
 export function AlignmentOverlay({ alignment }: { alignment: AlignmentView | undefined }) {
-  if (!alignment?.live || !alignment.locked || alignment.corners?.length !== 4) return null
+  const outlines = laneOutlines(alignment)
+  if (outlines.length === 0) return null
 
   const { colour } = look(alignment)
-  const c = alignment.corners
-  // Corners arrive top-left, top-right, bottom-left, bottom-right; a polygon needs perimeter order.
-  const points = [c[0], c[1], c[3], c[2]]
-    .filter((p): p is [number, number] => Array.isArray(p))
-    .map(([x, y]) => `${x},${y}`)
-    .join(' ')
 
   return (
     <Box
@@ -65,17 +71,25 @@ export function AlignmentOverlay({ alignment }: { alignment: AlignmentView | und
       aria-hidden
       sx={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
     >
-      <polygon
-        points={points}
-        fill={`${colour}12`}
-        stroke={colour}
-        strokeWidth={2}
-        strokeLinejoin="round"
-        vectorEffect="non-scaling-stroke"
-      />
-      {c.map(([x, y], i) => (
-        <circle key={i} cx={x} cy={y} r={0.011} fill={colour} />
-      ))}
+      {outlines.map(({ points, decoded, frameNumber }, lane) => {
+        const tone = decoded ? signal.lock : colour
+        return (
+          <g key={`${frameNumber}-${lane}`}>
+            <polygon
+              points={points}
+              fill={`${tone}12`}
+              stroke={tone}
+              strokeWidth={2}
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+            />
+            {points.split(' ').map((point, i) => {
+              const [x, y] = point.split(',')
+              return <circle key={i} cx={x} cy={y} r={0.011} fill={tone} />
+            })}
+          </g>
+        )
+      })}
     </Box>
   )
 }
@@ -200,6 +214,9 @@ export function AlignmentGuide({
   const { colour, word, sub } = look(alignment)
   const lo = alignment.required_module_pixels
   const hi = alignment.max_module_pixels
+  // Null rather than zero when the receiver does not report lanes, so an older one shows nothing here
+  // instead of claiming none of its frames are reading.
+  const reading = alignment.lanes?.length ? alignment.lanes.filter((l) => l.decoded).length : null
   // Only mentioned once it is costing frames. A figure that is always on screen is one nobody reads.
   const shaky = blurred > 0 && steadiness > 0 && steadiness < 0.85
 
@@ -266,6 +283,16 @@ export function AlignmentGuide({
                 label="frames in view"
                 value={`${alignment.lanes_found} / ${alignment.lanes_expected}`}
                 tone={alignment.lanes_found >= alignment.lanes_expected ? signal.lock : signal.adjust}
+              />
+            )}
+            {/* In view and reading are different questions on a tiling, and only the second one is
+                the transfer moving. Shown beside each other so a lane that is framed but glared out
+                is a number rather than an inference from a stalled chunk count. */}
+            {alignment.lanes_expected > 1 && reading !== null && (
+              <Readout
+                label="frames reading"
+                value={`${reading} / ${alignment.lanes_found}`}
+                tone={reading >= alignment.lanes_found ? signal.lock : signal.adjust}
               />
             )}
             <Readout label="fill" value={`${Math.round(alignment.fill * 100)}%`} />

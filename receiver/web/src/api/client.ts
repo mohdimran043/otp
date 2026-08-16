@@ -103,11 +103,30 @@ export interface AlignmentView {
   finder_score: number
   timing_score: number
   contrast: number
-  /** Fiducial centres normalised to 0..1 of the frame: top-left, top-right, bottom-left, bottom-right. */
+  /**
+   * Fiducial centres normalised to 0..1 of the frame: top-left, top-right, bottom-left, bottom-right.
+   * The lead lane only — see `lanes` for every frame in the picture.
+   */
   corners: [number, number][]
+  /**
+   * Every frame located in this capture, one entry each, so a tiled display can be outlined lane by
+   * lane. Null or empty from a receiver that predates it, which is why the overlay falls back to
+   * `corners`.
+   */
+  lanes: LaneOutline[] | null
   status: AlignmentStatus
   advice: string
   at: string
+}
+
+/** One located frame's outline and its own decode result. */
+export interface LaneOutline {
+  /** Normalised exactly like AlignmentView.corners, in the same order. */
+  corners: [number, number][]
+  /** Whether this lane's payload read, as opposed to the lane merely being found. */
+  decoded: boolean
+  /** Which frame this lane carried. */
+  frame_number: number
 }
 
 export interface Chunk {

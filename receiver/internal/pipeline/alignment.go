@@ -83,7 +83,19 @@ type Alignment struct {
 	// Corners are the fiducial centres normalised to 0..1 of the frame, in the order top-left,
 	// top-right, bottom-left, bottom-right. Normalised rather than in pixels because the page
 	// draws them over a preview element whose size has nothing to do with the capture's.
+	//
+	// This is the lead lane only, and Lanes below is the whole picture. Kept because a single-frame
+	// display is the common case and describing it as a list of one reads worse everywhere it is used.
 	Corners [4][2]float64 `json:"corners"`
+
+	// Lanes is every frame located in this capture, one entry each.
+	//
+	// The overlay drew Corners alone and therefore outlined one frame of a tiled display while the
+	// others went unmarked — which reads as "the receiver can only see one of these", the very thing
+	// an operator is trying to determine. Each lane is found independently and decodes independently,
+	// so each gets its own outline and its own verdict, and a lane that is in shot but not reading is
+	// visible as itself rather than averaged into a single colour.
+	Lanes []LaneOutline `json:"lanes"`
 
 	// Status is the single machine-readable verdict the page keys its colours off.
 	Status AlignmentStatus `json:"status"`
@@ -95,6 +107,22 @@ type Alignment struct {
 	// At is when this frame was measured, so a page can tell a live reading from a stale one after
 	// the camera has stopped posting.
 	At time.Time `json:"at"`
+}
+
+// LaneOutline is one located frame's outline and its own verdict.
+type LaneOutline struct {
+	// Corners are that lane's fiducial centres, normalised to 0..1 of the capture in the same order
+	// and the same frame of reference as Alignment.Corners.
+	Corners [4][2]float64 `json:"corners"`
+
+	// Decoded is whether this lane's payload read, as opposed to merely being found. It is the
+	// distinction the overlay exists to show: a lane outlined but not decoding is aimed at and
+	// unreadable, which is a different problem from a lane that is not in shot at all.
+	Decoded bool `json:"decoded"`
+
+	// FrameNumber is which frame this lane carried, so a lane can be named in a log or a bug report
+	// rather than described by where it happened to sit on the screen.
+	FrameNumber uint32 `json:"frame_number"`
 }
 
 // AlignmentStatus is the verdict on one frame.
@@ -154,23 +182,45 @@ const (
 // The image is needed as well as the geometry because Fill is a ratio against the frame, and the
 // geometry alone does not know how large a frame it was found in.
 func measureAlignment(img image.Image, g *protocol.Geometry, decoded bool) Alignment {
-	return measureLanes(img, []*protocol.Geometry{g}, 1, decoded)
+	return measureReadings(img, []laneReading{{geometry: g, decoded: decoded}}, 1)
 }
 
-// measureLanes turns a capture's located frames into aiming advice.
+// laneReading is one located frame and whether it went on to read.
+//
+// A pair rather than two parallel slices because they are only ever used together, and the failure a
+// pair rules out — a decode result lining up against the wrong lane — would show as an outline
+// painted the wrong colour, which is exactly the kind of wrong that gets believed.
+type laneReading struct {
+	geometry *protocol.Geometry
+	decoded  bool
+}
+
+// measureLanes turns a capture's located frames into aiming advice, with one verdict for all of them.
+//
+// For callers that have located the lanes but not yet read them. Where per-lane results are available,
+// measureReadings says more — see the overlay, which colours each lane by its own outcome.
+func measureLanes(img image.Image, lanes []*protocol.Geometry, expected int, decoded bool) Alignment {
+	readings := make([]laneReading, 0, len(lanes))
+	for _, l := range lanes {
+		readings = append(readings, laneReading{geometry: l, decoded: decoded})
+	}
+	return measureReadings(img, readings, expected)
+}
+
+// measureReadings turns a capture's located frames and their outcomes into aiming advice.
 //
 // Fill is measured across every lane found, not across one of them. On a tiled display the thing
 // being aimed is the whole arrangement: the operator needs all of it in shot, and how much of the
 // view any single lane occupies is not a number they can act on — chasing it moves the others out of
 // frame. Pixels per cell still come from a lane, because that is what a decoder reads.
-func measureLanes(img image.Image, lanes []*protocol.Geometry, expected int, decoded bool) Alignment {
+func measureReadings(img image.Image, lanes []laneReading, expected int) Alignment {
 	a := Alignment{At: time.Now(), LanesExpected: expected}
 
 	// Only the ones actually located count. A nil is a lane that was looked for and not found, which
 	// is the state worth reporting rather than smoothing over.
-	found := make([]*protocol.Geometry, 0, len(lanes))
+	found := make([]laneReading, 0, len(lanes))
 	for _, l := range lanes {
-		if l != nil {
+		if l.geometry != nil {
 			found = append(found, l)
 		}
 	}
@@ -178,7 +228,7 @@ func measureLanes(img image.Image, lanes []*protocol.Geometry, expected int, dec
 
 	var g *protocol.Geometry
 	if len(found) > 0 {
-		g = found[0]
+		g = found[0].geometry
 	}
 
 	if g == nil {
@@ -196,7 +246,16 @@ func measureLanes(img image.Image, lanes []*protocol.Geometry, expected int, dec
 	}
 
 	a.Locked = true
-	a.Decoded = decoded
+	// Any lane reading is the honest headline on a tiling: frames are arriving. Which ones is what
+	// the per-lane outlines say, and averaging that into one flag is what the overlay was doing.
+	// Identical to the old meaning where there is one lane, which is why the thresholds below are
+	// unchanged.
+	for _, l := range found {
+		if l.decoded {
+			a.Decoded = true
+			break
+		}
+	}
 	a.ModulePixels = g.ModuleSize
 	a.Perspective = g.Perspective()
 	a.FinderScore, a.TimingScore, a.Contrast = g.FinderScore, g.TimingScore, g.Contrast
@@ -214,11 +273,21 @@ func measureLanes(img image.Image, lanes []*protocol.Geometry, expected int, dec
 
 	// Across every lane found, not just this one. The bounding box of the whole arrangement is what
 	// has to fit the view, and it is what an operator is actually pointing at.
-	for _, other := range found[1:] {
-		for _, c := range other.Corners {
+	//
+	// The same pass records each lane's own outline, since it is already normalising the corners the
+	// overlay needs and doing it twice would be two chances to normalise them differently.
+	a.Lanes = make([]LaneOutline, 0, len(found))
+	for _, l := range found {
+		outline := LaneOutline{Decoded: l.decoded, FrameNumber: l.geometry.Header.FrameNumber}
+		for i, c := range l.geometry.Corners {
+			outline.Corners[i] = [2]float64{
+				clampUnit((c.X - float64(bounds.Min.X)) / w),
+				clampUnit((c.Y - float64(bounds.Min.Y)) / h),
+			}
 			minX, maxX = min(minX, c.X), max(maxX, c.X)
 			minY, maxY = min(minY, c.Y), max(maxY, c.Y)
 		}
+		a.Lanes = append(a.Lanes, outline)
 	}
 
 	// Against the tighter dimension, because that is the one the display runs out of room in first.
@@ -277,7 +346,16 @@ func measureLanes(img image.Image, lanes []*protocol.Geometry, expected int, dec
 	case a.Perspective > maxPerspective:
 		a.Status = StatusOffAxis
 		a.Advice = "Square up to the screen — you are looking at it from too steep an angle."
-	case decoded:
+	// Every lane in shot, some of them reading. Distinguished from good because it looks like good
+	// from the headline — frames are arriving — while a share of the display is doing nothing, and the
+	// operator cannot tell which without being told. The outlines say which; this says how many.
+	case a.Decoded && a.LanesFound > 1 && decodedLanes(found) < a.LanesFound:
+		a.Status = StatusMarginal
+		a.Advice = fmt.Sprintf(
+			"%d of %d frames in view are reading. The others are found but not decoding — hold steadier, "+
+				"or square up: a lane at the edge of the shot is the usual one to go.",
+			decodedLanes(found), a.LanesFound)
+	case a.Decoded:
 		a.Status = StatusGood
 		a.Advice = "Holding well. Keep it here."
 	default:
@@ -285,6 +363,17 @@ func measureLanes(img image.Image, lanes []*protocol.Geometry, expected int, dec
 		a.Advice = "Almost — the grid is found but not readable. Hold steady, and try tapping the screen to focus."
 	}
 	return a
+}
+
+// decodedLanes is how many of the located lanes went on to read.
+func decodedLanes(lanes []laneReading) int {
+	var n int
+	for _, l := range lanes {
+		if l.decoded {
+			n++
+		}
+	}
+	return n
 }
 
 func clampUnit(v float64) float64 {

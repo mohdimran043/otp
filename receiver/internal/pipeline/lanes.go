@@ -70,24 +70,26 @@ func (r *Receiver) prepareAll(ctx context.Context, capture Capture) []prepared {
 		return []prepared{first}
 	}
 
-	// The aiming display is re-measured across every lane, replacing the single-frame reading the
-	// ordinary path recorded. That reading described one lane and reported how much of the view it
-	// filled, which on a tiled display is advice that actively works against the operator: following
-	// it moves the other lanes out of shot.
-	r.alignment.Store(ptr(measureLanes(capture.Image, found, expected, first.decodeErr == nil)))
-
 	out := make([]prepared, 0, len(found))
 	out = append(out, first)
+
+	// Each lane's outcome, kept for the aiming display so it can colour every outline by what that
+	// lane actually did rather than by what the capture as a whole did.
+	readings := make([]laneReading, 0, len(found))
 
 	for _, g := range found {
 		// The frame the ordinary path already produced. Compared by frame number rather than by
 		// geometry, because the two searches may have located the same frame from slightly different
 		// fiducial estimates and would not compare equal as structures.
 		if first.geometry != nil && g.Header.FrameNumber == first.geometry.Header.FrameNumber {
+			// Still an outline. It is a lane in the picture, and the overlay leaving a gap where the
+			// lead frame sits would read as that lane having been missed.
+			readings = append(readings, laneReading{geometry: g, decoded: first.decodeErr == nil})
 			continue
 		}
 
 		frame, err := encoding.DecodeAt(g, capture.Image, opts)
+		readings = append(readings, laneReading{geometry: g, decoded: err == nil})
 		if err != nil {
 			// Located but unreadable. Recorded as its own failure rather than dropped: a lane that
 			// finds its geometry and fails its payload is the state worth seeing, and lumping it in
@@ -97,6 +99,15 @@ func (r *Receiver) prepareAll(ctx context.Context, capture Capture) []prepared {
 		}
 		out = append(out, r.laneResult(capture, first, g, frame, nil))
 	}
+
+	// The aiming display is re-measured across every lane, replacing the single-frame reading the
+	// ordinary path recorded. That reading described one lane and reported how much of the view it
+	// filled, which on a tiled display is advice that actively works against the operator: following
+	// it moves the other lanes out of shot.
+	//
+	// Stored after the lanes have been read rather than before, which is what lets it report per-lane
+	// outcomes instead of one verdict stamped across all of them.
+	r.alignment.Store(ptr(measureReadings(capture.Image, readings, expected)))
 
 	if len(out) > 1 {
 		r.log.Debug("read several frames from one capture",
