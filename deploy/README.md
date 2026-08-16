@@ -1,8 +1,33 @@
 # deploy — the proxy, TLS, and the admin consoles
 
-Both applications already run behind their own nginx inside their own container: the Go API binds to the
-loopback interface, so the proxy is the only route to it rather than the recommended one. What is here is
-what the two proxies share, and what a production deployment adds.
+Both applications run behind nginx, and nginx runs in a container of its own on each side. The API's port is
+not published, so from the host the proxy is the only way in. What is here is what the two proxies share, and
+what a production deployment adds.
+
+## Why nginx is its own container
+
+It used to run beside the API in one container, on the argument that the proxy exists to be the only route to
+that particular API and so the two are one unit. That argument is fair and it lost to an operational one:
+every change to a timeout, a header, a certificate or an admin path rebuilt and redeployed the *application*
+image in order to alter a file the application never reads. In production that is the difference between
+restarting a proxy and rolling the service.
+
+So the configuration is mounted rather than baked:
+
+```bash
+docker compose restart nginx
+```
+
+is the whole cost of a proxy change — measured at about a third of a second, with no image build. The three
+mounted files are `nginx.conf`, `../deploy/nginx-admin.conf`, and whatever is in `./tls`.
+
+The built browser app stays baked into the proxy image, because that genuinely is part of a release: the
+assets and the API that serves them are versioned together, and a mismatched pair is a broken page rather
+than a configuration difference. Both targets live in one Dockerfile — `target: app` and `target: proxy` — so
+the web build runs once and is shared.
+
+Ports are unchanged: 1000 for the sender, 2000 for the receiver. What moved is which container listens
+behind them.
 
 ## One origin
 

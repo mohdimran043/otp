@@ -33,26 +33,43 @@ COPY receiver/ ./
 # scratch image if a deployment prefers one.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/receiver ./cmd/receiver
 
-# --- the runtime -------------------------------------------------------------
-FROM nginx:1.27-alpine
+# --- the proxy ---------------------------------------------------------------
+#
+# nginx is its own image and its own container, rather than a second process beside the API.
+#
+# It used to be one container running both, on the argument that the proxy exists to be the only route to
+# this particular API and so the two are one unit. That is a fair argument and it lost to an operational one:
+# every change to a proxy setting — a timeout, a header, a certificate, an admin path — meant rebuilding and
+# redeploying the application image to alter a file the application never reads. In production that is the
+# difference between restarting a proxy and rolling the service.
+#
+# So the config is mounted rather than baked, and changing it costs `docker compose restart nginx`. What is
+# baked is the built browser app, because that genuinely is part of a release: the assets and the API that
+# serves them are versioned together and a mismatched pair is a broken page.
+FROM nginx:1.27-alpine AS proxy
 
-RUN apk add --no-cache ca-certificates tzdata su-exec
+COPY --from=web /web/dist /usr/share/nginx/html
+
+# Present and empty. The TLS include globs this directory, matching nothing in development; a deployment
+# mounts its certificate and server block over it. See deploy/tls/https.conf.example.
+RUN mkdir -p /etc/nginx/tls
+
+EXPOSE 80
+
+# --- the runtime -------------------------------------------------------------
+FROM alpine:3.21 AS app
+
+RUN apk add --no-cache ca-certificates tzdata wget
 
 COPY --from=build /out/receiver /usr/local/bin/receiver
-COPY --from=web /web/dist /usr/share/nginx/html
-COPY receiver/nginx.conf /etc/nginx/conf.d/default.conf
-# The admin paths are shared by both applications, so they live in one file rather than two that drift.
-COPY deploy/nginx-admin.conf /etc/nginx/admin.conf
-# Empty, and deliberately so: the TLS include globs this directory, matching nothing in development.
-# A deployment mounts its certificate and server block over it. See deploy/tls/https.conf.example.
-RUN mkdir -p /etc/nginx/tls
 COPY receiver/docker-entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# The API listens only on the loopback interface inside the container, so nginx is the only way in. That is
-# what makes the proxy a boundary rather than a convenience: the application cannot be reached around it.
-ENV OTP_RECEIVER_HOST=127.0.0.1 \
+# Bound to every interface inside the container, and reachable only from the compose network: the port is
+# not published, so the proxy remains the only way in from the host. It was 127.0.0.1 when nginx shared the
+# container, which is a stronger boundary and is not available once they are separate containers.
+ENV OTP_RECEIVER_HOST=0.0.0.0 \
     OTP_RECEIVER_PORT=8081
 
-EXPOSE 80
+EXPOSE 8081
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

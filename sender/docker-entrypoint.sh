@@ -1,33 +1,18 @@
 #!/bin/sh
-# Start the API and nginx in one container, and make sure neither outlives the other.
+# Migrate, then serve.
 #
-# Two processes in one image is usually the wrong shape, and here it is the right one: the proxy exists to be
-# the only route to this particular API, so they are one unit — scaling, restarting, or rolling back either
-# alone makes no sense. What matters is that a crash of either takes the container down, so an orchestrator
-# sees a failure rather than a container that is up and serving nothing.
+# nginx used to run beside the API in this container and now has its own, so this starts one process and
+# the shell's job is only to make sure migrations finish first. The proxy is still the only route in from
+# the host — the API's port is not published — but it is now a container that can be restarted,
+# reconfigured or upgraded without touching this one, which is what a proxy setting change should cost.
 set -eu
-
-terminate() {
-    kill -TERM "$api_pid" 2>/dev/null || true
-    kill -TERM "$nginx_pid" 2>/dev/null || true
-    wait 2>/dev/null || true
-    exit 0
-}
-trap terminate TERM INT
 
 # Migrations run before anything serves. Doing it here rather than inside the API's own startup means a
 # deployment can point this at `-migrate` alone as its own step, and the advisory lock inside makes running
 # it on several replicas at once safe either way.
 sender -migrate
 
-sender &
-api_pid=$!
-
-nginx -g 'daemon off;' &
-nginx_pid=$!
-
-# Whichever exits first ends the container.
-wait -n "$api_pid" "$nginx_pid"
-status=$?
-terminate
-exit "$status"
+# exec, so the API is PID 1 and receives the orchestrator's signals directly. With nginx gone there is
+# nothing left for a shell to supervise, and a shell in the middle would swallow SIGTERM and turn every
+# stop into the ten-second kill.
+exec sender "$@"

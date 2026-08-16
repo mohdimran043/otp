@@ -15,10 +15,13 @@ services:
       # as this directory. That is the one thing the two applications genuinely share.
       context: ..
       dockerfile: receiver/Dockerfile
-    ports:
-      # Only nginx is published. The API listens on the loopback interface inside the container, so the proxy
-      # is the only route to it rather than merely the recommended one.
-      - "${OTP_RECEIVER_HTTP_PORT:-8081}:80"
+      # Two targets in one Dockerfile so the browser app is built once and shared. See the proxy service.
+      target: app
+    # No published port, deliberately. The API is reachable on the compose network so the proxy can
+    # reach it, and from the host only through the proxy — which is what the loopback bind used to
+    # achieve when the two shared a container.
+    expose:
+      - "8081"
     # See the sender's compose file for why this is here: compose reads .env for ${...} substitution
     # regardless, but that does not hand the variables to the process, so anything in .env not repeated in the
     # environment block below was silently ignored. The environment block still wins over this file.
@@ -64,10 +67,6 @@ services:
       # Bind-mounted rather than a named volume, because this is the one path an operator has to be able to
       # point at the same place on both machines — an NFS mount, a SAN share, a synced directory.
       - ${OTP_SHARED_DIR:-./shared}:/var/lib/otp/shared
-      # Certificates and the HTTPS server block, when a deployment has them. The directory is empty
-      # in development and nginx's include globs it to nothing, so this mount changes nothing until
-      # something is put in it. See deploy/tls/https.conf.example.
-      - ./tls:/etc/nginx/tls:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -81,11 +80,53 @@ services:
     healthcheck:
       # Readiness rather than liveness, because this is what a load balancer should gate on: the process
       # being up is not the same as it being able to serve.
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health/ready"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/health/ready"]
       interval: 10s
       timeout: 5s
       retries: 6
       start_period: 30s
+
+  # The proxy, and the only thing published to the host.
+  #
+  # Its own container rather than a second process beside the API, and that split is an operational
+  # decision rather than an architectural one. Running both together was defensible — the proxy exists to
+  # be the only route to this particular API — but it meant every change to a timeout, a header, a
+  # certificate or an admin path rebuilt and redeployed the application image to alter a file the
+  # application never reads.
+  #
+  # Now the configuration is mounted and changing it costs `docker compose restart nginx`. The built
+  # browser app stays baked into the image, because that genuinely is part of a release: the assets and the
+  # API that serves them are versioned together, and a mismatched pair is a broken page rather than a
+  # configuration difference.
+  nginx:
+    build:
+      context: ..
+      dockerfile: receiver/Dockerfile
+      target: proxy
+    ports:
+      # Unchanged. This is the address the deployment has always been reached at; what moved is which
+      # container is listening behind it.
+      - "${OTP_RECEIVER_HTTP_PORT:-2000}:80"
+    volumes:
+      # Mounted, not baked — this is the whole point of the separate container.
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Shared by both applications, so it lives in one file rather than two that drift.
+      - ../deploy/nginx-admin.conf:/etc/nginx/admin.conf:ro
+      # Certificates and the HTTPS server block, when a deployment has them. Empty in development, where
+      # nginx's TLS include globs it to nothing. See deploy/tls/https.conf.example.
+      - ./tls:/etc/nginx/tls:ro
+    depends_on:
+      # Started after, not gated on healthy. nginx resolves the API's name at startup so it has to exist,
+      # but a proxy that refuses to come up until the application is ready cannot serve the page that
+      # would explain why the application is not ready.
+      - receiver
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
   postgres:
     image: postgres:16-alpine
