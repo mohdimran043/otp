@@ -390,7 +390,10 @@ func decodeFrame(img image.Image, opts protocol.LocateOptions) (*protocol.Frame,
 	if err != nil {
 		return nil, nil, err
 	}
-	frame, err := encoding.Decode(img, opts)
+	// Read at the geometry just located rather than letting Decode locate a second time. Beyond the
+	// wasted search on every captured frame, a second search is free to settle somewhere else, and
+	// then the geometry reported alongside the frame is not the geometry the frame was read at.
+	frame, err := encoding.DecodeAt(g, img, opts)
 	if err != nil {
 		return nil, g, err
 	}

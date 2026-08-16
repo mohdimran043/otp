@@ -30,6 +30,8 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/opticaltransport/otp/shared/protocol"
+
 	"github.com/opticaltransport/otp/sender/internal/config"
 	"github.com/opticaltransport/otp/sender/internal/objectstore"
 	"github.com/opticaltransport/otp/sender/internal/optical"
@@ -436,7 +438,11 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 		display := fillLanes(chosen, lanes)
 		choice := &chosen[0]
 
-		if err := s.showLanes(ctx, display, lanes, priority); err != nil {
+		// The gap comes from the transmission's own cell size rather than the current configuration,
+		// for the same reason the lane geometry does: a transfer rendered before the settings changed
+		// still has to be tiled at the size it was rendered at.
+		gapPx := protocol.DefaultLaneGapCells * tx.CellPixels
+		if err := s.showLanes(ctx, display, lanes, gapPx, priority); err != nil {
 			return stats, err
 		}
 		// Every lane that went out is a symbol the receiver may now acknowledge, so all of them are

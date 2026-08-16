@@ -54,17 +54,18 @@ import { useUi } from '../store/ui'
 const GRID_PRESETS = [64, 80, 96, 128, 192, 256, 384, 512, 1024]
 const CELL_PRESETS = [1, 2, 3, 4, 6, 8]
 
-// Lane counts that tile evenly. Four is the default and the reason the option exists.
+// The lane count is not chosen here, deliberately.
 //
-// One frame spanning the display is one indivisible bet: a reflection across a corner, a hand through
-// the shot, or a fiducial lost to a rolling-shutter tear costs the whole frame, including the
-// thousands of cells photographed perfectly. Four lanes make that blemish cost a quarter, and under a
-// fountain code the surviving three advance the transfer as much as if the fourth had never been sent.
+// It used to be, and the value was dropped on the floor: the form sent it, the sender parsed it into
+// a field nothing read, and the scheduler tiled by the display's own setting regardless. The two
+// disagreed by default — this form offered one lane while the display was set to two — and the
+// damage was not the ignored dropdown but the geometry chosen beside it. A grid sized to fill the
+// screen as a single lane is twice the screen's width once two of them are tiled, and the display
+// scales only by whole numbers, so it is pinned at 1x and hangs off the edge with a lane out of shot.
 //
-// It costs capacity rather than resolution. Each lane carries its own header and footer bands, so
-// four lanes pay that fixed cost four times — roughly 60% of a single grid's payload across the same
-// display. Pixels per cell are unchanged, because area is area.
-const LANE_PRESETS = [1, 2, 4]
+// So the display's setting is read and used to size the geometry, and the only control lives beside
+// the thing it changes. Lanes can be changed mid-transfer from there, which is a property worth
+// keeping: every lane is an ordinary frame, so the ones already rendered stay valid.
 
 // The quiet zone used for this estimate is a guess, not a fetch — the real one lives in the
 // server's configuration and the exact figure barely moves the answer. It only has to be close
@@ -193,6 +194,7 @@ export function NewTransfer() {
 
   const profiles = useQuery({ queryKey: ['profiles'], queryFn: api.profiles })
   const keys = useQuery({ queryKey: ['keys'], queryFn: api.keys })
+  const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings })
 
   const [file, setFile] = useState<File | null>(null)
   const [autostart, setAutostart] = useState(true)
@@ -211,11 +213,10 @@ export function NewTransfer() {
   const [keySource, setKeySource] = useState<'saved' | 'paste'>('saved')
   const [keyId, setKeyId] = useState<number | ''>('')
   const [keyHex, setKeyHex] = useState('')
-  // One lane by default. Tiling is the more capable setting on paper and the more fragile one in
-  // practice: it divides the display between independent frames, so every cell resolves to fewer
-  // camera pixels, and on this rig four colour lanes have not yet decoded. A default that works is
-  // worth more than a default that is faster when it works, and the control is one click away.
-  const [lanes, setLanes] = useState<number>(1)
+  // The display's lane count, which is the one that will actually be used. Falling back to a single
+  // lane until it loads keeps the first render honest rather than optimistic: a geometry sized for
+  // one lane and shown in one is readable, where the reverse overflows the screen.
+  const lanes = settings.data?.lanes ?? 1
   const [grid, setGrid] = useState<'auto' | number>('auto')
   const [cell, setCell] = useState<'auto' | number>('auto')
 
@@ -276,7 +277,6 @@ export function NewTransfer() {
       form.append('grid_width', String(resolved.grid))
       form.append('grid_height', String(resolved.grid))
       form.append('cell_pixels', String(resolved.cell))
-      form.append('lanes', String(lanes))
       if (sendAnyway) form.append('send_anyway', 'true')
       return api.submit(form)
     },
@@ -548,23 +548,6 @@ export function NewTransfer() {
                   )}
 
                   <Grid container spacing={2}>
-                    <Grid size={{ xs: 12, md: 6 }}>
-                      <TextField
-                        select
-                        fullWidth
-                        label="Lanes"
-                        value={lanes}
-                        onChange={(event) => setLanes(Number(event.target.value))}
-                        helperText="Frames shown at once. One spoiled lane costs a quarter, not the frame."
-                      >
-                        {LANE_PRESETS.map((n) => (
-                          <MenuItem key={n} value={n}>
-                            {n === 1 ? '1 — single frame' : `${n} — tiled${n === 4 ? ' (2 × 2)' : ''}`}
-                          </MenuItem>
-                        ))}
-                      </TextField>
-                    </Grid>
-
                     <Grid size={{ xs: 12, md: 6 }}>
                       <TextField
                         select

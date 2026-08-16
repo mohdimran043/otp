@@ -87,7 +87,7 @@ func (r *Receiver) prepareAll(ctx context.Context, capture Capture) []prepared {
 			continue
 		}
 
-		frame, err := encoding.Decode(capture.Image, opts)
+		frame, err := encoding.DecodeAt(g, capture.Image, opts)
 		if err != nil {
 			// Located but unreadable. Recorded as its own failure rather than dropped: a lane that
 			// finds its geometry and fails its payload is the state worth seeing, and lumping it in

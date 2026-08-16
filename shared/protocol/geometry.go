@@ -51,6 +51,26 @@ func HomographyFromQuad(src, dst [4]Point) (Homography, error) {
 	return h, nil
 }
 
+// Translate shifts a homography's output by (dx, dy), exactly.
+//
+// This is what carries a geometry fitted inside a crop back into the coordinates of the picture the
+// crop came from. Translating the fiducial corners is not enough and is the more tempting half:
+// corners are what a diagnostic prints, but the homography is what actually samples the cells, so a
+// geometry with translated corners and an untranslated transform looks right in every log line and
+// reads the wrong pixels.
+//
+// Because the map is projective, the shift cannot simply be added to h2 and h5. A point is carried to
+// ((h0x+h1y+h2)/w, (h3x+h4y+h5)/w) with w = h6x+h7y+1, so adding dx to the result means adding dx*w to
+// the numerator — which is dx*h6 on the x term, dx*h7 on the y term, and dx on the constant. For an
+// affine transform (h6 = h7 = 0) that reduces to the obvious thing.
+func (h Homography) Translate(dx, dy float64) Homography {
+	return Homography{
+		h[0] + dx*h[6], h[1] + dx*h[7], h[2] + dx,
+		h[3] + dy*h[6], h[4] + dy*h[7], h[5] + dy,
+		h[6], h[7], h[8],
+	}
+}
+
 // solve8 solves an 8x9 augmented system by Gauss-Jordan elimination with partial
 // pivoting. A vanishing pivot means the four points were collinear or coincident,
 // which happens when finder detection latches onto noise.

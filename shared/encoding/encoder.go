@@ -134,6 +134,30 @@ func Decode(img image.Image, opts protocol.LocateOptions) (*protocol.Frame, erro
 	if err != nil {
 		return nil, err
 	}
+	return DecodeAt(g, img, opts)
+}
+
+// DecodeAt reads the frame at a geometry that has already been located.
+//
+// Decode finds the strongest frame in the picture and reads that one, which is right when the
+// picture holds one frame and wrong when it holds several. A caller that has located the lanes of a
+// tiled display cannot use it: handed the same picture once per lane it re-runs the same search and
+// returns the same answer every time, so the lanes after the first carry a duplicate of the first
+// lane's payload under their own headers.
+//
+// Worse, on a tiled display that search usually has no right answer to return. The strongest four
+// fiducials are the *outermost* ones — one corner from each lane — and that quad is convex, evenly
+// spaced and, at a square tiling, exactly square, so it passes every plausibility test before failing
+// its grid descriptor CRC. Every lane then reports that failure and the display decodes nothing at
+// all, while each lane individually was photographed perfectly.
+//
+// So the geometry is an argument rather than something rediscovered. The encoder is still taken from
+// the frame's own header, for the reason Decode dispatches on it too: a receiver does not know in
+// advance which encoding the sender chose.
+func DecodeAt(g *protocol.Geometry, img image.Image, opts protocol.LocateOptions) (*protocol.Frame, error) {
+	if g == nil {
+		return nil, fmt.Errorf("encoding: no geometry to decode at")
+	}
 	e, err := ByID(g.Header.EncoderID)
 	if err != nil {
 		return nil, err

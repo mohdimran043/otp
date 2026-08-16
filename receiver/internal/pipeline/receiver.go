@@ -634,13 +634,22 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 	// and the recovery stage is a real lane rather than the phantom that spans them all.
 	frame, geometry, decodeErr := decodeFrame(capture.Image, opts)
 	if decodeErr != nil && cfg.Capture.Lanes > 1 {
-		if lanes := protocol.LocateAll(capture.Image, opts, min(cfg.Capture.Lanes, maxLanesPerCapture)); len(lanes) > 0 {
-			geometry = lanes[0]
-			if f, err := encoding.Decode(capture.Image, opts); err == nil {
-				frame, decodeErr = f, nil
-			} else {
-				decodeErr = err
+		// Read at the lane that was found, not by searching the picture again.
+		//
+		// Decode would re-run the same whole-image search that has just failed and return the same
+		// failure, so this fallback could never succeed at all: the spanning quad it settles on is the
+		// one whose descriptor CRC sent us here. Taking the first lane that reads is the point.
+		for _, lane := range protocol.LocateAll(capture.Image, opts, min(cfg.Capture.Lanes, maxLanesPerCapture)) {
+			if geometry == nil {
+				geometry = lane
 			}
+			f, err := encoding.DecodeAt(lane, capture.Image, opts)
+			if err != nil {
+				decodeErr = err
+				continue
+			}
+			frame, geometry, decodeErr = f, lane, nil
+			break
 		}
 	}
 	r.recovery.decodeNanos.Add(int64(time.Since(decodeStarted)))

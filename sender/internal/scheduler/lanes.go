@@ -60,7 +60,10 @@ func fillLanes(chosen []store.Frame, lanes int) []store.Frame {
 // Fewer frames than lanes is accepted rather than treated as an error, because the caller may have
 // chosen not to fill them — but see fillLanes, which is why that is now unusual. A lane left as
 // background is read by a receiver as an absence: it finds no fiducials there and moves on.
-func composeLanes(ctx context.Context, objects objectstore.Store, frames []store.Frame, lanes int,
+// gapPx is the blank space to leave between neighbouring lanes, in pixels of the rendered frame.
+// It is the caller's because only the caller knows the transmission's cell size — see
+// protocol.DefaultLaneGapCells for why a gap is needed and how wide it has to be.
+func composeLanes(ctx context.Context, objects objectstore.Store, frames []store.Frame, lanes, gapPx int,
 ) ([]byte, int, int, error) {
 	if len(frames) == 0 {
 		return nil, 0, 0, fmt.Errorf("scheduler: nothing to display")
@@ -100,7 +103,11 @@ func composeLanes(ctx context.Context, objects objectstore.Store, frames []store
 		CellPixels: 1,
 		QuietZone:  0,
 	}
-	tiled, err := protocol.NewLaneLayout(layout, lanes, 0)
+	// The gap is in "cells" of this synthetic layout, and a cell here is one pixel, so it is passed
+	// through as pixels. Lanes were composed flush for a while and it is worth saying why that is not
+	// merely untidy: two frames touching put the receiver's per-lane crop over its neighbour, and no
+	// tiled capture through a real camera decoded at all. See protocol.DefaultLaneGapCells.
+	tiled, err := protocol.NewLaneLayout(layout, lanes, gapPx)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -123,8 +130,8 @@ func composeLanes(ctx context.Context, objects objectstore.Store, frames []store
 // The display is told about the round as a whole: one image, one sequence number, and the leading
 // frame's identity for the logs and for anything watching over HTTP. The other lanes are on the same
 // picture and are found by the receiver from their own fiducials, so there is nothing to describe.
-func (s *Scheduler) showLanes(ctx context.Context, frames []store.Frame, lanes int, priority Priority) error {
-	body, width, height, err := composeLanes(ctx, s.objects, frames, lanes)
+func (s *Scheduler) showLanes(ctx context.Context, frames []store.Frame, lanes, gapPx int, priority Priority) error {
+	body, width, height, err := composeLanes(ctx, s.objects, frames, lanes, gapPx)
 	if err != nil {
 		return err
 	}

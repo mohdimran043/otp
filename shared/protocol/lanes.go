@@ -465,6 +465,15 @@ func LocateAll(img image.Image, opts LocateOptions, maxFrames int) []*Geometry {
 		if knownSpan == 0 {
 			knownSpan = s.span
 		}
+		// Back into the capture's own coordinates, transform included.
+		//
+		// The corners are what a caller prints and the homography is what a caller samples with, and
+		// for a long time only the corners were moved. That geometry passes every inspection — the
+		// corners land on the right lane, the header reads, the frame number is correct — and then
+		// samples the payload at crop-relative coordinates against the full picture, which lands in a
+		// neighbouring lane or off the display entirely. It is why decoding at a located lane was
+		// believed impossible and every caller fell back to searching the whole image again.
+		g.Homography = g.Homography.Translate(float64(crop.Min.X), float64(crop.Min.Y))
 		for i := range g.Corners {
 			g.Corners[i].X += float64(crop.Min.X)
 			g.Corners[i].Y += float64(crop.Min.Y)
@@ -492,6 +501,28 @@ func quadSpan(q [4]FinderCandidate) float64 {
 	}
 	return span
 }
+
+// DefaultLaneGapCells is the blank space a sender should leave between lanes, in cells.
+//
+// Measured against cropMarginCells below, which is what makes a gap necessary at all. LocateAll reads
+// a lane by cropping around its fiducials and handing the crop to Locate, and that crop reaches ten
+// cells past each fiducial centre. A fiducial sits three and a half cells inside the frame's corner
+// with two more cells of quiet zone outside it, so the crop already extends four and a half cells
+// beyond the lane's own edge — into the neighbour, if the neighbour starts there. Locate then finds
+// the neighbour's fiducials inside the crop and is back to the ambiguity the crop existed to remove.
+//
+// The numbers, composing two lanes and reading them back through shared/simulate:
+//
+//	gap  pristine  clean  typical  harsh
+//	  0     2/2      2/2     0/2     0/2
+//	  2     2/2      2/2     2/2     0/2
+//	  4     2/2      2/2     2/2     1/2
+//	  6     2/2      2/2     2/2     2/2
+//
+// Flush lanes read perfectly from the encoder's own pixels and fail completely through any camera,
+// which is exactly the shape of failure that gets a tiling shipped and then found broken on a rig.
+// Six is the first gap that holds at Harsh, and it costs about three percent of the display's width.
+const DefaultLaneGapCells = 6
 
 // cropMarginCells is how much room is left around a quad when cropping, in cells.
 //
