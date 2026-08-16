@@ -48,6 +48,7 @@ func (c Config) WithOverrides(stored map[string]string) (Config, error) {
 	}
 	integers := map[string]*int{
 		"window_size": &next.Display.WindowSize,
+		"lanes":       &next.Optical.Lanes,
 		"grid_width":  &next.Optical.GridWidth,
 		"grid_height": &next.Optical.GridHeight,
 		"cell_pixels": &next.Optical.CellPixels,
@@ -101,7 +102,7 @@ func (c Config) WithOverrides(stored map[string]string) (Config, error) {
 // next restart, which is the original bug returning by a different route.
 func SettingKeys() []string {
 	return []string{
-		"fps", "brightness", "gamma", "window_size",
+		"fps", "brightness", "gamma", "window_size", "lanes",
 		"grid_width", "grid_height", "cell_pixels", "quiet_zone", "encoder", "bit_depth",
 		"sink",
 	}

@@ -44,8 +44,27 @@ import { useUi } from '../store/ui'
 // 72 is the floor and is deliberately not offered. The header and footer bands are a fixed number
 // of rows, so below about 72 they consume the grid and what is left carries too few bytes to be
 // worth a frame.
-const GRID_PRESETS = [80, 96, 128, 192, 256, 384, 512, 1024]
+// 64 is the smallest grid worth offering, and it is offered for tiling rather than despite it.
+//
+// Its header and footer bands take a large share of a small grid — they hold repeated copies for
+// majority voting, which is a fixed cost — so a 64-cell frame carries far less than its area
+// suggests. What it buys is cell size: four 64-cell lanes span the display like a single 136-cell
+// grid where four 96-cell lanes span it like a 200-cell one, and on a phone camera that difference
+// decides whether the cells can be read at all.
+const GRID_PRESETS = [64, 80, 96, 128, 192, 256, 384, 512, 1024]
 const CELL_PRESETS = [1, 2, 3, 4, 6, 8]
+
+// Lane counts that tile evenly. Four is the default and the reason the option exists.
+//
+// One frame spanning the display is one indivisible bet: a reflection across a corner, a hand through
+// the shot, or a fiducial lost to a rolling-shutter tear costs the whole frame, including the
+// thousands of cells photographed perfectly. Four lanes make that blemish cost a quarter, and under a
+// fountain code the surviving three advance the transfer as much as if the fourth had never been sent.
+//
+// It costs capacity rather than resolution. Each lane carries its own header and footer bands, so
+// four lanes pay that fixed cost four times — roughly 60% of a single grid's payload across the same
+// display. Pixels per cell are unchanged, because area is area.
+const LANE_PRESETS = [1, 2, 4]
 
 // The quiet zone used for this estimate is a guess, not a fetch — the real one lives in the
 // server's configuration and the exact figure barely moves the answer. It only has to be close
@@ -65,10 +84,29 @@ function frameEdgePx(grid: number, cell: number): number {
 // the grid, so 80 cells lands near 11 and 128 lands near 8.5 — which is why Auto used to pick a grid
 // that could not be read, on a screen where it looked perfectly sharp.
 //
-// It bounds Auto only. Choosing 128 or more deliberately is still allowed and still right for a
+// Eighty now, down from 96, and the demotion is worth recording because 96 passed every check it was
+// given and still transferred nothing.
+//
+// A 96-cell colour frame on a 1080 short side measured 10.41 px per cell — above the 10 the shared
+// model asks for, inside the aiming display's window, with fiducials and timing both at 1.0 and the
+// geometry located perfectly on every frame. Across 519 captures it decoded 9, and all 9 were
+// manifests. Not one chunk frame ever read.
+//
+// The asymmetry is arithmetic, not luck. A CRC is a product over every cell its payload spans, so the
+// per-cell error rate is raised to the length of the payload: a manifest is about 110 bytes and a
+// chunk is 1903, which at three bits a cell is ~290 cells against ~5,075. A per-cell error under one
+// percent — invisible to every geometry gate, because the geometry is genuinely fine — lets a quarter
+// of the manifests through and leaves a chunk odds of roughly e⁻²⁴. The operator sees a locked grid,
+// a green outline, and a transfer that never advances.
+//
+// So the 10 px/cell floor is where "some frames decode" begins, not where a transfer completes, and
+// Auto has to aim well clear of it. Eighty gives 12.9 px/cell at the same capture, which is the
+// geometry behind the only byte-exact camera transfer this project has recorded.
+//
+// It bounds Auto only. Choosing 96 or more deliberately is still allowed and still right for a
 // file-loopback channel or a camera with more sensor than a phone: this is the default for someone
 // who has not thought about it, and for them a frame that decodes beats a frame that carries more.
-const COLOUR_GRID_CEILING = 96
+const COLOUR_GRID_CEILING = 80
 
 /** isColour reports whether an encoder carries more than one bit per cell. */
 function isColour(encoder: string | undefined): boolean {
@@ -92,8 +130,22 @@ function fitGridAndCell(
   grid: 'auto' | number,
   cell: 'auto' | number,
   encoder?: string,
+  lanes = 1,
 ): { grid: number; cell: number } {
-  const usable = Math.min(window.screen.width, window.screen.height)
+  // The space one lane may occupy, not the whole screen.
+  //
+  // Lanes are tiled, so four of them span two lane-widths across and two down; sizing a lane against
+  // the full screen produces a display twice the screen's size, which then cannot be shown at a whole
+  // multiple and overflows. Four 96-cell lanes at 8 px a cell came to 1600 pixels square on a 1080p
+  // panel exactly this way.
+  //
+  // Whole multiples are not negotiable — a cell resampled across a fractional boundary is a cell the
+  // decoder reads wrongly — so the fit has to be right here rather than corrected by scaling later.
+  const columns = lanes >= 4 ? 2 : lanes
+  const rows = lanes >= 4 ? 2 : 1
+  const usable = Math.floor(
+    Math.min(window.screen.width / columns, window.screen.height / rows),
+  )
 
   // An explicit choice is never second-guessed, whatever the encoder.
   if (grid !== 'auto' && cell !== 'auto') return { grid, cell }
@@ -159,6 +211,11 @@ export function NewTransfer() {
   const [keySource, setKeySource] = useState<'saved' | 'paste'>('saved')
   const [keyId, setKeyId] = useState<number | ''>('')
   const [keyHex, setKeyHex] = useState('')
+  // One lane by default. Tiling is the more capable setting on paper and the more fragile one in
+  // practice: it divides the display between independent frames, so every cell resolves to fewer
+  // camera pixels, and on this rig four colour lanes have not yet decoded. A default that works is
+  // worth more than a default that is faster when it works, and the control is one click away.
+  const [lanes, setLanes] = useState<number>(1)
   const [grid, setGrid] = useState<'auto' | number>('auto')
   const [cell, setCell] = useState<'auto' | number>('auto')
 
@@ -177,7 +234,7 @@ export function NewTransfer() {
   const hasSavedKeys = (keys.data ?? []).length > 0
   const hasValidKey = needsKey && (keySource === 'saved' ? keyId !== '' : keyValid)
 
-  const resolved = fitGridAndCell(grid, cell, encoder)
+  const resolved = fitGridAndCell(grid, cell, encoder, lanes)
 
   // Set when the sender has refused a geometry as unreadable and the operator has chosen to send it
   // regardless. Deliberately not sticky: it is cleared whenever the geometry or encoder changes, so an
@@ -219,6 +276,7 @@ export function NewTransfer() {
       form.append('grid_width', String(resolved.grid))
       form.append('grid_height', String(resolved.grid))
       form.append('cell_pixels', String(resolved.cell))
+      form.append('lanes', String(lanes))
       if (sendAnyway) form.append('send_anyway', 'true')
       return api.submit(form)
     },
@@ -490,6 +548,23 @@ export function NewTransfer() {
                   )}
 
                   <Grid container spacing={2}>
+                    <Grid size={{ xs: 12, md: 6 }}>
+                      <TextField
+                        select
+                        fullWidth
+                        label="Lanes"
+                        value={lanes}
+                        onChange={(event) => setLanes(Number(event.target.value))}
+                        helperText="Frames shown at once. One spoiled lane costs a quarter, not the frame."
+                      >
+                        {LANE_PRESETS.map((n) => (
+                          <MenuItem key={n} value={n}>
+                            {n === 1 ? '1 — single frame' : `${n} — tiled${n === 4 ? ' (2 × 2)' : ''}`}
+                          </MenuItem>
+                        ))}
+                      </TextField>
+                    </Grid>
+
                     <Grid size={{ xs: 12, md: 6 }}>
                       <TextField
                         select

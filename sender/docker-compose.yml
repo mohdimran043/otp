@@ -50,7 +50,12 @@ services:
       OTP_SENDER_GRID_WIDTH: ${OTP_SENDER_GRID_WIDTH:-128}
       OTP_SENDER_GRID_HEIGHT: ${OTP_SENDER_GRID_HEIGHT:-128}
       OTP_SENDER_CELL_PIXELS: ${OTP_SENDER_CELL_PIXELS:-8}
-      OTP_SENDER_DISPLAY_FPS: ${OTP_SENDER_DISPLAY_FPS:-10}
+      # Frame rate is passed through only when it is set, so that leaving it unset lets the sender
+      # derive it from the transmission's geometry. A default here defeats that: the variable is
+      # always present, so the rate always counts as explicit, and this deployment ran every transfer
+      # at ten frames a second — one photograph per frame against a browser posting ten a second,
+      # which is the case where a single tremor loses the frame and nothing can be combined.
+      OTP_SENDER_DISPLAY_FPS: ${OTP_SENDER_DISPLAY_FPS:-}
       OTP_SENDER_LOG_LEVEL: ${OTP_SENDER_LOG_LEVEL:-info}
 
       # Object storage instead of the local directory above, for a sender running as more than one

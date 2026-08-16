@@ -147,6 +147,18 @@ type Capture struct {
 	// thrown away, at the cost of a write each.
 	DecodeWorkers int `yaml:"decode_workers"`
 
+	// Lanes is how many frames the sender tiles onto one display, and therefore how many this
+	// receiver looks for in each photograph.
+	//
+	// One means the ordinary single-frame path. Above one, every capture is searched for that many
+	// frames and each becomes its own result — without which a four-lane display would have three
+	// quarters of every photograph discarded at the last step, having been rendered, displayed,
+	// photographed and located.
+	//
+	// It costs a fiducial search per extra lane on captures that hold them, and one wasted search on
+	// captures that do not, which is why it is configured rather than always on.
+	Lanes int `yaml:"lanes"`
+
 	// Simulate degrades every frame before it is decoded, as a lens and a sensor would: "clean", "typical",
 	// "harsh", or "rolling-shutter". Empty means frames are read exactly as they were written.
 	//
@@ -344,6 +356,9 @@ func Default() Config {
 			// A twelfth, unchanged from when this was a constant: the same behaviour for every deployment that
 			// does not ask for something else.
 			MinToneFraction: 0,
+			// Four, matching the sender's default tiling. A capture holding one frame costs one extra
+			// fiducial search and behaves identically, so this is safe when the sender is not tiling.
+			Lanes: 4,
 		},
 		Decoder: Decoder{
 			MinFinderScore: 0.75,
@@ -679,6 +694,7 @@ func applyEnv(c *Config) error {
 	str("PEER_SENDER_UI_URL", &c.Peer.SenderUIURL)
 	str("CAPTURE_DEVICE", &c.Capture.Device)
 	str("CAPTURE_FORMAT", &c.Capture.Format)
+	integer("CAPTURE_LANES", &c.Capture.Lanes)
 	integer("CAPTURE_DECODE_WORKERS", &c.Capture.DecodeWorkers)
 	integer("CAPTURE_WIDTH", &c.Capture.Width)
 	integer("CAPTURE_HEIGHT", &c.Capture.Height)

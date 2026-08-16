@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/opticaltransport/otp/shared/encoding"
+	"github.com/opticaltransport/otp/shared/protocol"
 )
 
 // The display settings: how fast the frames go out and how much each one carries.
@@ -40,6 +41,7 @@ type settingsView struct {
 	KeepAlive  bool    `json:"keep_alive"`
 	Sink       string  `json:"sink"`
 
+	Lanes      int    `json:"lanes"`
 	GridWidth  int    `json:"grid_width"`
 	GridHeight int    `json:"grid_height"`
 	CellPixels int    `json:"cell_pixels"`
@@ -75,6 +77,7 @@ type settingsRequest struct {
 	Gamma      *float64 `json:"gamma,omitempty"`
 	WindowSize *int     `json:"window_size,omitempty"`
 
+	Lanes      *int    `json:"lanes,omitempty"`
 	GridWidth  *int    `json:"grid_width,omitempty"`
 	GridHeight *int    `json:"grid_height,omitempty"`
 	CellPixels *int    `json:"cell_pixels,omitempty"`
@@ -90,6 +93,12 @@ type settingsRequest struct {
 }
 
 // touchesGeometry reports whether this change alters what a frame looks like.
+//
+// Lanes is deliberately absent. It decides how many frames are shown at once and where each sits,
+// not what any of them contains: every lane is an ordinary frame, rendered and checksummed exactly as
+// it would be if displayed alone. So it can change while a transfer is in flight — the frames already
+// rendered are equally valid one at a time or four at a time — where the fields below cannot, because
+// they are written into every frame header and the chunk size is derived from them.
 func (r settingsRequest) touchesGeometry() bool {
 	return r.GridWidth != nil || r.GridHeight != nil || r.CellPixels != nil ||
 		r.QuietZone != nil || r.Encoder != nil || r.BitDepth != nil
@@ -119,6 +128,9 @@ func (r settingsRequest) stored() map[string]string {
 	}
 	if r.WindowSize != nil {
 		out["window_size"] = strconv.Itoa(*r.WindowSize)
+	}
+	if r.Lanes != nil {
+		out["lanes"] = strconv.Itoa(*r.Lanes)
 	}
 	if r.GridWidth != nil {
 		out["grid_width"] = strconv.Itoa(*r.GridWidth)
@@ -170,6 +182,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		WindowSize: cfg.Display.WindowSize,
 		KeepAlive:  cfg.Display.KeepAlive,
 		Sink:       cfg.Display.Sink,
+		Lanes:      cfg.Optical.Lanes,
 		GridWidth:  cfg.Optical.GridWidth,
 		GridHeight: cfg.Optical.GridHeight,
 		CellPixels: cfg.Optical.CellPixels,
@@ -261,6 +274,16 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.WindowSize != nil {
 		next.Display.WindowSize = *request.WindowSize
+	}
+	if request.Lanes != nil {
+		// Validated here rather than left to the display, because a count that cannot be tiled evenly
+		// would produce a ragged arrangement whose last row is half empty — and the failure would
+		// appear at the next frame rather than at the click that caused it.
+		if _, err := protocol.NewLaneLayout(protocol.Layout{}, *request.Lanes, 0); err != nil {
+			s.fail(w, http.StatusUnprocessableEntity, err.Error(), err)
+			return
+		}
+		next.Optical.Lanes = *request.Lanes
 	}
 	if request.GridWidth != nil {
 		next.Optical.GridWidth = *request.GridWidth

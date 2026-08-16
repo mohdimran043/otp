@@ -193,6 +193,12 @@ type TransferRequest struct {
 	GridWidth  int `json:"grid_width,omitempty"`
 	GridHeight int `json:"grid_height,omitempty"`
 
+	// Lanes is how many frames this transfer shows at once, tiled across the display. Zero means the
+	// configured default. It is per-transfer because it describes how the frames will be shown rather
+	// than how they were encoded — every lane is an ordinary frame, so one rendered transmission can
+	// be displayed one at a time or four at a time without re-encoding anything.
+	Lanes int `json:"lanes,omitempty"`
+
 	// SendAnyway carries a geometry past the check that a receiving camera could resolve it.
 	//
 	// The check refuses only the band where the measurements say no frames decode at all, and refusing
@@ -419,6 +425,7 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 		GridWidth:        formInt(r, "grid_width", cfg.Optical.GridWidth),
 		GridHeight:       formInt(r, "grid_height", cfg.Optical.GridHeight),
 		CellPixels:       formInt(r, "cell_pixels", cfg.Optical.CellPixels),
+		Lanes:            formInt(r, "lanes", cfg.Optical.Lanes),
 		SendAnyway:       formBool(r, "send_anyway", false),
 	}
 

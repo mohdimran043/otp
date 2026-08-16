@@ -167,6 +167,21 @@ type Optical struct {
 	// are not reloadable: they are written into every frame header, and the chunk size
 	// is derived from them, so changing them mid-transmission would produce frames the
 	// receiver assembles into the wrong file.
+	// Lanes is how many frames are shown at once, tiled across the display.
+	//
+	// Four by default. One frame spanning the display is one indivisible bet: a reflection across a
+	// corner, a hand through the shot, or a fiducial lost to a rolling-shutter tear costs the entire
+	// frame, including the thousands of cells that were photographed perfectly. Four lanes make that
+	// blemish cost a quarter, and under a fountain code the surviving three advance the transfer
+	// exactly as much as if the fourth had never been sent.
+	//
+	// It is not free and the cost is capacity, not resolution. Each lane carries its own header and
+	// footer bands, and those hold repeated copies for majority voting, so four lanes pay that fixed
+	// cost four times: four 96-cell lanes carry about 60% of what one 192-cell grid does across the
+	// same display. Pixels per cell are unchanged — area is area — so nothing is bought there either.
+	// What is bought is that a spoiled lane is a spoiled quarter.
+	Lanes int `yaml:"lanes"`
+
 	GridWidth  int `yaml:"grid_width"`
 	GridHeight int `yaml:"grid_height"`
 	CellPixels int `yaml:"cell_pixels"`
@@ -293,6 +308,15 @@ type Ack struct {
 	// MaxRetries is how many times a chunk is retransmitted before the transmission
 	// is failed. A chunk that will not arrive after this many tries is a fault an
 	// operator needs to see, not something more attempts will fix.
+	//
+	// Zero means never give up, which is what a channel being set up or aimed needs. Failing the
+	// transmission is right for an installation that was working and has stopped; it is exactly wrong
+	// while someone is still pointing a camera, because the display stops at the moment they are
+	// trying to read it and the screen freezes on whichever frame was last shown.
+	//
+	// Counted per send rather than per display round, which matters now that a round shows several
+	// lanes: four lanes consume four attempts, so a limit of ten is reached four times sooner than it
+	// was. See the scheduler, which scales it by the lane count for that reason.
 	MaxRetries int `yaml:"max_retries"`
 }
 
@@ -410,11 +434,28 @@ func Default() Config {
 			BitDepth:    0,
 			Compression: "zstd",
 			Level:       6,
+			// RaptorQ at roughly 15% repair, which is the right default for an optical channel and
+			// was not the default only because Reed-Solomon was written first.
+			//
+			// The difference that matters here is not the strength of the code but what happens when a
+			// frame is missed. Reed-Solomon fixes its repair symbols at encoding time, so a receiver
+			// short of a block has to be sent the particular symbols it lacks, and the sender has to be
+			// told which. A fountain code has no such conversation: any sufficient set of symbols
+			// rebuilds the block, the encoder can produce as many distinct repair symbols as are ever
+			// asked for, and a symbol lost to a hand crossing the shot is replaced by simply sending
+			// another one. On a one-way channel where the sender is still displaying while the receiver
+			// is still missing things, that is the whole problem removed rather than managed.
+			//
+			// 100 and 15 rather than 32 and 8: the same 15% costs proportionally less bookkeeping in a
+			// larger block, and RaptorQ decodes a block from any K of its symbols plus a couple, so a
+			// larger K wastes less of the overhead on the plus-a-couple. Bounded by the codec's
+			// MaxDataShards of 1024, well above this.
 			FEC: FEC{
-				Codec:        "reed-solomon",
-				DataShards:   32,
-				ParityShards: 8,
+				Codec:        "raptorq",
+				DataShards:   100,
+				ParityShards: 15,
 			},
+			Lanes:      4,
 			GridWidth:  128,
 			GridHeight: 128,
 			CellPixels: 8,
@@ -524,13 +565,27 @@ const envPrefix = "OTP_SENDER_"
 // should not silently change the name of an environment variable somebody depends on.
 func applyEnv(c *Config) error {
 	var errs []string
+	// An empty variable means "not set", for every type below.
+	//
+	// Compose passes a variable through as an empty string when it has no value — `${X:-}` is present
+	// and blank rather than absent — so a deployment that deliberately left a setting unset arrived
+	// here as an empty string and was parsed as a number. The sender then refused to start at all,
+	// which is a hard failure for the act of not configuring something.
+	set := func(key string) (string, bool) {
+		v, ok := os.LookupEnv(envPrefix + key)
+		if !ok || strings.TrimSpace(v) == "" {
+			return "", false
+		}
+		return v, true
+	}
+
 	str := func(key string, dst *string) {
-		if v, ok := os.LookupEnv(envPrefix + key); ok {
+		if v, ok := set(key); ok {
 			*dst = v
 		}
 	}
 	integer := func(key string, dst *int) {
-		if v, ok := os.LookupEnv(envPrefix + key); ok {
+		if v, ok := set(key); ok {
 			n, err := strconv.Atoi(v)
 			if err != nil {
 				errs = append(errs, fmt.Sprintf("%s%s: %s is not a number", envPrefix, key, v))
@@ -545,7 +600,7 @@ func applyEnv(c *Config) error {
 		*dst = int32(n)
 	}
 	integer64 := func(key string, dst *int64) {
-		if v, ok := os.LookupEnv(envPrefix + key); ok {
+		if v, ok := set(key); ok {
 			n, err := strconv.ParseInt(v, 10, 64)
 			if err != nil {
 				errs = append(errs, fmt.Sprintf("%s%s: %s is not a number", envPrefix, key, v))
@@ -555,7 +610,7 @@ func applyEnv(c *Config) error {
 		}
 	}
 	float := func(key string, dst *float64) {
-		if v, ok := os.LookupEnv(envPrefix + key); ok {
+		if v, ok := set(key); ok {
 			f, err := strconv.ParseFloat(v, 64)
 			if err != nil {
 				errs = append(errs, fmt.Sprintf("%s%s: %s is not a number", envPrefix, key, v))
@@ -565,7 +620,7 @@ func applyEnv(c *Config) error {
 		}
 	}
 	boolean := func(key string, dst *bool) {
-		if v, ok := os.LookupEnv(envPrefix + key); ok {
+		if v, ok := set(key); ok {
 			b, err := strconv.ParseBool(v)
 			if err != nil {
 				errs = append(errs, fmt.Sprintf("%s%s: %s is not a boolean", envPrefix, key, v))
@@ -575,7 +630,7 @@ func applyEnv(c *Config) error {
 		}
 	}
 	dur := func(key string, dst *time.Duration) {
-		if v, ok := os.LookupEnv(envPrefix + key); ok {
+		if v, ok := set(key); ok {
 			d, err := time.ParseDuration(v)
 			if err != nil {
 				errs = append(errs, fmt.Sprintf("%s%s: %s is not a duration", envPrefix, key, v))
@@ -585,7 +640,7 @@ func applyEnv(c *Config) error {
 		}
 	}
 	list := func(key string, dst *[]string) {
-		if v, ok := os.LookupEnv(envPrefix + key); ok {
+		if v, ok := set(key); ok {
 			parts := strings.Split(v, ",")
 			out := make([]string, 0, len(parts))
 			for _, p := range parts {
@@ -645,6 +700,7 @@ func applyEnv(c *Config) error {
 	str("FEC_CODEC", &c.Optical.FEC.Codec)
 	integer("FEC_DATA_SHARDS", &c.Optical.FEC.DataShards)
 	integer("FEC_PARITY_SHARDS", &c.Optical.FEC.ParityShards)
+	integer("LANES", &c.Optical.Lanes)
 	integer("GRID_WIDTH", &c.Optical.GridWidth)
 	integer("GRID_HEIGHT", &c.Optical.GridHeight)
 	integer("CELL_PIXELS", &c.Optical.CellPixels)
@@ -656,7 +712,10 @@ func applyEnv(c *Config) error {
 	str("DISPLAY_DIR", &c.Display.Dir)
 	// Marked explicit when it is present, so a rate named in the environment is honoured rather than
 	// recomputed from geometry. See Display.FPSExplicit.
-	if _, ok := os.LookupEnv(envPrefix + "DISPLAY_FPS"); ok {
+	// Present *and* non-empty. Compose passes variables through as empty strings when they are unset,
+	// so testing only for presence marked every deployment's rate explicit and silently disabled the
+	// geometry rule this exists to allow.
+	if _, ok := set("DISPLAY_FPS"); ok {
 		c.Display.FPSExplicit = true
 	}
 	float("DISPLAY_FPS", &c.Display.FPS)

@@ -50,6 +50,8 @@ export interface TransferStatus {
   compression: string
   fec_codec: string
   encryption: string
+  /** How many frames are tiled onto the display at once. */
+  lanes: number
   grid_width: number
   grid_height: number
   error?: string
@@ -140,6 +142,8 @@ export interface DisplayStatus {
 
 // The display's own settings: the two knobs that set the transfer rate.
 export interface DisplaySettings {
+  /** How many frames are tiled onto the display at once. */
+  lanes: number
   fps: number
   brightness: number
   gamma: number
@@ -162,6 +166,9 @@ export interface DisplaySettings {
 // Only the fields being changed are sent. A form that posted its whole state back would reset a field it
 // never showed — and with a frame rate, zero means "never display anything".
 export type DisplaySettingsPatch = Partial<{
+  // How many frames are tiled onto the display at once. Reloadable while a transfer is running,
+  // because it decides how frames are shown rather than what they contain.
+  lanes: number
   fps: number
   brightness: number
   gamma: number

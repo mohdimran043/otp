@@ -213,8 +213,12 @@ func (c Config) Validate() error {
 	if c.Ack.PollInterval <= 0 {
 		add("ack.poll_interval must be positive")
 	}
-	if c.Ack.MaxRetries < 1 {
-		add("ack.max_retries must be at least 1")
+	// Zero is allowed and means never give up. Failing a transmission after N unacknowledged sends
+	// suits an installation that was working and has stopped; it is wrong while a camera is being
+	// aimed, because the display halts at the moment someone is trying to read it and freezes on
+	// whichever frame was last shown.
+	if c.Ack.MaxRetries < 0 {
+		add("ack.max_retries cannot be negative; use 0 to never give up")
 	}
 
 	// Authentication.

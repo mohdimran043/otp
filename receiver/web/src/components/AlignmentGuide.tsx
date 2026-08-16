@@ -261,6 +261,13 @@ export function AlignmentGuide({
           )}
 
           <Stack direction="row" spacing={2.5} flexWrap="wrap" useFlexGap>
+            {alignment.lanes_expected > 1 && (
+              <Readout
+                label="frames in view"
+                value={`${alignment.lanes_found} / ${alignment.lanes_expected}`}
+                tone={alignment.lanes_found >= alignment.lanes_expected ? signal.lock : signal.adjust}
+              />
+            )}
             <Readout label="fill" value={`${Math.round(alignment.fill * 100)}%`} />
             <Readout
               label="off-square"

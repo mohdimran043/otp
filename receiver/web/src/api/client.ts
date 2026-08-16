@@ -72,6 +72,9 @@ export type AlignmentStatus = 'searching' | 'too_far' | 'too_close' | 'off_axis'
 export interface AlignmentView {
   /** False before any frame has been measured in this session, and after a restart. */
   live: boolean
+  /** How many of the sender's tiled frames are in view, and how many there should be. */
+  lanes_found: number
+  lanes_expected: number
   locked: boolean
   decoded: boolean
   /** How much of the view the grid spans, 0..1. */

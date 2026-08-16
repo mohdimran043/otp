@@ -3,6 +3,7 @@ package encoding
 import (
 	"fmt"
 	"image"
+	"image/color"
 
 	"github.com/opticaltransport/otp/shared/protocol"
 )
@@ -26,6 +27,20 @@ type SoftCell struct {
 
 	// Margin is the distance between them. See Palette.ValueWithMargin.
 	Margin float64
+
+	// Normalised is the cell's colour after this frame's own photometric reference has been applied,
+	// which is the value Symbol was decided from.
+	//
+	// It is kept because a symbol is a decision and this is the evidence behind it, and combining
+	// several photographs of one displayed frame needs the evidence. Averaging decisions throws away
+	// the difference between a cell read at a margin of two and one read at sixty — they vote alike —
+	// whereas averaging the colours lets a confident reading outweigh an uncertain one on its own.
+	//
+	// Normalised rather than raw for a reason that is easy to get wrong: every photograph has its own
+	// exposure and white balance, so raw colours from different shots are measurements on different
+	// scales and averaging them is meaningless. The reference is fitted per frame from its own
+	// fiducials, so these are all on the palette's scale and may be combined directly.
+	Normalised color.RGBA
 }
 
 // SoftReading is a frame's payload region demodulated with its confidence retained,
@@ -99,9 +114,12 @@ func SoftRead(g *protocol.Geometry, img image.Image) (*SoftReading, error) {
 		payloadLen:  int(g.Header.PayloadLength),
 	}
 	for i, cell := range p.cells {
-		best, second, margin := pal.ValueWithMargin(ref.normalize(s.Color(cell), cell))
+		norm := ref.normalize(s.Color(cell), cell)
+		best, second, margin := pal.ValueWithMargin(norm)
 		r.Symbols[i] = best
-		r.Cells[i] = SoftCell{Index: i, Cell: cell, Symbol: best, Second: second, Margin: margin}
+		r.Cells[i] = SoftCell{
+			Index: i, Cell: cell, Symbol: best, Second: second, Margin: margin, Normalised: norm,
+		}
 	}
 	return r, nil
 }

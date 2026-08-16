@@ -20,6 +20,16 @@ import (
 // It describes the last frame only. A camera being aimed is moving, and an average over the last
 // minute would describe where it used to be pointed.
 type Alignment struct {
+	// LanesFound and LanesExpected are how many of the sender's tiled frames are in the picture.
+	//
+	// These exist because aiming a camera at a tiled display is a different task from aiming it at
+	// one frame, and the earlier display got it backwards. It measured a single lane and reported how
+	// much of the view that lane filled — so it told an operator to move closer until one frame filled
+	// the screen, which is precisely the move that pushes the other three out of shot. What matters
+	// here is that every lane is in frame, not that any one of them is large.
+	LanesFound    int `json:"lanes_found"`
+	LanesExpected int `json:"lanes_expected"`
+
 	// Locked is whether the four fiducials were found and a geometry fitted. Everything below is
 	// meaningless when it is false, because all of it is measured from that geometry.
 	Locked bool `json:"locked"`
@@ -144,7 +154,32 @@ const (
 // The image is needed as well as the geometry because Fill is a ratio against the frame, and the
 // geometry alone does not know how large a frame it was found in.
 func measureAlignment(img image.Image, g *protocol.Geometry, decoded bool) Alignment {
-	a := Alignment{At: time.Now()}
+	return measureLanes(img, []*protocol.Geometry{g}, 1, decoded)
+}
+
+// measureLanes turns a capture's located frames into aiming advice.
+//
+// Fill is measured across every lane found, not across one of them. On a tiled display the thing
+// being aimed is the whole arrangement: the operator needs all of it in shot, and how much of the
+// view any single lane occupies is not a number they can act on — chasing it moves the others out of
+// frame. Pixels per cell still come from a lane, because that is what a decoder reads.
+func measureLanes(img image.Image, lanes []*protocol.Geometry, expected int, decoded bool) Alignment {
+	a := Alignment{At: time.Now(), LanesExpected: expected}
+
+	// Only the ones actually located count. A nil is a lane that was looked for and not found, which
+	// is the state worth reporting rather than smoothing over.
+	found := make([]*protocol.Geometry, 0, len(lanes))
+	for _, l := range lanes {
+		if l != nil {
+			found = append(found, l)
+		}
+	}
+	a.LanesFound = len(found)
+
+	var g *protocol.Geometry
+	if len(found) > 0 {
+		g = found[0]
+	}
 
 	if g == nil {
 		a.Status = StatusSearching
@@ -177,8 +212,16 @@ func measureAlignment(img image.Image, g *protocol.Geometry, decoded bool) Align
 		minY, maxY = min(minY, c.Y), max(maxY, c.Y)
 	}
 
-	// Against the tighter dimension, because that is the one the grid runs out of room in first.
-	// A square grid in a portrait phone frame is bounded by the width long before the height.
+	// Across every lane found, not just this one. The bounding box of the whole arrangement is what
+	// has to fit the view, and it is what an operator is actually pointing at.
+	for _, other := range found[1:] {
+		for _, c := range other.Corners {
+			minX, maxX = min(minX, c.X), max(maxX, c.X)
+			minY, maxY = min(minY, c.Y), max(maxY, c.Y)
+		}
+	}
+
+	// Against the tighter dimension, because that is the one the display runs out of room in first.
 	a.Fill = max((maxX-minX)/w, (maxY-minY)/h)
 
 	// What this frame's own encoding needs, which is several times the binary figure when the
@@ -203,6 +246,12 @@ func measureAlignment(img image.Image, g *protocol.Geometry, decoded bool) Align
 	a.MaxGridForCapture = cap.MaxGrid
 
 	switch {
+	case a.LanesExpected > 1 && a.LanesFound < a.LanesExpected:
+		a.Status = StatusTooClose
+		a.Advice = fmt.Sprintf(
+			"%d of %d frames in view — move back or straighten up until all %d are inside the shot. "+
+				"They are read independently, so the ones that are missing are simply not arriving.",
+			a.LanesFound, a.LanesExpected, a.LanesExpected)
 	case a.Fill > maxFill:
 		a.Status = StatusTooClose
 		a.Advice = "Move back a little — the frame is filling the view and a corner marker is about to be cut off."

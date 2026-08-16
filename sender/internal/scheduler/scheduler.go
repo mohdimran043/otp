@@ -384,19 +384,71 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 		}
 		nextManifest--
 
-		choice, priority, err := s.choose(ctx, pending, byChunk, cfg)
-		if err != nil {
-			return stats, err
+		// Gather a lane's worth of frames for this display, rather than one.
+		//
+		// Chosen one at a time by the same rule a single-lane display uses — retransmissions first,
+		// then fresh chunks — with each pick excluded from the next, so four lanes carry four distinct
+		// symbols rather than the same one four times. The priority recorded for the round is the
+		// first pick's, because that is the one the round exists to send; the others are what the
+		// remaining lanes were filled with.
+		lanes := cfg.Optical.Lanes
+		if lanes < 1 {
+			lanes = 1
 		}
-		if choice == nil {
+		taken := make(map[uuid.UUID]bool, lanes)
+		var chosen []store.Frame
+		var priority Priority
+		for len(chosen) < lanes {
+			pick, pri, err := s.choose(ctx, pending, byChunk, cfg, taken)
+			if err != nil {
+				return stats, err
+			}
+			if pick == nil {
+				// No more distinct frames to fill the remaining lanes. Ordinary near the end of a
+				// transmission: the lanes that are left stay dark, and a receiver reads that as an
+				// absence rather than spending a decode on a repeat.
+				break
+			}
+			if len(chosen) == 0 {
+				priority = pri
+			}
+			taken[pick.ID] = true
+			chosen = append(chosen, *pick)
+		}
+		if len(chosen) == 0 {
 			// Nothing to show at all, which happens only if the window holds chunks whose frames are
 			// missing from the store. That is a bug rather than a channel condition, so it is reported
 			// rather than absorbed by displaying nothing.
 			return stats, fmt.Errorf("scheduler: no frame available for any of %d pending chunks", len(pending))
 		}
 
-		if err := s.show(ctx, *choice, priority); err != nil {
+		// Fill any spare lanes by repeating what there is.
+		//
+		// This is the end of a transmission, when fewer chunks remain than there are lanes. Leaving
+		// those lanes dark wastes them; repeating a chunk does not — see fillLanes for why the copies
+		// are not redundant to the receiver. Duplicates that do arrive are recognised and ignored,
+		// which the receiver already has to do for a retransmission.
+		//
+		// Kept apart from `chosen` deliberately. The accounting below records what was *sent* — one
+		// entry per distinct chunk — and counting a repeat as another send would inflate every
+		// chunk's attempt count and, with the retry limit enabled, fail the transfer for the crime of
+		// having fewer chunks left than lanes.
+		display := fillLanes(chosen, lanes)
+		choice := &chosen[0]
+
+		if err := s.showLanes(ctx, display, lanes, priority); err != nil {
 			return stats, err
+		}
+		// Every lane that went out is a symbol the receiver may now acknowledge, so all of them are
+		// recorded — not just the first. Recording only the leader would leave the others looking
+		// unsent, and the scheduler would show them again while they were still in flight.
+		for i := range chosen {
+			if i == 0 {
+				continue
+			}
+			if chunk := s.chunkOf(pending, chosen[i]); chunk != nil {
+				s.noteSent(chunk.ESI, PriorityFresh)
+			}
 		}
 		// Recorded after the frame is actually out, so the acknowledgement timeout is measured from when the
 		// receiver could first have seen it rather than from when the sender decided to.
@@ -417,7 +469,13 @@ func (s *Scheduler) Run(ctx context.Context, transmissionID uuid.UUID) (Stats, e
 		// working. Continuing would keep the process looking busy while making no progress, which is the
 		// worst thing to present to an operator. Keep-alive repeats do not count, for the reason given on
 		// the attempts field.
-		if chunk := s.chunkOf(pending, *choice); chunk != nil && s.attemptsOf(chunk.ESI) > cfg.Ack.MaxRetries {
+		// Zero disables the limit entirely, and the limit is scaled by the lane count.
+		//
+		// Scaled because a round now sends `lanes` chunks and records an attempt against each, so an
+		// unscaled limit is reached in a quarter of the rounds it used to be — which is how a
+		// four-lane test transfer failed after twelve sends and froze the display mid-aim.
+		limit := cfg.Ack.MaxRetries * lanes
+		if chunk := s.chunkOf(pending, *choice); cfg.Ack.MaxRetries > 0 && chunk != nil && s.attemptsOf(chunk.ESI) > limit {
 			stats.Duration = time.Since(started)
 			reason := fmt.Sprintf("chunk %d was sent %d times without being acknowledged",
 				chunk.ESI, s.attemptsOf(chunk.ESI))
@@ -515,7 +573,7 @@ func (s *Scheduler) forgiveHold(heldFor time.Duration) {
 // outstanding chunk is what the transmission is waiting on, while a fresh one only adds to the
 // backlog — a scheduler that displayed new chunks first would keep the window full of work the
 // receiver cannot confirm and finish later than one that fills the gaps as they appear.
-func (s *Scheduler) choose(ctx context.Context, pending []store.Chunk, byChunk map[uuid.UUID]store.Frame, cfg config.Config) (*store.Frame, Priority, error) {
+func (s *Scheduler) choose(ctx context.Context, pending []store.Chunk, byChunk map[uuid.UUID]store.Frame, cfg config.Config, taken map[uuid.UUID]bool) (*store.Frame, Priority, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -530,7 +588,7 @@ func (s *Scheduler) choose(ctx context.Context, pending []store.Chunk, byChunk m
 		if !displayed || now.Sub(at) < cfg.Ack.Timeout {
 			continue
 		}
-		if frame, ok := byChunk[chunk.ID]; ok {
+		if frame, ok := byChunk[chunk.ID]; ok && !taken[frame.ID] {
 			return &frame, PriorityRetransmit, nil
 		}
 	}
@@ -539,7 +597,7 @@ func (s *Scheduler) choose(ctx context.Context, pending []store.Chunk, byChunk m
 		if _, displayed := s.sent[chunk.ESI]; displayed {
 			continue
 		}
-		if frame, ok := byChunk[chunk.ID]; ok {
+		if frame, ok := byChunk[chunk.ID]; ok && !taken[frame.ID] {
 			return &frame, PriorityFresh, nil
 		}
 	}
@@ -549,12 +607,18 @@ func (s *Scheduler) choose(ctx context.Context, pending []store.Chunk, byChunk m
 	}
 
 	// The oldest outstanding chunk: displayed longest ago, so most likely to be the one that was
-	// missed.
+	// missed. Skipping what this round has already taken, which matters more here than in the two
+	// branches above — this is the fallback every lane reaches once the window is fully sent, so
+	// without the check all four lanes were filled with the same chunk and three quarters of the
+	// display carried nothing new. Measured: four lanes, one chunk, repeated.
 	var oldest *store.Chunk
 	var oldestAt time.Time
 	for i := range pending {
 		at, displayed := s.sent[pending[i].ESI]
 		if !displayed {
+			continue
+		}
+		if frame, ok := byChunk[pending[i].ID]; !ok || taken[frame.ID] {
 			continue
 		}
 		if oldest == nil || at.Before(oldestAt) {

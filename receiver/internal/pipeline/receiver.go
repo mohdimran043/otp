@@ -18,6 +18,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/opticaltransport/otp/shared/compress"
+	"github.com/opticaltransport/otp/shared/encoding"
 	"github.com/opticaltransport/otp/shared/fec"
 	"github.com/opticaltransport/otp/shared/protocol"
 
@@ -61,6 +62,15 @@ type Receiver struct {
 	// alignment is what the most recent frame said about how the camera is pointed, for the aiming
 	// display on the camera page. Last frame only, deliberately — see Alignment.
 	alignment atomic.Pointer[Alignment]
+
+	// shots accumulates the photographs taken of each displayed frame, so a frame no single
+	// photograph could read may still be read from several. See merge.go.
+	shots *merger
+
+	// lanes is how many frames to expect in one photograph, learned from what has recently been
+	// seen rather than read from configuration — the sender's lane count is the sender's, and it
+	// can change while this is running. See laneexpect.go.
+	lanes *laneExpectation
 
 	// started records when the first frame of a transmission was seen, so the result record can
 	// report throughput measured rather than estimated.
@@ -131,6 +141,8 @@ func New(st *store.Store, objects, acks objectstore.Store, source Source, cfg *c
 		finished: map[uuid.UUID]bool{},
 		injected: make(chan injectedFrame),
 		runDone:  make(chan struct{}),
+		shots:    newMerger(),
+		lanes:    newLaneExpectation(),
 	}
 
 	// The engine that never fails to construct, so this constructor cannot either and no caller ends
@@ -218,6 +230,7 @@ func (r *Receiver) RotateSession(ctx context.Context) (uuid.UUID, error) {
 	// The learned layout is deliberately kept: it describes the sender's grid, which a new capture
 	// session on this side does not change.
 	r.alignment.Store(nil)
+	r.shots.Reset()
 
 	if previous != uuid.Nil {
 		if err := r.store.Sessions.Finish(ctx, previous, "stopped", "capture source changed"); err != nil {
@@ -306,9 +319,17 @@ func (r *Receiver) Run(ctx context.Context) error {
 			defer decoders.Done()
 			for capture := range work {
 				select {
-				case results <- r.prepare(ctx, capture):
+				// Every frame the photograph holds, not just the strongest. See prepareAll.
 				case <-ctx.Done():
 					return
+				default:
+				}
+				for _, p := range r.prepareAll(ctx, capture) {
+					select {
+					case results <- p:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}()
@@ -596,13 +617,32 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 	// change between transmissions, and a stale hint costs nothing: Locate tries it first and falls
 	// through to the descriptor search when it does not fit, so a wrong layout is one wasted
 	// attempt rather than a wrong read.
-	opts := cfg.LocateOptions()
-	if learned := r.layout.Load(); learned != nil {
-		opts.ExpectedLayout = learned
-	}
+	opts := r.locateOptions(cfg)
 
 	decodeStarted := time.Now()
+	// Located the way a tiled display needs, which is not the way a single frame does.
+	//
+	// The ordinary search finds the strongest four fiducials in the picture and stops. On a tiled
+	// display those are the four *outermost* ones — one corner from each lane — describing a frame
+	// twice the size of any that was displayed, which then fails its descriptor and reports that
+	// nothing was found. The aiming display said "no grid in view" while pointed squarely at four
+	// perfectly good frames, because from where it stood that was true.
+	//
+	// So when the sender is tiling, every frame in the picture is located and the first that reads is
+	// taken as this capture's result. The others are not discarded: prepareAll returns them as their
+	// own results. What matters here is that the geometry recorded for the aiming display, the merge
+	// and the recovery stage is a real lane rather than the phantom that spans them all.
 	frame, geometry, decodeErr := decodeFrame(capture.Image, opts)
+	if decodeErr != nil && cfg.Capture.Lanes > 1 {
+		if lanes := protocol.LocateAll(capture.Image, opts, min(cfg.Capture.Lanes, maxLanesPerCapture)); len(lanes) > 0 {
+			geometry = lanes[0]
+			if f, err := encoding.Decode(capture.Image, opts); err == nil {
+				frame, decodeErr = f, nil
+			} else {
+				decodeErr = err
+			}
+		}
+	}
 	r.recovery.decodeNanos.Add(int64(time.Since(decodeStarted)))
 	r.recovery.decodeCount.Add(1)
 	finder, timing, contrast := decodeQuality(geometry)
@@ -647,6 +687,33 @@ func (r *Receiver) prepare(ctx context.Context, capture Capture) prepared {
 	// Placed after the confidence floors, so a frame held back for a low fiducial score is a
 	// recovery candidate too. Its payload may well be intact; the floors are a judgement about how
 	// much to trust the read, and a footer that verifies is a better answer than either.
+	// Combine this photograph with the others taken of the same displayed frame.
+	//
+	// Placed before recovery, and the order is the point. Recovery searches over the cells it is least
+	// sure about, so handing it a mean of several photographs both starts it from better evidence and
+	// shrinks the space it has to search — where handing it one noisy shot is what it was measured
+	// doing when it rescued nothing at all at a marginal geometry.
+	//
+	// Only for a frame that located and failed. A photograph whose geometry was never found has no
+	// cells to contribute and no frame number to file them under, and one that already decoded needs
+	// nothing: solo first, combine as the fallback. That ordering is not tidiness — combining was
+	// measured breaking a frame that a single photograph had read correctly, so the merged answer must
+	// never displace a verified one.
+	if decodeErr != nil && geometry != nil {
+		if soft, serr := encoding.SoftRead(geometry, capture.Image); serr == nil {
+			res := r.shots.Add(uint64(geometry.Header.FrameNumber), soft)
+			if res.Reading != nil && res.Shots > 1 {
+				if f, verr := res.Reading.Verify(res.Symbols); verr == nil {
+					r.log.Info("read a frame by combining several photographs of it",
+						zap.Uint64("frame", uint64(geometry.Header.FrameNumber)),
+						zap.Int("shots", res.Shots))
+					r.shots.Forget(uint64(geometry.Header.FrameNumber))
+					frame, decodeErr = f, nil
+				}
+			}
+		}
+	}
+
 	if decodeErr != nil && cfg.Decoder.Recovery.Enabled {
 		bucket := classify.Of(decodeErr)
 		r.recovery.attempted.Add(1)

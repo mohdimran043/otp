@@ -47,7 +47,15 @@ func displayInterval(cfg config.Config, tx store.Transmission) time.Duration {
 	if depth == 0 {
 		depth = 1
 	}
-	fps := readable.DisplayFPS(tx.GridWidth, tx.QuietZone, depth, assumedCaptureWidth, assumedCaptureHeight)
+	// The lane count matters as much as the grid. Four lanes span twice the cells across the display,
+	// so every cell resolves to half the camera pixels and each frame needs more photographs — which
+	// means a slower rate, not the same one.
+	lanes := cfg.Optical.Lanes
+	if lanes < 1 {
+		lanes = 1
+	}
+	fps := readable.DisplayFPSForLanes(
+		tx.GridWidth, tx.QuietZone, depth, assumedCaptureWidth, assumedCaptureHeight, lanes)
 	if fps <= 0 {
 		return cfg.FrameInterval()
 	}

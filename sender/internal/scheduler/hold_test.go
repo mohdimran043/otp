@@ -66,14 +66,14 @@ func TestForgivingAHoldStopsItLookingLikeLoss(t *testing.T) {
 	held := 2 * cfg.Ack.Timeout
 	s.sent[chunk.ESI] = time.Now().Add(-held)
 
-	_, priority, err := s.choose(context.Background(), []store.Chunk{chunk}, byChunk, cfg)
+	_, priority, err := s.choose(context.Background(), []store.Chunk{chunk}, byChunk, cfg, nil)
 	require.NoError(t, err)
 	require.Equal(t, PriorityRetransmit, priority,
 		"without forgiveness a chunk older than the timeout is a retransmission — this is the failure mode")
 
 	s.forgiveHold(held)
 
-	_, priority, err = s.choose(context.Background(), []store.Chunk{chunk}, byChunk, cfg)
+	_, priority, err = s.choose(context.Background(), []store.Chunk{chunk}, byChunk, cfg, nil)
 	require.NoError(t, err)
 	require.Equal(t, PriorityKeepAlive, priority,
 		"held time is not the receiver's silence: after forgiveness the chunk is not treated as lost")

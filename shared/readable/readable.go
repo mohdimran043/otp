@@ -276,5 +276,33 @@ func ShotsNeeded(a Assessment) int {
 // so four a second is a faster transfer than thirty of the smaller — and four a second leaves room
 // for the shots it needs.
 func DisplayFPS(gridWidth, quietZone int, bitDepth uint8, captureW, captureH int) float64 {
-	return PostRate / float64(ShotsNeeded(Assess(gridWidth, quietZone, bitDepth, captureW, captureH)))
+	return DisplayFPSForLanes(gridWidth, quietZone, bitDepth, captureW, captureH, 1)
+}
+
+// DisplayFPSForLanes is DisplayFPS for a tiled display.
+//
+// Tiling changes the answer and ignoring it was a real fault: four lanes span twice as many cells
+// across the display as one, so every cell resolves to half the camera pixels, and a geometry that
+// was comfortable alone becomes marginal tiled. The rate was derived from the lane's own grid and so
+// stayed where a single frame would have put it — three frames a second for a 96-cell colour lane —
+// while the tiled display it was actually driving needed far more photographs per frame than that
+// allowed.
+//
+// The effective grid is what spans the display, so a two-by-two tiling of N-cell lanes is assessed as
+// though it were a 2N-cell grid. That is not an approximation: it is the same number of cells across
+// the same screen, and pixels per cell is the only thing this depends on.
+func DisplayFPSForLanes(gridWidth, quietZone int, bitDepth uint8, captureW, captureH, lanes int) float64 {
+	columns := 1
+	switch {
+	case lanes >= 16:
+		columns = 4
+	case lanes >= 9:
+		columns = 3
+	case lanes >= 4:
+		columns = 2
+	case lanes >= 2:
+		columns = 2
+	}
+	effective := gridWidth * columns
+	return PostRate / float64(ShotsNeeded(Assess(effective, quietZone, bitDepth, captureW, captureH)))
 }

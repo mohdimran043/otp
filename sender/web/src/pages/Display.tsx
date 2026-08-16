@@ -135,6 +135,17 @@ export function Display() {
   })
   const frameCount = transfer.data?.frame_count ?? 0
 
+  // Lanes can change while a transfer runs: every lane is an ordinary frame, so the ones already
+  // rendered are equally valid shown one at a time or four at a time. Changing it mid-transfer is
+  // exactly what an operator aiming a camera wants — fewer lanes means larger cells, and whether that
+  // trade is worth making is something only the camera can answer.
+  const setLanes = useMutation({
+    mutationFn: (lanes: number) => api.updateSettings({ lanes }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['settings'] }),
+  })
+  const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings })
+  const lanes = settings.data?.lanes ?? 1
+
   const setHold = useMutation({
     mutationFn: (next: boolean) => (next ? api.holdDisplay() : api.releaseDisplay()),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['display'] }),
@@ -181,8 +192,26 @@ export function Display() {
     return () => window.removeEventListener('keydown', onKey)
   }, [camera, canStep, stepBy])
 
-  const width = shown?.meta.width_px ?? status.data?.frame?.width_px ?? 0
-  const height = shown?.meta.height_px ?? status.data?.frame?.height_px ?? 0
+  // The frame's own pixel size, held across the moment between frames.
+  //
+  // Every frame of a transmission is rendered at one size, so this should be a constant — and it is,
+  // right up until a frame is swapped. `shown` is replaced wholesale on each new frame and the status
+  // poll behind it can be a moment stale, so the two sources can both be briefly absent, and the
+  // fallback of zero collapsed the container to nothing and then let it spring back. Under a camera
+  // that reads as the display resizing on every frame, which is the one thing a display being
+  // photographed must never do: the receiver's geometry search has to re-find the frame each time,
+  // and an operator aiming at it sees the target move.
+  //
+  // A ref rather than state, deliberately. It must not itself cause a render — it is a memory of what
+  // the size already was, and re-rendering because the size did not change would be the same fault
+  // wearing a different hat.
+  const measured = shown?.meta ?? status.data?.frame
+  const lastSize = useRef({ w: 0, h: 0 })
+  if (measured?.width_px && measured?.height_px) {
+    lastSize.current = { w: measured.width_px, h: measured.height_px }
+  }
+  const width = lastSize.current.w
+  const height = lastSize.current.h
 
   // The largest integer multiple that fits, never zero: a frame larger than the window is shown at 1×
   // and cropped rather than shrunk, because shrinking is the fractional scaling this must not do.
@@ -222,17 +251,33 @@ export function Display() {
   }, [camera, leaveCamera])
 
   const frameImage = shown ? (
+    // The image sits inside a box of its own fixed size rather than sizing the layout itself.
+    //
+    // Swapping the source leaves an instant with no decoded picture, and an <img> with nothing in it
+    // has no intrinsic size — so a layout that measured the image would collapse and re-expand on
+    // every frame. The wrapper holds the space; only what is drawn inside it changes.
     <Box
-      component="img"
-      src={shown.src}
-      alt={`frame ${shown.meta.frame_number}`}
       sx={{
         width: width * applied,
         height: height * applied,
-        imageRendering: 'pixelated',
         display: 'block',
+        flex: 'none',
+        overflow: 'hidden',
+        backgroundColor: '#000',
       }}
-    />
+    >
+      <Box
+        component="img"
+        src={shown.src}
+        alt={`frame ${shown.meta.frame_number}`}
+        sx={{
+          width: '100%',
+          height: '100%',
+          imageRendering: 'pixelated',
+          display: 'block',
+        }}
+      />
+    </Box>
   ) : (
     <Box
       sx={{
@@ -276,6 +321,19 @@ export function Display() {
         <Typography variant="h5" sx={{ flexGrow: 1 }}>
           Display
         </Typography>
+        <ToggleButtonGroup
+          size="small"
+          exclusive
+          value={lanes}
+          onChange={(_, value: number | null) => value !== null && setLanes.mutate(value)}
+          disabled={setLanes.isPending}
+        >
+          {[1, 2, 4].map((n) => (
+            <ToggleButton key={n} value={n}>
+              {n} lane{n === 1 ? '' : 's'}
+            </ToggleButton>
+          ))}
+        </ToggleButtonGroup>
         <ToggleButtonGroup
           size="small"
           exclusive
