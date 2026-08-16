@@ -90,3 +90,63 @@ export function bestCellFor(
   }
   return chosen
 }
+
+/**
+ * isColour reports whether an encoder carries more than one bit per cell.
+ *
+ * An encoder that has not loaded yet counts as colour, and that default is load-bearing rather than
+ * cautious. Colour is the constrained case — a cell matched against eight palette entries needs several
+ * times the camera pixels a thresholded one does — so the grid ceiling exists for it. Guessing "not colour"
+ * removes the ceiling, which is the direction that produces an unreadable geometry: before the profiles
+ * request returned, this form treated an empty encoder as monochrome and chose a 512-cell grid for a
+ * deployment whose default encoding is colour8.
+ */
+export function isColour(encoder: string | undefined): boolean {
+  return encoder !== 'grayscale'
+}
+
+/**
+ * chooseGeometry resolves the (grid, cell) pair for whichever of the two was left on Auto.
+ *
+ * `usable` is the space one lane may occupy on the panel; the caller measures the screen, since a server
+ * with no display attached cannot. `ceiling` bounds what Auto will choose — not what an operator may
+ * choose deliberately.
+ *
+ * Grid is not maximised. Grid is capacity and cell size is legibility, and on a camera channel legibility
+ * is the binding constraint: the ceiling is where a colour payload stops being readable at a realistic
+ * framing, so Auto takes the largest grid *at or under* it rather than the largest that happens to fit the
+ * screen. Fitting the screen is not the same question — a 512-cell grid fits a 1080 panel at two pixels a
+ * cell and cannot be read at any distance.
+ */
+export function chooseGeometry(
+  grid: 'auto' | number,
+  cell: 'auto' | number,
+  grids: number[],
+  cells: number[],
+  usable: number,
+  encoder?: string,
+  ceiling = Infinity,
+): { grid: number; cell: number } {
+  // An explicit choice is never second-guessed, whatever the encoder.
+  if (grid !== 'auto' && cell !== 'auto') return { grid, cell }
+
+  const allowed = isColour(encoder) ? grids.filter((g) => g <= ceiling) : grids
+  const fallbackGrid = allowed[0] ?? grids[0]!
+
+  if (grid !== 'auto') {
+    return { grid, cell: bestCellFor(grid, cells, usable) ?? cells[0]! }
+  }
+
+  if (cell !== 'auto') {
+    const fits = allowed.filter((g) => frameEdgePx(g, cell) <= usable)
+    return { grid: fits.at(-1) ?? fallbackGrid, cell }
+  }
+
+  let best: { grid: number; cell: number } | null = null
+  for (const g of allowed) {
+    const c = bestCellFor(g, cells, usable)
+    if (c === null) continue
+    if (!best || g > best.grid) best = { grid: g, cell: c }
+  }
+  return best ?? { grid: fallbackGrid, cell: cells[0]! }
+}

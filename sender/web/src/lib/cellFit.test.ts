@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { bestCellFor, displayedEdgePx, frameEdgePx, minRenderedCell } from './cellFit'
+import {
+  bestCellFor,
+  chooseGeometry,
+  displayedEdgePx,
+  frameEdgePx,
+  minRenderedCell,
+} from './cellFit'
 
 const CELLS = [1, 2, 3, 4, 6, 8]
 
@@ -63,5 +69,64 @@ describe('cell size for a grid', () => {
         displayedEdgePx(grid, largestThatFits, 1080),
       )
     }
+  })
+})
+
+// What the upload form defaults to, which is the thing an operator actually sees.
+//
+// The presets and the ceiling are the page's, repeated here rather than imported, because these tests are
+// about the resolved *answer* and not about the constants. If the page changes them, this should be read
+// again rather than quietly following along.
+const GRIDS = [64, 80, 96, 128, 192, 256, 384, 512, 1024]
+const COLOUR_CEILING = 80
+
+describe('the geometry Auto resolves to', () => {
+  it('defaults to 80 cells at 4 pixels, not a grid nothing can read', () => {
+    // The regression this exists for: on a 1080-pixel panel, a 512-cell grid fits at 2 px a cell, so a rule
+    // that maximised grid chose 512 — a geometry no camera reads at any distance.
+    expect(chooseGeometry('auto', 'auto', GRIDS, CELLS, 1080, 'color8', COLOUR_CEILING)).toEqual({
+      grid: 80,
+      cell: 4,
+    })
+  })
+
+  it('still caps the grid before the encoder has loaded', () => {
+    // The form renders before the profiles request returns, so the encoder is empty. Treating that as
+    // monochrome removed the ceiling and chose 512 — for a deployment whose default encoding is colour.
+    expect(chooseGeometry('auto', 'auto', GRIDS, CELLS, 1080, undefined, COLOUR_CEILING).grid).toBe(80)
+    expect(chooseGeometry('auto', 'auto', GRIDS, CELLS, 1080, '', COLOUR_CEILING).grid).toBe(80)
+  })
+
+  it('lifts the cap for a monochrome payload, which genuinely can carry more', () => {
+    // A thresholded cell needs far fewer camera pixels than one matched against a palette, so the ceiling
+    // is not its constraint and the grid should climb.
+    const mono = chooseGeometry('auto', 'auto', GRIDS, CELLS, 1080, 'grayscale', COLOUR_CEILING)
+    expect(mono.grid).toBeGreaterThan(COLOUR_CEILING)
+  })
+
+  it('never second-guesses a grid and cell the operator chose', () => {
+    expect(chooseGeometry(512, 8, GRIDS, CELLS, 1080, 'color8', COLOUR_CEILING)).toEqual({
+      grid: 512,
+      cell: 8,
+    })
+  })
+
+  it('sizes the cell for a grid the operator chose, ceiling or not', () => {
+    // Choosing 128 deliberately is allowed — the ceiling bounds Auto, not the operator — and it still gets
+    // the cheapest cell that reaches the largest scaled size.
+    const chosen = chooseGeometry(128, 'auto', GRIDS, CELLS, 1080, 'color8', COLOUR_CEILING)
+    expect(chosen.grid).toBe(128)
+    expect(chosen.cell).toBeGreaterThanOrEqual(minRenderedCell)
+    expect(frameEdgePx(chosen.grid, chosen.cell)).toBeLessThanOrEqual(1080)
+  })
+
+  it('picks the largest capped grid that fits when the cell is pinned', () => {
+    expect(chooseGeometry('auto', 8, GRIDS, CELLS, 1080, 'color8', COLOUR_CEILING).grid).toBe(80)
+  })
+
+  it('accounts for lanes, where each lane gets a share of the panel', () => {
+    // Four lanes on a 1080 panel leave 540 each, and the answer must still fit that share.
+    const chosen = chooseGeometry('auto', 'auto', GRIDS, CELLS, 540, 'color8', COLOUR_CEILING)
+    expect(frameEdgePx(chosen.grid, chosen.cell)).toBeLessThanOrEqual(540)
   })
 })

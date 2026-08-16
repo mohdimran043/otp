@@ -20,7 +20,7 @@ import {
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import UploadFileIcon from '@mui/icons-material/UploadFile'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { bestCellFor } from '../lib/cellFit'
+import { chooseGeometry } from '../lib/cellFit'
 import { useNavigate } from 'react-router-dom'
 
 import { api, formatBytes } from '../api/client'
@@ -68,14 +68,7 @@ const CELL_PRESETS = [1, 2, 3, 4, 6, 8]
 // the thing it changes. Lanes can be changed mid-transfer from there, which is a property worth
 // keeping: every lane is an ordinary frame, so the ones already rendered stay valid.
 
-// The quiet zone used for this estimate is a guess, not a fetch — the real one lives in the
-// server's configuration and the exact figure barely moves the answer. It only has to be close
-// enough that "fits the screen" is not off by a border's worth of pixels.
-const ASSUMED_QUIET_ZONE = 2
 
-function frameEdgePx(grid: number, cell: number): number {
-  return (grid + 2 * ASSUMED_QUIET_ZONE) * cell
-}
 
 // COLOUR_GRID_CEILING is the largest grid Auto will choose for a colour payload.
 //
@@ -110,10 +103,6 @@ function frameEdgePx(grid: number, cell: number): number {
 // who has not thought about it, and for them a frame that decodes beats a frame that carries more.
 const COLOUR_GRID_CEILING = 80
 
-/** isColour reports whether an encoder carries more than one bit per cell. */
-function isColour(encoder: string | undefined): boolean {
-  return !!encoder && encoder !== 'grayscale'
-}
 
 // fitGridAndCell solves the (grid, cell) pair that fits this screen, for whichever of the two
 // pieces the operator left on "Auto". The server cannot do this — it runs with no display
@@ -151,33 +140,7 @@ function fitGridAndCell(
     Math.min(window.screen.width / columns, window.screen.height / rows),
   )
 
-  // An explicit choice is never second-guessed, whatever the encoder.
-  if (grid !== 'auto' && cell !== 'auto') return { grid, cell }
-
-  const grids = isColour(encoder) ? GRID_PRESETS.filter((g) => g <= COLOUR_GRID_CEILING) : GRID_PRESETS
-
-  if (grid !== 'auto') {
-    // Not the largest cell that fits. See lib/cellFit: the display scales by whole numbers, so a frame
-    // rendered small and scaled up is the same picture at a fraction of the encoding cost — and "largest
-    // that fits" was frequently the *smaller* display as well as the slower one.
-    return { grid, cell: bestCellFor(grid, CELL_PRESETS, usable) ?? CELL_PRESETS[0]! }
-  }
-
-  if (cell !== 'auto') {
-    const fits = grids.filter((g) => frameEdgePx(g, cell) <= usable)
-    return { grid: fits.at(-1) ?? grids[0]!, cell }
-  }
-
-  // Both automatic: take the largest grid that can be shown at all, then choose its cell size the same
-  // way an explicit grid gets one. Grid is what carries payload, so it is the thing to maximise; cell size
-  // is a rendering cost that buys nothing beyond filling the panel.
-  let best: { grid: number; cell: number } | null = null
-  for (const g of grids) {
-    const c = bestCellFor(g, CELL_PRESETS, usable)
-    if (c === null) continue
-    if (!best || g > best.grid) best = { grid: g, cell: c }
-  }
-  return best ?? { grid: grids[0]!, cell: CELL_PRESETS[0]! }
+  return chooseGeometry(grid, cell, GRID_PRESETS, CELL_PRESETS, usable, encoder, COLOUR_GRID_CEILING)
 }
 
 function randomKeyHex(): string {
