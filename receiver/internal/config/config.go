@@ -159,6 +159,9 @@ type Capture struct {
 	// captures that do not, which is why it is configured rather than always on.
 	Lanes int `yaml:"lanes"`
 
+	// RGB describes the production camera, when there is one. See RGBCamera.
+	RGB RGBCamera `yaml:"rgb"`
+
 	// Simulate degrades every frame before it is decoded, as a lens and a sensor would: "clean", "typical",
 	// "harsh", or "rolling-shutter". Empty means frames are read exactly as they were written.
 	//
@@ -167,6 +170,70 @@ type Capture struct {
 	// possible case. Naming a profile makes the virtual channel behave like a real one, so a demonstration
 	// or a soak test exercises the tolerances a camera actually will.
 	Simulate string `yaml:"simulate"`
+}
+
+// RGBCamera describes an industrial colour camera photographing the display.
+//
+// It exists because the production channel is not the development one. A phone or a webcam is aimed by
+// hand and reports nothing about itself; a Basler, FLIR or Allied Vision camera on 10GigE or CoaXPress is
+// installed once, and everything about whether it will work is decided before it is bought — sensor
+// resolution against panel size against how many cells the sender is asked to put on screen.
+//
+// So these are not settings that drive a driver. This receiver does not open a GigE Vision camera: those
+// cameras are reached through their vendors' SDKs, and the frames arrive here the same way the browser's
+// do, by POST to /api/v1/capture/frames from a small grabber process that owns the SDK. What this block is
+// for is to write down what that camera *is*, so the receiver can answer the question the hardware choice
+// actually turns on — see Feasibility, which reports pixels per cell and the largest grid this camera can
+// resolve, before anybody orders anything.
+//
+// Every field is descriptive. Setting them changes no capture behaviour; getting them wrong changes only
+// the advice.
+type RGBCamera struct {
+	// Enabled marks this deployment as using a production camera. Off by default, because the answer for a
+	// laptop and a phone is "no" and a planner that assumed otherwise would report on hardware nobody has.
+	Enabled bool `yaml:"enabled"`
+
+	// Model is free text for the operator's own records — "Basler ace 2 a2A2448-120cc".
+	Model string `yaml:"model"`
+
+	// SensorWidth and SensorHeight are the camera's full resolution in pixels. These are the numbers the
+	// feasibility answer turns on, and the reason a 5 MP sensor is not five megapixels of display: a 16:9
+	// panel inside a 4:3-ish sensor is limited by width, and the rest of the sensor sees the room.
+	SensorWidth  int `yaml:"sensor_width"`
+	SensorHeight int `yaml:"sensor_height"`
+
+	// FPS is the camera's frame rate, which should exceed the display's refresh so every displayed frame
+	// gets more than one chance to be photographed.
+	FPS float64 `yaml:"fps"`
+
+	// ExposureMicros is the shutter time. Short is what avoids motion and refresh smear; under a
+	// millisecond is the usual target, and it is the setting that trades against lighting.
+	ExposureMicros float64 `yaml:"exposure_micros"`
+
+	// PixelFormat is the camera's output format, "RGB8", "RGB10", "RGB12", "BayerRG8" and so on.
+	//
+	// Worth recording because a colour payload lives or dies on it. A Bayer format debayered in the camera
+	// or the grabber has had its colour interpolated from neighbouring photosites, which is the same loss
+	// JPEG chroma subsampling inflicts and for the same reason — see the receiver's capture format setting.
+	PixelFormat string `yaml:"pixel_format"`
+
+	// Interface is how the camera is attached: "10GigE", "5GigE", "USB3", "CoaXPress".
+	Interface string `yaml:"interface"`
+
+	// TriggerMode is "free-run" or "hardware". Hardware trigger synchronised to the display refresh is what
+	// stops a capture straddling two displayed frames, which is a frame lost for a reason no amount of
+	// aiming fixes.
+	TriggerMode string `yaml:"trigger_mode"`
+
+	// PanelWidth and PanelHeight are the display being photographed, in pixels. Together with the sensor
+	// they decide how many camera pixels land on one of the sender's cells.
+	PanelWidth  int `yaml:"panel_width"`
+	PanelHeight int `yaml:"panel_height"`
+
+	// PanelFill is how much of the camera's shorter dimension the panel occupies, 0..1. One means the panel
+	// exactly fills the frame, which no real installation achieves — leave margin for the fiducials to stay
+	// in shot when something is nudged.
+	PanelFill float64 `yaml:"panel_fill"`
 }
 
 // Peer is where the other side of the gap can be reached by a human.
@@ -359,6 +426,20 @@ func Default() Config {
 			// Four, matching the sender's default tiling. A capture holding one frame costs one extra
 			// fiducial search and behaves identically, so this is safe when the sender is not tiling.
 			Lanes: 4,
+			RGB: RGBCamera{
+				// Off, because the answer for a laptop and a phone is "no" and a planner reporting on
+				// hardware nobody owns is worse than one that says nothing.
+				Enabled: false,
+				// The panel a production install is specified against, so the feasibility answer means
+				// something the moment the camera is filled in.
+				PanelWidth:  3840,
+				PanelHeight: 2160,
+				// Not one. A panel filling the frame exactly leaves no room for the fiducials to survive a
+				// nudge, and every real installation is framed looser than the specification imagines.
+				PanelFill:   0.9,
+				TriggerMode: "hardware",
+				PixelFormat: "RGB8",
+			},
 		},
 		Decoder: Decoder{
 			MinFinderScore: 0.75,
@@ -695,6 +776,18 @@ func applyEnv(c *Config) error {
 	str("CAPTURE_DEVICE", &c.Capture.Device)
 	str("CAPTURE_FORMAT", &c.Capture.Format)
 	integer("CAPTURE_LANES", &c.Capture.Lanes)
+	boolean("CAPTURE_RGB_ENABLED", &c.Capture.RGB.Enabled)
+	str("CAPTURE_RGB_MODEL", &c.Capture.RGB.Model)
+	integer("CAPTURE_RGB_SENSOR_WIDTH", &c.Capture.RGB.SensorWidth)
+	integer("CAPTURE_RGB_SENSOR_HEIGHT", &c.Capture.RGB.SensorHeight)
+	float("CAPTURE_RGB_FPS", &c.Capture.RGB.FPS)
+	float("CAPTURE_RGB_EXPOSURE_MICROS", &c.Capture.RGB.ExposureMicros)
+	str("CAPTURE_RGB_PIXEL_FORMAT", &c.Capture.RGB.PixelFormat)
+	str("CAPTURE_RGB_INTERFACE", &c.Capture.RGB.Interface)
+	str("CAPTURE_RGB_TRIGGER_MODE", &c.Capture.RGB.TriggerMode)
+	integer("CAPTURE_RGB_PANEL_WIDTH", &c.Capture.RGB.PanelWidth)
+	integer("CAPTURE_RGB_PANEL_HEIGHT", &c.Capture.RGB.PanelHeight)
+	float("CAPTURE_RGB_PANEL_FILL", &c.Capture.RGB.PanelFill)
 	integer("CAPTURE_DECODE_WORKERS", &c.Capture.DecodeWorkers)
 	integer("CAPTURE_WIDTH", &c.Capture.Width)
 	integer("CAPTURE_HEIGHT", &c.Capture.Height)
@@ -820,6 +913,20 @@ func (w *Watcher) SetCamera(device, format string, width, height int, fps float6
 //
 // Clamped rather than validated, because a caller cannot usefully be told off here: this is reached from a
 // slider, and a negative value has an obvious meaning — turn the gate off.
+// SetRGBCamera records what the production camera is, taking effect immediately.
+//
+// Live rather than persisted, matching the capture gate beside it: the configured value is what a restart
+// returns to. That is the right shape here because nothing depends on it surviving — the description drives
+// no capture, so a value lost on restart costs an operator the planner's answer and nothing else. A
+// deployment that wants it durable sets it in the environment, where it belongs alongside the panel it
+// describes.
+func (w *Watcher) SetRGBCamera(camera RGBCamera) Config {
+	next := w.Current()
+	next.Capture.RGB = camera
+	w.current.Store(&next)
+	return next
+}
+
 func (w *Watcher) SetMinToneFraction(fraction float64) Config {
 	if fraction < 0 {
 		fraction = 0

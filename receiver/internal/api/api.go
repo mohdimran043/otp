@@ -201,6 +201,8 @@ func (s *Server) Routes() http.Handler {
 	// so it reports the last frame rather than an average: an average describes where the camera was.
 	mux.HandleFunc("GET /api/v1/capture/alignment", s.getAlignment)
 
+	mux.HandleFunc("GET /api/v1/capture/rgb", s.getRGBCamera)
+	mux.HandleFunc("PUT /api/v1/capture/rgb", s.setRGBCamera)
 	mux.HandleFunc("GET /api/v1/capture/gate", s.getCaptureGate)
 	mux.HandleFunc("PUT /api/v1/capture/gate", s.setCaptureGate)
 
