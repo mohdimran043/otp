@@ -6,7 +6,8 @@ import { useUi } from '../store/ui'
 
 export function HealthBadge() {
   const refreshMs = useUi((state) => state.refreshMs)
-  const { data, isError } = useQuery({
+  // Still polled: the query failing is what turns the badge red, and that is the whole of its job.
+  const { isError } = useQuery({
     queryKey: ['health'],
     queryFn: api.health,
     refetchInterval: Math.max(refreshMs, 2000),
@@ -19,9 +20,13 @@ export function HealthBadge() {
       </Tooltip>
     )
   }
+  // The badge says whether the service is answering, which is the only thing a badge in a header can
+  // usefully say. It used to read "v1" — the protocol version, which never changes, is not something an
+  // operator acts on, and read as a build number to everyone who saw it. The version is still reported, on
+  // the Settings page, where a number that never moves belongs.
   return (
-    <Tooltip title={`Protocol version ${data?.protocol_version ?? '—'}`}>
-      <Chip size="small" color="success" variant="outlined" label={`v${data?.protocol_version ?? '—'}`} />
+    <Tooltip title="This service is answering, and the figures on this page are current.">
+      <Chip size="small" color="success" variant="outlined" label="connected" />
     </Tooltip>
   )
 }
