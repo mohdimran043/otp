@@ -55,10 +55,18 @@ export function Transmissions() {
         <Typography variant="h5">Transmissions</Typography>
         <Button component="label" variant="outlined" size="small" disabled={importing.isPending}>
           {importing.isPending ? 'Importing…' : 'Import frames'}
+          {/* The list has to track what the import endpoint actually reads, and it had stopped: the
+              server grew JPEG, GIF and PDF while this stayed on .zip and .png, so a printed sheet
+              photographed on a phone and the sender's own printable export were both greyed out in
+              the file dialog by a receiver perfectly able to read them. accept= is advisory — it
+              filters the picker and nothing else — which is exactly why it goes wrong quietly. */}
+          {/* Deliberately one file, not `multiple`: this handler submits files[0], and a zip or a PDF
+              is already a batch. Selecting a folder of photographed sheets is the Scan page's job,
+              which posts them one at a time and reports each. */}
           <input
             hidden
             type="file"
-            accept=".zip,.png"
+            accept="image/*,.pdf,application/pdf,.zip,application/zip"
             onChange={(e) => {
               const f = e.target.files?.[0]
               if (f) importing.mutate(f)
