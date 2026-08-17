@@ -82,24 +82,27 @@ func multipartWriterNoFile(t *testing.T, buf *bytes.Buffer) string {
 // It can also be told to hand back canned per-call results, to fail from some call onward (for
 // the systemic-failure abort), or to run a hook on every call (for tests that need to trigger a
 // side effect, such as cancelling the request's own context, partway through a batch).
+// One call can now answer with several results, because one image can hold several frames — a
+// photographed sheet printed four-up is four. `results` is still indexed by call, each entry the
+// set that call answers with.
 type fakeIngester struct {
 	mu       sync.Mutex
 	images   []image.Image
 	raws     [][]byte
-	results  []pipeline.IngestResult // consumed in call order; falls back to Decoded:true past the end
-	failAt   int                     // 1-based call number at and after which failWith is returned
+	results  [][]pipeline.IngestResult // consumed in call order; falls back to one Decoded:true past the end
+	failAt   int                       // 1-based call number at and after which failWith is returned
 	failWith error
 	onCall   func(callNumber int)
 }
 
-func (f *fakeIngester) Ingest(_ context.Context, img image.Image, raw []byte) (pipeline.IngestResult, error) {
+func (f *fakeIngester) Ingest(_ context.Context, img image.Image, raw []byte) ([]pipeline.IngestResult, error) {
 	f.mu.Lock()
 	f.images = append(f.images, img)
 	f.raws = append(f.raws, raw)
 	n := len(f.images)
-	result := pipeline.IngestResult{Decoded: true}
+	results := []pipeline.IngestResult{{Decoded: true}}
 	if n-1 < len(f.results) {
-		result = f.results[n-1]
+		results = f.results[n-1]
 	}
 	failAt, failWith, onCall := f.failAt, f.failWith, f.onCall
 	f.mu.Unlock()
@@ -108,9 +111,9 @@ func (f *fakeIngester) Ingest(_ context.Context, img image.Image, raw []byte) (p
 		onCall(n)
 	}
 	if failWith != nil && failAt > 0 && n >= failAt {
-		return pipeline.IngestResult{}, failWith
+		return nil, failWith
 	}
-	return result, nil
+	return results, nil
 }
 
 func (f *fakeIngester) count() int {
@@ -582,15 +585,81 @@ func TestImportRefusesAConcurrentImportWith409(t *testing.T) {
 	require.Equal(t, 0, fake.count(), "a refused import must never reach Ingest")
 }
 
+// TestImportSheetReportsARowPerFrame covers the printed-sheet response shape. One uploaded image
+// holding four frames is four results, and the operator needs to see all four verdicts — a single
+// row saying "decoded" for a sheet where three frames failed reads as success and is worse than no
+// row at all. The rows are numbered off the file's name so they can be told apart.
+func TestImportSheetReportsARowPerFrame(t *testing.T) {
+	txID := uuid.New()
+	fake := &fakeIngester{results: [][]pipeline.IngestResult{{
+		{Decoded: true, IsManifest: true, TransmissionID: &txID},
+		{Decoded: true, TransmissionID: &txID},
+		{Error: "payload_crc"},
+		{Decoded: true, TransmissionID: &txID},
+	}}}
+	handler := newImportServer(t, fake)
+
+	rec := postImportFile(t, handler, "sheet-01.png", solidPNG(t, 8, 8, color.RGBA{R: 9, A: 255}))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 1, fake.count(), "one image is one call into the pipeline")
+
+	var out struct {
+		Entries []struct {
+			Name    string `json:"name"`
+			Decoded bool   `json:"decoded"`
+			Error   string `json:"error"`
+		} `json:"entries"`
+		Ingested      int      `json:"ingested"`
+		Transmissions []string `json:"transmissions"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out.Entries, 4, "a row per frame on the sheet")
+	require.Equal(t, 4, out.Ingested)
+	require.Equal(t, []string{txID.String()}, out.Transmissions)
+
+	// Numbered, so four rows of one sheet are distinguishable.
+	require.Equal(t, "sheet-01.png#0", out.Entries[0].Name)
+	require.Equal(t, "sheet-01.png#3", out.Entries[3].Name)
+
+	// And the frame that failed says so rather than being folded in with the ones that read.
+	require.Equal(t, "payload_crc", out.Entries[2].Error)
+	require.False(t, out.Entries[2].Decoded)
+}
+
+// TestImportOfALoneFrameKeepsItsPlainName is the common case, which must not pick up a "#0" suffix
+// just because the sheet case needs numbering: an archive of one-frame entries should read as the
+// filenames the operator recognises.
+func TestImportOfALoneFrameKeepsItsPlainName(t *testing.T) {
+	fake := &fakeIngester{}
+	handler := newImportServer(t, fake)
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	writeZipFile(t, zw, "frame-00000000.png", solidPNG(t, 4, 4, color.RGBA{R: 1, A: 255}))
+	require.NoError(t, zw.Close())
+
+	rec := postImportFile(t, handler, "archive.zip", zipBuf.Bytes())
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var out struct {
+		Entries []struct {
+			Name string `json:"name"`
+		} `json:"entries"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out.Entries, 1)
+	require.Equal(t, "frame-00000000.png", out.Entries[0].Name)
+}
+
 // TestImportResponseListsTouchedTransmissionIDs is the Task 9 contract: the UI navigates
 // straight to each transmission an import touched, so the response has to carry the ids
 // themselves, not merely how many there were.
 func TestImportResponseListsTouchedTransmissionIDs(t *testing.T) {
 	first, second := uuid.New(), uuid.New()
-	fake := &fakeIngester{results: []pipeline.IngestResult{
-		{Decoded: true, TransmissionID: &first},
-		{Decoded: true, TransmissionID: &second},
-		{Decoded: true, TransmissionID: &first}, // a repeat, e.g. the manifest and a data frame
+	fake := &fakeIngester{results: [][]pipeline.IngestResult{
+		{{Decoded: true, TransmissionID: &first}},
+		{{Decoded: true, TransmissionID: &second}},
+		{{Decoded: true, TransmissionID: &first}}, // a repeat, e.g. the manifest and a data frame
 	}}
 	handler := newImportServer(t, fake)
 

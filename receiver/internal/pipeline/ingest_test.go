@@ -168,6 +168,19 @@ func buildOneChunkTransmission(t *testing.T, encrypt bool, key []byte) oneChunkT
 	}
 }
 
+// ingestLoneFrame ingests an image that holds exactly one frame and returns its result.
+//
+// Ingest answers with a result per frame the image held, which for every test below that is not
+// about sheets is one — and asserting that here rather than indexing at each call site is what
+// keeps "this image should have held one frame" a checked claim instead of a silent [0].
+func ingestLoneFrame(t *testing.T, h *ingestHarness, img image.Image) IngestResult {
+	t.Helper()
+	results, err := h.r.Ingest(context.Background(), img, nil)
+	require.NoError(t, err)
+	require.Len(t, results, 1, "this image holds one frame")
+	return results[0]
+}
+
 // TestIngestFullRoundTrip is the happy path: a manifest and a data frame, uploaded rather than
 // captured, reassemble into exactly the file the sender started with.
 func TestIngestFullRoundTrip(t *testing.T) {
@@ -175,15 +188,19 @@ func TestIngestFullRoundTrip(t *testing.T) {
 	tx := buildOneChunkTransmission(t, false, nil)
 	ctx := context.Background()
 
-	manifestResult, err := h.r.Ingest(ctx, tx.manifestImage, nil)
+	manifestResults, err := h.r.Ingest(ctx, tx.manifestImage, nil)
 	require.NoError(t, err)
+	require.Len(t, manifestResults, 1)
+	manifestResult := manifestResults[0]
 	require.True(t, manifestResult.Decoded)
 	require.True(t, manifestResult.IsManifest)
 	require.NotNil(t, manifestResult.TransmissionID)
 	require.Equal(t, tx.transmissionID, *manifestResult.TransmissionID)
 
-	dataResult, err := h.r.Ingest(ctx, tx.dataImage, nil)
+	dataResults, err := h.r.Ingest(ctx, tx.dataImage, nil)
 	require.NoError(t, err)
+	require.Len(t, dataResults, 1)
+	dataResult := dataResults[0]
 	require.True(t, dataResult.Decoded)
 	require.False(t, dataResult.IsManifest)
 	require.NotNil(t, dataResult.ChunkNumber)
@@ -216,10 +233,11 @@ func TestIngestEncryptedNeedsKeyring(t *testing.T) {
 	_, err := h.r.Ingest(ctx, tx.manifestImage, nil)
 	require.NoError(t, err)
 
-	dataResult, err := h.r.Ingest(ctx, tx.dataImage, nil)
+	dataResults, err := h.r.Ingest(ctx, tx.dataImage, nil)
 	require.NoError(t, err)
-	require.True(t, dataResult.Decoded, "the frame's own checksums pass; only the payload fails to open")
-	require.NotNil(t, dataResult.ChunkNumber)
+	require.Len(t, dataResults, 1)
+	require.True(t, dataResults[0].Decoded, "the frame's own checksums pass; only the payload fails to open")
+	require.NotNil(t, dataResults[0].ChunkNumber)
 
 	// Give the applier a moment, then confirm nothing merged and the ack channel says why.
 	time.Sleep(50 * time.Millisecond)
@@ -258,6 +276,80 @@ func TestIngestEncryptedNeedsKeyring(t *testing.T) {
 	}, 6*time.Second, 250*time.Millisecond)
 }
 
+// TestIngestReadsEveryFrameOnASheet is the printed-sheet path.
+//
+// An operator prints a transfer several frames to a page, photographs the sheet, and uploads the
+// picture. One image, several frames — the same shape a tiled display presents to a camera, and
+// the capture loop has read it that way since lanes.go. Ingest did not: it prepared the strongest
+// frame in the picture and dropped the rest, so a four-up sheet imported a quarter of itself and
+// the operator was left to work out why three quarters of their paper had vanished.
+//
+// Composed through LaneLayout rather than pasted by hand, because that is what the printable
+// document will do, and the six-cell gap it leaves is load-bearing: flush frames read perfectly
+// from the encoder's own pixels and fail completely through any camera.
+func TestIngestReadsEveryFrameOnASheet(t *testing.T) {
+	h := newIngestHarness(t)
+	tx := buildOneChunkTransmission(t, false, nil)
+	ctx := context.Background()
+
+	layout, err := protocol.NewLayoutQuiet(128, 128, 4, 2)
+	require.NoError(t, err)
+	sheet, err := protocol.LaneLayout{
+		Lane:    layout,
+		Columns: 1,
+		Rows:    2,
+		Gap:     protocol.DefaultLaneGapCells,
+	}.Compose([]image.Image{tx.manifestImage, tx.dataImage})
+	require.NoError(t, err)
+
+	results, err := h.r.Ingest(ctx, sheet, nil)
+	require.NoError(t, err)
+	require.Len(t, results, 2, "both frames on the sheet must be read, not just the strongest")
+
+	decoded := 0
+	sawManifest, sawChunk := false, false
+	for _, res := range results {
+		if !res.Decoded {
+			continue
+		}
+		decoded++
+		if res.IsManifest {
+			sawManifest = true
+			continue
+		}
+		sawChunk = true
+	}
+	require.Equal(t, 2, decoded, "both frames on the sheet must decode")
+	require.True(t, sawManifest, "the manifest lane must be one of them")
+	require.True(t, sawChunk, "the data lane must be the other")
+
+	// And the transfer completes off that single upload, which is the whole point: one sheet, one
+	// photograph, a verified file.
+	require.Eventually(t, func() bool {
+		merged, err := h.st.Merged.Get(ctx, tx.transmissionID)
+		return err == nil && merged.Verified
+	}, 5*time.Second, 10*time.Millisecond)
+
+	merged, err := h.st.Merged.Get(ctx, tx.transmissionID)
+	require.NoError(t, err)
+	body, err := objectstore.GetBytes(ctx, h.objects, merged.StoredPath, merged.SizeBytes+1)
+	require.NoError(t, err)
+	require.Equal(t, tx.payload, body)
+}
+
+// TestIngestOfALoneFrameReturnsOneResult is the other half: the ordinary single-frame upload must
+// not grow a second, empty result now that Ingest looks for more than one frame.
+func TestIngestOfALoneFrameReturnsOneResult(t *testing.T) {
+	h := newIngestHarness(t)
+	tx := buildOneChunkTransmission(t, false, nil)
+
+	results, err := h.r.Ingest(context.Background(), tx.manifestImage, nil)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.True(t, results[0].Decoded)
+	require.True(t, results[0].IsManifest)
+}
+
 // TestIngestWhenNotRunningErrors is the failure mode that must never be a hang: a receiver
 // whose Run has not started (or has already stopped) must fail an Ingest call outright.
 func TestIngestWhenNotRunningErrors(t *testing.T) {
@@ -276,9 +368,9 @@ func TestIngestWhenNotRunningErrors(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	result, err := r.Ingest(ctx, image.NewRGBA(image.Rect(0, 0, 4, 4)), nil)
+	results, err := r.Ingest(ctx, image.NewRGBA(image.Rect(0, 0, 4, 4)), nil)
 	require.Error(t, err)
-	require.Equal(t, IngestResult{}, result)
+	require.Empty(t, results)
 }
 
 // TestIngestRacesShutdownWithoutHanging is the probe for the shutdown-vs-ingest race the design

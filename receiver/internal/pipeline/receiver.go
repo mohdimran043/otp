@@ -324,7 +324,7 @@ func (r *Receiver) Run(ctx context.Context) error {
 					return
 				default:
 				}
-				for _, p := range r.prepareAll(ctx, capture) {
+				for _, p := range r.prepareAll(ctx, capture, cameraSearch(r.cfg.Current().Capture.Lanes)) {
 					select {
 					case results <- p:
 					case <-ctx.Done():
@@ -432,23 +432,40 @@ func (r *Receiver) Run(ctx context.Context) error {
 					zap.Int64("sequence", p.capture.Sequence), zap.Error(err))
 			}
 		case inj := <-r.injected:
-			err := r.apply(ctx, inj.p)
-			inj.reply <- ingestReply{result: resultOf(inj.p), err: err}
+			// Every frame the uploaded image held, applied in the order they were found and
+			// reported the same way. One sheet of paper can carry several, and applying them here
+			// rather than making the caller inject each separately is what keeps them on the same
+			// side of the applier as the capture loop's lanes.
+			results := make([]IngestResult, 0, len(inj.ps))
+			var err error
+			for _, p := range inj.ps {
+				// The first failure stops the rest. An apply error is a fault in this process —
+				// the store, the object store, the session — not a property of the frame, so the
+				// frames behind it would fail identically and the caller needs the error itself
+				// rather than a list of results that all say the same thing.
+				if applyErr := r.apply(ctx, p); applyErr != nil {
+					err = applyErr
+					break
+				}
+				results = append(results, resultOf(p))
+			}
+			inj.reply <- ingestReply{results: results, err: err}
 		}
 	}
 }
 
-// injectedFrame is a frame arriving by upload rather than capture, carrying a reply channel
-// because the uploader is a synchronous HTTP request that wants the verdict.
+// injectedFrame is the frames one uploaded image held, arriving by upload rather than capture and
+// carrying a reply channel because the uploader is a synchronous HTTP request that wants the
+// verdict.
 type injectedFrame struct {
-	p     prepared
+	ps    []prepared
 	reply chan ingestReply
 }
 
 // ingestReply is what Ingest hands back to its caller.
 type ingestReply struct {
-	result IngestResult
-	err    error
+	results []IngestResult
+	err     error
 }
 
 // IngestResult is the outcome of running one uploaded image through the pipeline.
@@ -506,9 +523,16 @@ var ErrNotRunning = errors.New("pipeline: the receiver is not running")
 // new lock, and everything downstream (acks, merge, delivery) cannot tell the difference. That
 // indistinguishability is the point: a frame archive imported from a USB stick is a transport,
 // not a parser, and it earns that only by walking the exact path a camera frame would.
-func (r *Receiver) Ingest(ctx context.Context, img image.Image, raw []byte) (IngestResult, error) {
+//
+// One result per frame the image held, which is usually one and is not always. A photograph of a
+// printed sheet carries however many frames were printed on it, exactly as a photograph of a tiled
+// display carries however many lanes were shown — and reading only the strongest of them threw the
+// rest away silently, which on paper means an operator printing four-up imported a quarter of their
+// stack and had nothing to tell them so. The single-frame upload is unchanged: one frame in the
+// picture, one result out.
+func (r *Receiver) Ingest(ctx context.Context, img image.Image, raw []byte) ([]IngestResult, error) {
 	if !r.running.Load() {
-		return IngestResult{}, ErrNotRunning
+		return nil, ErrNotRunning
 	}
 
 	capture := Capture{
@@ -517,31 +541,31 @@ func (r *Receiver) Ingest(ctx context.Context, img image.Image, raw []byte) (Ing
 		Raw:        raw,
 		CapturedAt: time.Now().UTC(),
 	}
-	p := r.prepare(ctx, capture)
+	ps := r.prepareAll(ctx, capture, importSearch())
 
-	inj := injectedFrame{p: p, reply: make(chan ingestReply, 1)}
+	inj := injectedFrame{ps: ps, reply: make(chan ingestReply, 1)}
 	select {
 	case r.injected <- inj:
 	case <-ctx.Done():
-		return IngestResult{}, ctx.Err()
+		return nil, ctx.Err()
 	case <-r.runDone:
 		// running was observed true a moment ago, but Run has since torn down and nothing will
 		// ever read this off the channel. Reported as ErrNotRunning rather than left to block:
 		// an HTTP handler waiting on this is a request an operator is staring at, and a caller
 		// making several of these calls needs to be able to tell this apart from a per-frame
 		// failure the same way it would the check above.
-		return IngestResult{}, fmt.Errorf("%w: stopped while the frame was being submitted", ErrNotRunning)
+		return nil, fmt.Errorf("%w: stopped while the frame was being submitted", ErrNotRunning)
 	}
 
 	select {
 	case reply := <-inj.reply:
-		return reply.result, reply.err
+		return reply.results, reply.err
 	case <-ctx.Done():
-		return IngestResult{}, ctx.Err()
+		return nil, ctx.Err()
 	case <-r.runDone:
 		// The frame was handed off, but Run stopped before the applier could get to it or before
 		// it could send the reply back — the same race, caught at the other end of the round trip.
-		return IngestResult{}, fmt.Errorf("%w: stopped before the frame was applied", ErrNotRunning)
+		return nil, fmt.Errorf("%w: stopped before the frame was applied", ErrNotRunning)
 	}
 }
 

@@ -220,13 +220,39 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			entry, ingestErr := s.ingestOne(r.Context(), f.Name, img, data)
-			entries = append(entries, entry)
+			rows, ingestErr := s.ingestImage(r.Context(), f.Name, img, data)
+			entries = append(entries, rows...)
 			if errors.Is(ingestErr, pipeline.ErrNotRunning) {
 				// Not a property of this one frame: every remaining entry would fail the same
 				// way, for the same reason, so grinding through the rest would only turn one
 				// outage into hundreds of identical, misleading skips. Abort outright rather than
 				// answer 200 having "skipped" an archive that never had a chance.
+				s.fail(w, http.StatusServiceUnavailable,
+					"this receiver stopped accepting frames partway through the import", ingestErr)
+				return
+			}
+		}
+
+	case looksLikePDF(body):
+		// A printable export, or a scanner's output. Every page of those is one frame, so the images are
+		// pulled straight out rather than the pages rasterised — see pdfimages.go for why that is the
+		// design rather than a shortcut.
+		images, err := imagesFromPDF(body)
+		if err != nil {
+			s.fail(w, http.StatusUnsupportedMediaType,
+				"no frames could be read from this PDF. Pages drawn as vector art, or images stored in a "+
+					"filter this receiver does not read, cannot be recovered — export the sheets as images "+
+					"instead", err)
+			return
+		}
+		for i, img := range images {
+			if r.Context().Err() != nil {
+				break
+			}
+			name := fmt.Sprintf("page-%03d", i+1)
+			rows, ingestErr := s.ingestImage(r.Context(), name, img, nil)
+			entries = append(entries, rows...)
+			if errors.Is(ingestErr, pipeline.ErrNotRunning) {
 				s.fail(w, http.StatusServiceUnavailable,
 					"this receiver stopped accepting frames partway through the import", ingestErr)
 				return
@@ -260,9 +286,20 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 				"the file is not a zip or an image this receiver can read (PNG, JPEG or GIF)", err)
 			return
 		}
-		for i, part := range splitComposite(img, s.probe) {
-			entry, ingestErr := s.ingestOne(r.Context(), fmt.Sprintf("%s#%d", header.Filename, i), part, nil)
-			entries = append(entries, entry)
+		// Numbered only when the picture actually was a composite of several.
+		//
+		// The suffix says "one of several", and two layers can now say it: a stacked image splits into
+		// parts, and a part may itself hold several frames once a sheet can be printed more than one-up.
+		// Both adding one unconditionally produced sheet.png#0#0 for a picture that was neither stacked nor
+		// multi-frame — a name that reads as the first of the first of something, describing nothing.
+		parts := splitComposite(img, s.probe)
+		for i, part := range parts {
+			name := header.Filename
+			if len(parts) > 1 {
+				name = fmt.Sprintf("%s#%d", header.Filename, i)
+			}
+			rows, ingestErr := s.ingestImage(r.Context(), name, part, nil)
+			entries = append(entries, rows...)
 			if errors.Is(ingestErr, pipeline.ErrNotRunning) {
 				s.fail(w, http.StatusServiceUnavailable,
 					"this receiver stopped accepting frames partway through the import", ingestErr)
@@ -313,17 +350,38 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 	s.respond(w, http.StatusOK, response)
 }
 
-// ingestOne runs one image through the pipeline and reports what happened, whether that is the
+// ingestImage runs one image through the pipeline and reports what happened, whether that is the
 // ingest's own verdict or the reason it could not be attempted at all. The error is returned
-// alongside the entry — not folded away into the entry's Skipped string — so the caller can
-// tell a systemic failure (errors.Is(err, pipeline.ErrNotRunning)) from an ordinary per-frame
-// one and decide whether to keep going.
-func (s *Server) ingestOne(ctx context.Context, name string, img image.Image, raw []byte) (importEntry, error) {
-	result, err := s.ingest(ctx, img, raw)
+// alongside the entries — not folded away into a Skipped string — so the caller can tell a
+// systemic failure (errors.Is(err, pipeline.ErrNotRunning)) from an ordinary per-frame one and
+// decide whether to keep going.
+//
+// A row per frame the image held, because one image is not one frame. A photographed sheet printed
+// several-up carries several, and an operator looking at the result needs to see each one's verdict
+// — a single row saying "decoded" for a sheet where three of four frames failed is worse than no
+// row at all, because it reads as success.
+func (s *Server) ingestImage(ctx context.Context, name string, img image.Image, raw []byte) ([]importEntry, error) {
+	results, err := s.ingest(ctx, img, raw)
 	if err != nil {
-		return importEntry{Name: name, Skipped: err.Error()}, err
+		return []importEntry{{Name: name, Skipped: err.Error()}}, err
 	}
-	return importEntry{Name: name, IngestResult: result}, nil
+	if len(results) == 0 {
+		// Ingest found nothing to read. Reported as a skipped row rather than silence: an upload
+		// that produced no rows at all looks to a client like an upload that never happened.
+		return []importEntry{{Name: name, Skipped: "no frame was found in the image"}}, nil
+	}
+
+	// Named plainly when the image held one frame, and numbered only when it held several. The
+	// suffix is there to tell four rows of one sheet apart; putting it on every ordinary
+	// single-frame archive entry would rename every row in the common case to solve the rare one.
+	if len(results) == 1 {
+		return []importEntry{{Name: name, IngestResult: results[0]}}, nil
+	}
+	out := make([]importEntry, 0, len(results))
+	for i, result := range results {
+		out = append(out, importEntry{Name: fmt.Sprintf("%s#%d", name, i), IngestResult: result})
+	}
+	return out, nil
 }
 
 // splitComposite returns the frames inside one uploaded image.

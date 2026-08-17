@@ -121,7 +121,9 @@ export function Scan() {
         Photograph a printed frame, or upload one you already have. Each sheet goes through the same
         decoding a camera's frame does — the same lane search, the same recovery, the same
         acknowledgement — so anything that reads here would have read off a display. A whole archive
-        works too: drop the zip from a transfer's <strong>Download frames</strong>.
+        works too: drop the zip from a transfer's <strong>Download frames</strong>, or the PDF from its{' '}
+        <strong>Print as PDF</strong> — the frames are read straight out of it, so a sheet never has to be
+        printed at all to check that it would decode.
       </Alert>
 
       <Paper
@@ -171,7 +173,7 @@ export function Scan() {
           </Stack>
 
           <Typography variant="caption" color="text.secondary">
-            PNG, JPEG or GIF — a photograph from a phone is JPEG — or a zip of frames.
+            PNG, JPEG or GIF — a photograph from a phone is JPEG — or a PDF, or a zip of frames.
           </Typography>
         </Stack>
 
@@ -194,7 +196,7 @@ export function Scan() {
           hidden
           multiple
           type="file"
-          accept="image/*,.zip,application/zip"
+          accept="image/*,.pdf,application/pdf,.zip,application/zip"
           onChange={(e) => {
             accept(e.target.files)
             e.target.value = ''

@@ -33,6 +33,45 @@ import (
 // out, so a legitimate display is never truncated.
 const maxLanesPerCapture = 16
 
+// laneSearch is how many frames to look for in one capture, and whether what is found describes a
+// display someone is aiming a camera at.
+//
+// Two callers want different answers to both questions, and collapsing them into one number was not
+// possible without one of them lying. See cameraSearch and importSearch.
+type laneSearch struct {
+	// max bounds the search. Zero or one means the ordinary single-frame path.
+	max int
+
+	// aiming reports whether this capture is a camera's view of a display, and so whether the count
+	// of frames found is evidence about that display. Only a camera's captures are: see importSearch.
+	aiming bool
+}
+
+// cameraSearch is what the capture loop looks for: as many frames as the display is configured to
+// tile, and every count is evidence for the aiming display.
+func cameraSearch(lanes int) laneSearch {
+	return laneSearch{max: min(lanes, maxLanesPerCapture), aiming: true}
+}
+
+// importSearch is what an uploaded image gets: everything in it, and no opinion about aiming.
+//
+// As many as the protocol can tile, because nobody is there to say how many are in the picture. A
+// printed sheet holds whatever the operator printed on it, an archive's frames arrive one to a file,
+// and the receiver's own lane setting describes a display this upload has nothing to do with —
+// reading it here would make a four-lane deployment split sheets a one-lane deployment could not.
+// LocateAll stops when it stops finding frames, so asking for sixteen and getting one costs a single
+// extra fiducial search.
+//
+// Not aiming, and that distinction is the reason this is a type rather than an int. The expectation
+// in laneexpect.go is a four-second high-water mark of frames-per-photograph, and the aiming display
+// tells an operator who falls short of it to move back until the missing frames are in shot. An
+// import that found four frames on a sheet would raise that mark for anyone pointing a camera at a
+// two-lane display in the next four seconds, and send them backing away from a display that was
+// working — which is the exact complaint laneexpect.go was written to fix.
+func importSearch() laneSearch {
+	return laneSearch{max: maxLanesPerCapture, aiming: false}
+}
+
 // prepareAll reads every frame in one capture.
 //
 // The first is prepared by the ordinary path, which stores the image, records the aiming figures and
@@ -41,7 +80,7 @@ const maxLanesPerCapture = 16
 //
 // A capture holding one frame costs one extra fiducial search over the old path and behaves
 // identically otherwise, so this is not a tiled-only path with a single-frame path beside it.
-func (r *Receiver) prepareAll(ctx context.Context, capture Capture) []prepared {
+func (r *Receiver) prepareAll(ctx context.Context, capture Capture, search laneSearch) []prepared {
 	first := r.prepare(ctx, capture)
 
 	// Nothing further to look for if the capture could not even be stored: that is a fault in this
@@ -51,18 +90,21 @@ func (r *Receiver) prepareAll(ctx context.Context, capture Capture) []prepared {
 	}
 
 	cfg := r.cfg.Current()
-	if cfg.Capture.Lanes <= 1 {
+	if search.max <= 1 {
 		return []prepared{first}
 	}
 
 	opts := r.locateOptions(cfg)
-	found := protocol.LocateAll(capture.Image, opts, min(cfg.Capture.Lanes, maxLanesPerCapture))
+	found := protocol.LocateAll(capture.Image, opts, search.max)
 
 	// Recorded for every photograph, including the ones that hold a single frame or none. This is what
 	// the aiming display compares against, and it is only honest if the lean captures count too: a
 	// sender switched down to one lane has to be able to bring the expectation down with it, which it
 	// can only do by being seen. See laneexpect.go.
-	expected := r.lanes.observe(len(found))
+	expected := len(found)
+	if search.aiming {
+		expected = r.lanes.observe(len(found))
+	}
 
 	if len(found) <= 1 {
 		// One frame or none. The ordinary result already describes it, and a second pass that found

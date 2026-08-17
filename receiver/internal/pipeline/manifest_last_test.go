@@ -30,19 +30,17 @@ func TestChunksBeforeTheManifestStillMerges(t *testing.T) {
 
 	// The data frame first. Nothing can merge yet: the receiver has the bytes but does not know the filename,
 	// the size, or the hash to check them against.
-	dataResult, err := h.r.Ingest(ctx, tx.dataImage, nil)
-	require.NoError(t, err)
+	dataResult := ingestLoneFrame(t, h, tx.dataImage)
 	require.True(t, dataResult.Decoded)
 	require.False(t, dataResult.IsManifest)
 
 	time.Sleep(50 * time.Millisecond)
-	_, err = h.st.Merged.Get(ctx, tx.transmissionID)
+	_, err := h.st.Merged.Get(ctx, tx.transmissionID)
 	require.Error(t, err, "nothing should merge before the manifest describes it")
 
 	// Now the manifest, which completes the picture. Nothing else will arrive: this is the last frame either
 	// side has to offer, so if the manifest does not trigger the merge, nothing ever will.
-	manifestResult, err := h.r.Ingest(ctx, tx.manifestImage, nil)
-	require.NoError(t, err)
+	manifestResult := ingestLoneFrame(t, h, tx.manifestImage)
 	require.True(t, manifestResult.Decoded)
 	require.True(t, manifestResult.IsManifest)
 

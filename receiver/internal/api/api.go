@@ -85,7 +85,10 @@ type Server struct {
 	// ingest runs one uploaded frame image through the live pipeline: store, decode, apply — the same
 	// path a captured frame takes, so acknowledgements, merge, and delivery all fire as normal. Nil when
 	// this build or deployment cannot take imports.
-	ingest func(context.Context, image.Image, []byte) (pipeline.IngestResult, error)
+	//
+	// One result per frame the image held. Usually one; a photograph of a sheet printed several-up
+	// carries several, the same way a photograph of a tiled display does.
+	ingest func(context.Context, image.Image, []byte) ([]pipeline.IngestResult, error)
 
 	// probe reports whether an image decodes as a frame, without storing anything. The import handler
 	// uses it to tell a composite of two stacked frames from a single ordinary one — deciding that is a
@@ -114,7 +117,7 @@ type Options struct {
 	Behind  func() int64
 	Switch  func(config.Capture) error
 	Push    func(image.Image, []byte) (bool, error)
-	Ingest  func(context.Context, image.Image, []byte) (pipeline.IngestResult, error)
+	Ingest  func(context.Context, image.Image, []byte) ([]pipeline.IngestResult, error)
 	Probe   func(image.Image) bool
 	// BrowserActive reports whether the browser capture source has taken a frame recently. See the field
 	// of the same purpose on Server.
