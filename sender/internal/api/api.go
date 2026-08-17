@@ -144,6 +144,9 @@ func (s *Server) Routes() http.Handler {
 	// The certificates this side identifies itself with, and the one it trusts. See certificates.go.
 	mux.HandleFunc("GET /api/v1/certificates", s.getCertificates)
 	mux.HandleFunc("POST /api/v1/certificates/generate", s.generateCertificate)
+	// The public half as a file, to carry to the other side. There is no equivalent for the private
+	// key, deliberately — see the handler.
+	mux.HandleFunc("GET /api/v1/certificates/local.pem", s.downloadLocalCertificate)
 	mux.HandleFunc("PUT /api/v1/certificates/peer", s.installPeerCertificate)
 	mux.HandleFunc("DELETE /api/v1/certificates/peer", s.deletePeerCertificate)
 
@@ -225,6 +228,25 @@ type TransferRequest struct {
 	// better served by a warning they can pass than by a refusal they cannot. The check still runs and
 	// still says what it thinks; this decides who gets the last word.
 	SendAnyway bool `json:"send_anyway,omitempty"`
+
+	// CaptureShortSidePixels is the short side, in pixels, of the picture that will actually read this
+	// transfer — when that is not the camera the deployment is configured for. Zero means the configured
+	// camera, which is the ordinary case.
+	//
+	// It exists because the guard above asks the right question against the wrong channel for anything
+	// printed. The configured resolution describes a camera pointed at a display, and a transfer bound for
+	// paper is read by whatever photographs or scans the sheet — a phone at 3024 pixels across, a flatbed
+	// at 4360. Against the 1080 the deployment is set to, a 384-cell grid is hopeless and refused, while
+	// on a 600dpi scan of the same sheet it is comfortable. The refusal is arithmetically correct and about
+	// a camera nobody in that workflow is using.
+	//
+	// The honest fix is to say which capture, not to switch the guard off. SendAnyway already exists for
+	// "I know better", and reaching for it here would suppress the check for a geometry that genuinely is
+	// hopeless as well as for one that is fine — the operator loses the warning in both directions. Given
+	// the real number, the guard still refuses what that capture cannot read, which is the half worth
+	// keeping: printing four hundred sheets nothing can decode is a far more expensive mistake than
+	// displaying frames nothing can decode.
+	CaptureShortSidePixels int `json:"capture_short_side_pixels,omitempty"`
 
 	// CellPixels overrides the configured cell size for this transfer alone. Zero means
 	// the configured default. Unlike quiet zone — a property of the panel and camera —
@@ -438,6 +460,9 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 		GridHeight:       formInt(r, "grid_height", cfg.Optical.GridHeight),
 		CellPixels:       formInt(r, "cell_pixels", cfg.Optical.CellPixels),
 		SendAnyway:       formBool(r, "send_anyway", false),
+		// Zero means "not declared", which is what an ordinary upload sends and what makes the guard fall
+		// back to the configured camera.
+		CaptureShortSidePixels: formInt(r, "capture_short_side_pixels", 0),
 	}
 
 	if request.Encoder == "" {
@@ -624,6 +649,19 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 // exercised without going through the multipart form, which would test the parser instead.
 func validateGeometryForCamera(request TransferRequest, cfg config.Config, depth uint8) error {
 	short, long := cfg.Optical.CameraShortSidePixels, cfg.Optical.CameraLongSidePixels
+
+	// A capture the caller declared wins over the one the deployment is configured for, because it
+	// describes the channel this transfer is actually going down. See TransferRequest for why printing
+	// needs this and why it is a resolution rather than another way of spelling send_anyway.
+	//
+	// Only the short side is taken, since that is the one the arithmetic uses: a square frame is bounded
+	// by the short side of the picture however the camera is held. The long side is set equal to it rather
+	// than kept from configuration, which would pair one channel's short side with another's long — a
+	// combination describing no real capture at all.
+	if request.CaptureShortSidePixels > 0 {
+		short, long = request.CaptureShortSidePixels, request.CaptureShortSidePixels
+	}
+
 	if long < short {
 		// Given in either order, or only one given: a square frame is bounded by the smaller, and the
 		// larger is only used to say whether turning the camera would help.

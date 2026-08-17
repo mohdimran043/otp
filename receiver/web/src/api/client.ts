@@ -444,6 +444,15 @@ export const api = {
     ),
   certificates: () => request<CertificateStatus>('/api/v1/certificates'),
 
+  /**
+   * localCertificateUrl downloads this side's public certificate as a file.
+   *
+   * An anchor rather than a fetch, so it lands in the browser's downloads where the operator can carry it
+   * to the other machine. There is deliberately no equivalent for the private key: it has no endpoint at
+   * all, and a key that can be downloaded is a key that will be.
+   */
+  localCertificateUrl: () => '/api/v1/certificates/local.pem',
+
   generateCertificate: (name?: string) =>
     request<CertificateStatus>('/api/v1/certificates/generate', {
       method: 'POST',

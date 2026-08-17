@@ -167,3 +167,35 @@ func (s *Server) certificateStatus(r *http.Request) certificateStatus {
 	}
 	return out
 }
+
+// downloadLocalCertificate serves this side's public certificate as a file.
+//
+// A file rather than text to select and copy, because that is how it travels: onto a USB stick, into an
+// email, across to the other machine. Copying from a textarea is fine until a line wraps or a stray space
+// is picked up, and a PEM that fails to parse at the far end is a confusing way to find that out.
+//
+// Only the certificate. The private key has no endpoint, appears in no response, and cannot be downloaded
+// by any route — it is read out of the database by exactly one caller, to seal with, and never leaves this
+// process. That is not an omission to be filled in later; a private key that can be downloaded is a private
+// key that will be, and the whole point of this scheme is that only public halves cross the gap.
+func (s *Server) downloadLocalCertificate(w http.ResponseWriter, r *http.Request) {
+	local, err := s.store.Certificates.Get(r.Context(), store.RoleLocal)
+	if err != nil {
+		s.fail(w, http.StatusNotFound,
+			"no certificate has been generated on this side yet", err)
+		return
+	}
+
+	name := local.Subject
+	if name == "" {
+		name = defaultCertificateName
+	}
+
+	h := w.Header()
+	h.Set("Content-Type", "application/x-pem-file")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Disposition", `attachment; filename="`+name+`-public.pem"`)
+	if _, err := w.Write([]byte(local.CertificatePEM)); err != nil {
+		s.log.Warn("could not write the certificate", zap.Error(err))
+	}
+}

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import {
   Alert,
   Box,
@@ -11,6 +11,8 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material'
+import DownloadIcon from '@mui/icons-material/Download'
+import UploadFileIcon from '@mui/icons-material/UploadFile'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, type CertificateView } from '../api/client'
@@ -96,6 +98,7 @@ export function Certificates() {
   const queryClient = useQueryClient()
   const [pasted, setPasted] = useState('')
   const [copied, setCopied] = useState(false)
+  const peerFile = useRef<HTMLInputElement>(null)
 
   const status = useQuery({ queryKey: ['certificates'], queryFn: api.certificates })
   const invalidate = () => {
@@ -147,7 +150,7 @@ export function Certificates() {
       <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap>
         <CertificateCard
           title={`This ${THIS_SIDE}'s certificate`}
-          blurb={`Generated here. The private half never leaves this machine; the certificate below is public and is what the ${OTHER_SIDE} needs.`}
+          blurb={`Generated here. Download it and install it on the ${OTHER_SIDE}. Only the public half is downloadable — the private key has no endpoint at all and never leaves this machine.`}
           cert={local}
           action={
             <Stack direction="row" spacing={1}>
@@ -161,9 +164,23 @@ export function Certificates() {
                 {local ? 'Regenerate' : 'Generate certificate'}
               </Button>
               {local && (
-                <Button size="small" variant="outlined" onClick={copyLocal}>
-                  {copied ? 'Copied' : 'Copy PEM'}
-                </Button>
+                <>
+                  {/* An anchor, so it lands in the browser's downloads and can be carried to the other
+                      machine on a stick. There is no button for the private key and never will be — it has
+                      no endpoint, appears in no response, and never leaves the server. */}
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    component="a"
+                    href={api.localCertificateUrl()}
+                    startIcon={<DownloadIcon />}
+                  >
+                    Download
+                  </Button>
+                  <Button size="small" variant="outlined" onClick={copyLocal}>
+                    {copied ? 'Copied' : 'Copy PEM'}
+                  </Button>
+                </>
               )}
             </Stack>
           }
@@ -171,7 +188,7 @@ export function Certificates() {
 
         <CertificateCard
           title={`The ${OTHER_SIDE}'s certificate`}
-          blurb={`Paste what the ${OTHER_SIDE} shows under its own certificate. It is public, so it can travel by any means at all — email, a USB stick, read aloud.`}
+          blurb={`Upload or paste the ${OTHER_SIDE}'s public certificate. It is public, so it can travel by any means at all — email, a USB stick, read aloud.`}
           cert={peer}
           action={
             peer && (
@@ -192,7 +209,7 @@ export function Certificates() {
       {local && (
         <Paper variant="outlined" sx={{ p: 2 }}>
           <Typography variant="subtitle2" sx={{ mb: 1 }}>
-            This {THIS_SIDE}'s certificate, to install on the {OTHER_SIDE}
+            This {THIS_SIDE}'s public certificate, to install on the {OTHER_SIDE}
           </Typography>
           <TextField
             fullWidth
@@ -207,7 +224,7 @@ export function Certificates() {
 
       <Paper variant="outlined" sx={{ p: 2 }}>
         <Typography variant="subtitle2" sx={{ mb: 1 }}>
-          Install the {OTHER_SIDE}'s certificate
+          Install the {OTHER_SIDE}'s public certificate
         </Typography>
         <TextField
           fullWidth
@@ -219,7 +236,7 @@ export function Certificates() {
           onChange={(event) => setPasted(event.target.value)}
           slotProps={{ input: { sx: { fontFamily: 'monospace', fontSize: '0.7rem' } } }}
         />
-        <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+        <Stack direction="row" spacing={1} sx={{ mt: 1 }} flexWrap="wrap" useFlexGap>
           <Button
             variant="contained"
             size="small"
@@ -228,6 +245,36 @@ export function Certificates() {
           >
             {peer ? 'Replace' : 'Install'}
           </Button>
+
+          {/* Uploading a file and pasting text install the same certificate the same way. The file is
+              read here rather than posted as multipart, so both paths reach one endpoint and there is
+              only one place a malformed PEM can be rejected. */}
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<UploadFileIcon />}
+            onClick={() => peerFile.current?.click()}
+            disabled={install.isPending}
+          >
+            Upload a .pem file
+          </Button>
+          <input
+            ref={peerFile}
+            hidden
+            type="file"
+            accept=".pem,.crt,.cer,application/x-pem-file,application/x-x509-ca-cert,text/plain"
+            onChange={async (event) => {
+              const file = event.target.files?.[0]
+              event.target.value = ''
+              if (!file) return
+              const text = await file.text()
+              // Shown as well as installed, so the operator can see what arrived and compare its
+              // fingerprint against the other screen rather than trusting the filename.
+              setPasted(text.trim())
+              install.mutate(text.trim())
+            }}
+          />
+
           <Button size="small" onClick={() => setPasted('')} disabled={pasted === ''}>
             Clear
           </Button>

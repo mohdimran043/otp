@@ -192,6 +192,9 @@ func (s *Server) Routes() http.Handler {
 	// The certificates this side identifies itself with, and the one it trusts. See certificates.go.
 	mux.HandleFunc("GET /api/v1/certificates", s.getCertificates)
 	mux.HandleFunc("POST /api/v1/certificates/generate", s.generateCertificate)
+	// The public half as a file, to carry to the other side. There is no equivalent for the private
+	// key, deliberately — see the handler.
+	mux.HandleFunc("GET /api/v1/certificates/local.pem", s.downloadLocalCertificate)
 	mux.HandleFunc("PUT /api/v1/certificates/peer", s.installPeerCertificate)
 	mux.HandleFunc("DELETE /api/v1/certificates/peer", s.deletePeerCertificate)
 
