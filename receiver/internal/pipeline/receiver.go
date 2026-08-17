@@ -991,6 +991,26 @@ func (r *Receiver) handleManifest(ctx context.Context, frame *protocol.Frame) er
 	return r.maybeComplete(ctx, frame.Header.TransmissionID)
 }
 
+// openFrame returns a frame's payload, whichever way it was encrypted.
+//
+// Certificate frames are opened separately because they are opened by a different thing. The other modes
+// try every key the operator loaded, since a receiver cannot know which transfer is on the display and an
+// AEAD makes a wrong key fail rather than yield garbage. A certificate frame has no key to try: it carries
+// its own, sealed to this receiver's certificate, and either this receiver is the one it was sealed to or
+// it is not.
+func (r *Receiver) openFrame(ctx context.Context, frame *protocol.Frame) ([]byte, error) {
+	if frame != nil && frame.Header.EncryptionID == protocol.EncryptionCertificate &&
+		frame.Header.Flags.Has(protocol.FlagEncrypted) {
+		keys, err := r.store.Certificates.Keys(ctx)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"certificate encryption needs this receiver's keypair and the sender's certificate: %w", err)
+		}
+		return protocol.OpenCertificateFrame(keys, frame)
+	}
+	return protocol.OpenFrame(r.keyring(ctx), frame)
+}
+
 // keyring is every key this receiver holds: the configured one, then the loaded ones.
 func (r *Receiver) keyring(ctx context.Context) [][]byte {
 	if time.Since(r.keysFetched) < 3*time.Second {
@@ -1022,7 +1042,7 @@ func (r *Receiver) handleChunk(ctx context.Context, frame *protocol.Frame, error
 	chunkNumber := int(frame.Header.ChunkNumber)
 	isParity := frame.Header.Flags.Has(protocol.FlagParity)
 
-	payload, err := protocol.OpenFrame(r.keyring(ctx), frame)
+	payload, err := r.openFrame(ctx, frame)
 	if err != nil {
 		// A payload that will not decrypt is not a channel problem — the frame's own checksums
 		// passed — so it is reported rather than acknowledged, and the sender will try again.

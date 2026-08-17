@@ -62,6 +62,19 @@ func New(st *store.Store, js *jobs.Store, objects objectstore.Store, cfg *config
 	return &Pipeline{store: st, jobs: js, objects: objects, cfg: cfg, log: log.Named("pipeline")}
 }
 
+// certificates is this sender's keypair and the receiver's public certificate.
+//
+// Read per render rather than cached, because an operator replacing a certificate mid-run should have the
+// next transfer use it — and the read is one indexed row against a pool that is already open.
+func (p *Pipeline) certificates(ctx context.Context) (protocol.CertificateKeys, error) {
+	keys, err := p.store.Certificates.Keys(ctx)
+	if err != nil {
+		return protocol.CertificateKeys{}, fmt.Errorf(
+			"pipeline: certificate encryption needs this side's keypair and the receiver's certificate: %w", err)
+	}
+	return keys, nil
+}
+
 // Register adds every stage to an engine.
 func (p *Pipeline) Register(engine *jobs.Engine) {
 	engine.Register(jobs.HandlerFunc{JobType: TypeCompress, Fn: p.compress})
@@ -224,6 +237,13 @@ func chunkSizeFor(tx store.Transmission) (int, protocol.Layout, encoding.Encoder
 		// Encryption adds a nonce and a tag to every payload, and the sum still has to fit in
 		// one frame — so the chunk has to be smaller by exactly that much.
 		size -= protocol.EncryptionOverhead
+	}
+	if tx.EncryptionID == int(protocol.EncryptionCertificate) {
+		// And this mode carries the per-transfer key in front of the payload, sealed to the receiver's
+		// certificate, so every frame is smaller again by a sealed key. That is the price of a frame that
+		// opens on its own: a receiver joining halfway through has everything it needs in the frame it
+		// caught. See protocol/certcrypt.go.
+		size -= protocol.CertificateOverhead
 	}
 	if size <= 0 {
 		return 0, protocol.Layout{}, nil, fmt.Errorf(

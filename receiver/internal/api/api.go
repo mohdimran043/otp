@@ -186,6 +186,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/config", s.getConfig)
 
 	// The decryption keyring: keys go in and fingerprints come out, never the key itself.
+	// The certificates this side identifies itself with, and the one it trusts. See certificates.go.
+	mux.HandleFunc("GET /api/v1/certificates", s.getCertificates)
+	mux.HandleFunc("POST /api/v1/certificates/generate", s.generateCertificate)
+	mux.HandleFunc("PUT /api/v1/certificates/peer", s.installPeerCertificate)
+	mux.HandleFunc("DELETE /api/v1/certificates/peer", s.deletePeerCertificate)
+
 	mux.HandleFunc("GET /api/v1/keys", s.listKeys)
 	mux.HandleFunc("POST /api/v1/keys", s.addKey)
 	mux.HandleFunc("DELETE /api/v1/keys/{id}", s.deleteKey)

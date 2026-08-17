@@ -69,6 +69,10 @@ func EncryptionByName(name string) (uint8, error) {
 		return EncryptionAES256GCM, nil
 	case "chacha20poly1305":
 		return EncryptionChaCha20Poly1305, nil
+	case "certificate", "cert":
+		// The key is not carried here at all: it is generated per transfer and sealed to the receiver's
+		// certificate. See certcrypt.go.
+		return EncryptionCertificate, nil
 	}
 	return 0, fmt.Errorf("%w: %q is not one of %s", ErrEncryptionID, name, strings.Join(EncryptionNames(), ", "))
 }
@@ -80,12 +84,16 @@ func EncryptionName(id uint8) string {
 		return "aes256gcm"
 	case EncryptionChaCha20Poly1305:
 		return "chacha20poly1305"
+	case EncryptionCertificate:
+		return "certificate"
 	}
 	return "none"
 }
 
 // EncryptionNames lists the choices a sender can offer.
-func EncryptionNames() []string { return []string{"none", "aes256gcm", "chacha20poly1305"} }
+func EncryptionNames() []string {
+	return []string{"none", "aes256gcm", "chacha20poly1305", "certificate"}
+}
 
 // aeadFor builds the AEAD a frame declares. Id zero is legacy AES-256-GCM (see the
 // constants). Both ciphers share the 32-byte key, 12-byte nonce and 16-byte tag, which

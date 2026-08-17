@@ -35,6 +35,7 @@ type Store struct {
 	Callbacks     *Callbacks
 	Stats         *Stats
 	SenderKeys    *SenderKeys
+	Certificates  *Certificates
 
 	// DisplaySettings is what an operator changed through the UI, kept so it survives a restart.
 	DisplaySettings *DisplaySettings
@@ -52,6 +53,7 @@ func New(pool *db.Pool) *Store {
 		Callbacks:     &Callbacks{pool: pool},
 		Stats:         &Stats{pool: pool},
 		SenderKeys:    &SenderKeys{pool: pool},
+		Certificates:  &Certificates{pool: pool},
 
 		DisplaySettings: &DisplaySettings{pool: pool},
 	}

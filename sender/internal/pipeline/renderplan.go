@@ -183,6 +183,23 @@ func (p *Pipeline) frameFor(ctx context.Context, tx store.Transmission, manifest
 	header.FECID = manifest.FEC.ID
 	header.ChunkNumber = uint32(planned.chunk.ESI)
 
+	// Certificate mode seals the transfer's own random key to the receiver rather than assuming both sides
+	// already share one. The key itself is in tx.EncryptionKey exactly as it is for the other modes — what
+	// differs is that nobody carried it across the gap, and that a sealed copy rides in every frame.
+	if tx.EncryptionID == int(protocol.EncryptionCertificate) {
+		keys, err := p.certificates(ctx)
+		if err != nil {
+			// Permanent: a transfer asking for certificates that are not installed will not start working
+			// on a retry, and failing loudly here is what tells the operator to install them.
+			return nil, jobs.Permanent(err)
+		}
+		frame, err := protocol.NewCertificateFrame(keys, tx.EncryptionKey, header, payload)
+		if err != nil {
+			return nil, jobs.Permanent(err)
+		}
+		return frame, nil
+	}
+
 	if tx.EncryptionID != int(protocol.EncryptionNone) {
 		frame, err := protocol.NewEncryptedFrame(tx.EncryptionKey, uint8(tx.EncryptionID), header, payload)
 		if err != nil {

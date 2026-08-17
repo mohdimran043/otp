@@ -31,6 +31,7 @@ type Store struct {
 	Callbacks     *Callbacks
 	Stats         *Stats
 	DecoderKeys   *DecoderKeys
+	Certificates  *Certificates
 	Transmissions *Transmissions
 }
 
@@ -47,6 +48,7 @@ func New(pool *db.Pool) *Store {
 		Callbacks:     &Callbacks{pool: pool},
 		Stats:         &Stats{pool: pool},
 		DecoderKeys:   &DecoderKeys{pool: pool},
+		Certificates:  &Certificates{pool: pool},
 		Transmissions: &Transmissions{pool: pool},
 	}
 }

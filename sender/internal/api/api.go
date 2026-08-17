@@ -141,6 +141,12 @@ func (s *Server) Routes() http.Handler {
 	// Saved encryption keys: keys go in and fingerprints come out, never the key itself. A
 	// transfer picks one of these by id (encryption_key_id) as an alternative to pasting its
 	// hex into every request.
+	// The certificates this side identifies itself with, and the one it trusts. See certificates.go.
+	mux.HandleFunc("GET /api/v1/certificates", s.getCertificates)
+	mux.HandleFunc("POST /api/v1/certificates/generate", s.generateCertificate)
+	mux.HandleFunc("PUT /api/v1/certificates/peer", s.installPeerCertificate)
+	mux.HandleFunc("DELETE /api/v1/certificates/peer", s.deletePeerCertificate)
+
 	mux.HandleFunc("GET /api/v1/keys", s.listKeys)
 	mux.HandleFunc("POST /api/v1/keys", s.addKey)
 	mux.HandleFunc("DELETE /api/v1/keys/{id}", s.deleteKey)
@@ -522,6 +528,32 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 		if id == protocol.EncryptionNone && hasKey {
 			return request, fmt.Errorf("encryption is \"none\" but a key was supplied; refusing to guess which was meant")
 		}
+		// Certificate mode supplies its own key, and refuses one.
+		//
+		// The key is generated here, per transfer, and sealed to the receiver's certificate in every frame —
+		// so there is nothing for an operator to carry across the gap and nothing for them to choose. A
+		// caller passing a key has misunderstood which mode they asked for, and quietly ignoring it would
+		// leave them believing a key they chose was in use.
+		if id == protocol.EncryptionCertificate {
+			if hasKey {
+				return request, fmt.Errorf(
+					"encryption %q generates its own key and seals it to the receiver's certificate; "+
+						"remove the key you supplied", request.Encryption)
+			}
+			if _, err := s.store.Certificates.Keys(r.Context()); err != nil {
+				return request, fmt.Errorf(
+					"encryption %q needs this sender's keypair and the receiver's certificate installed; "+
+						"see the Certificates tab in Settings", request.Encryption)
+			}
+			key, err := protocol.NewRandomKey()
+			if err != nil {
+				return request, err
+			}
+			request.EncryptionKey = key
+			request.EncryptionID = id
+			break
+		}
+
 		if id != protocol.EncryptionNone {
 			switch {
 			case keyHex != "" && hasKeyID:
