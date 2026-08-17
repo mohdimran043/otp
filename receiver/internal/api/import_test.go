@@ -11,6 +11,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"mime/multipart"
@@ -144,6 +145,17 @@ func solidPNG(t *testing.T, width, height int, c color.RGBA) []byte {
 	return buf.Bytes()
 }
 
+// encodeJPEG writes an image the way a camera would, which is the format a photographed sheet
+// arrives in. Quality 92 rather than the package default: a frame photographed for import is
+// evidence, and the tests should not be the only place it is saved at a quality no operator
+// would choose.
+func encodeJPEG(t *testing.T, img image.Image) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	require.NoError(t, jpeg.Encode(&buf, img, &jpeg.Options{Quality: 92}))
+	return buf.Bytes()
+}
+
 // realFramePair renders two real, independently decodable frames at the same layout — a
 // manifest and a data frame, exactly as the sender would, and exactly as ingest_test.go builds
 // them for the pipeline package's own round trip. Same layout means same pixel dimensions,
@@ -234,6 +246,52 @@ func TestImportZipOfFramesIngestsEachPNGAndSkipsTheRest(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	require.Equal(t, 2, out.Ingested)
 	require.Equal(t, 1, out.Skipped)
+}
+
+// TestImportAcceptsAPhotographOfAPrintedFrame is the printed-sheet path: an operator prints a
+// transfer's frames, photographs a sheet, and uploads the picture. Every phone writes JPEG, so a
+// PNG-only importer refuses the one upload this endpoint most needs to accept — and refuses it at
+// the media-type check, before the frame is ever looked at, so the operator is told their perfectly
+// good photograph is "neither a zip nor a PNG".
+func TestImportAcceptsAPhotographOfAPrintedFrame(t *testing.T) {
+	fake := &fakeIngester{}
+	handler := newImportServer(t, fake)
+
+	_, dataImg := realFramePair(t)
+
+	rec := postImportFile(t, handler, "IMG_0431.JPG", encodeJPEG(t, dataImg))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 1, fake.count(), "a photographed frame must reach the pipeline")
+}
+
+// TestImportZipOfPhotographs covers the same thing in bulk: an operator who scanned or
+// photographed a stack of sheets has a folder of JPEGs, and zipping them is the obvious way to
+// import the lot. Mixed with PNGs in one archive, because a real archive will be.
+func TestImportZipOfPhotographs(t *testing.T) {
+	fake := &fakeIngester{}
+	handler := newImportServer(t, fake)
+
+	_, dataImg := realFramePair(t)
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	writeZipFile(t, zw, "sheet-01.jpg", encodeJPEG(t, dataImg))
+	writeZipFile(t, zw, "sheet-02.JPEG", encodeJPEG(t, dataImg))
+	writeZipFile(t, zw, "sheet-03.png", solidPNG(t, 4, 4, color.RGBA{R: 3, A: 255}))
+	writeZipFile(t, zw, "README.txt", []byte("not a frame"))
+	require.NoError(t, zw.Close())
+
+	rec := postImportFile(t, handler, "sheets.zip", zipBuf.Bytes())
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 3, fake.count(), "both photographs and the PNG must be ingested")
+
+	var out struct {
+		Ingested int `json:"ingested"`
+		Skipped  int `json:"skipped"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Equal(t, 3, out.Ingested)
+	require.Equal(t, 1, out.Skipped, "the README is still not a frame")
 }
 
 // TestImportCompositePNGSplitsIntoBothHalves is the one-chunk-transfer shape: the sender's

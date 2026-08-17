@@ -212,6 +212,30 @@ func (p *Pipeline) compress(ctx context.Context, jc *jobs.Context) error {
 	return p.store.Transmissions.SetSizes(ctx, tx.ID, info.Size, tx.ChunkSize, 0)
 }
 
+// proportionalParity is how many parity shards a block of this size deserves.
+//
+// The configuration names a ratio by naming a pair — parity per data — and the useful reading of "15 per
+// 100" for a block of five is one, not fifteen. Rounded up rather than down so a small block is never left
+// with nothing when the operator asked for redundancy, and floored at one for the same reason.
+//
+// Capped at the configured count, so this is strictly a reduction: a full block emits exactly what it
+// always did, and no configuration can be made to produce more parity than it asks for.
+//
+// Applied only to a single-block transfer. See the caller: the receiver derives a parity shard's block by
+// dividing its ESI by the configured count, so a count that varied between blocks would misplace every
+// shard after the first block.
+func proportionalParity(blockShards, dataShards, parityShards int) int {
+	if parityShards <= 0 || blockShards <= 0 {
+		return 0
+	}
+	if dataShards <= 0 || blockShards >= dataShards {
+		return parityShards
+	}
+	// Ceiling division, so a ratio that works out under one still yields one.
+	scaled := (blockShards*parityShards + dataShards - 1) / dataShards
+	return max(1, min(scaled, parityShards))
+}
+
 // chunkSizeFor derives how many payload bytes one frame carries at a transmission's geometry.
 //
 // This is the calculation that ties the pipeline to the protocol: a chunk is sized so that
@@ -450,7 +474,29 @@ func (p *Pipeline) fecEncode(ctx context.Context, jc *jobs.Context) error {
 			shards[i] = padded
 		}
 
-		repair, err := codec.Encode(shards, tx.FECParityShards)
+		// Parity in proportion to what this block actually holds, not to what a full one would.
+		//
+		// The configured pair reads as a ratio — 15 parity per 100 data is 15% redundancy — and it behaved
+		// as a flat count per block, which is the same thing only when a block is full. A five-chunk file
+		// occupies one block, got the full fifteen, and went out as twenty frames of parity protecting five
+		// of data: 300% overhead where 15% was asked for, and a transfer four times longer than it needed
+		// to be. A single-chunk file got 1500%.
+		//
+		// Only when the whole transfer is one block, and that limit is not caution — it is what the
+		// receiver can still read. It locates a parity shard by dividing its ESI by the configured count,
+		// so a varying count per block would map the shards of every block after the first to the wrong
+		// one. With a single block that division is trivially zero whatever the count, so nothing
+		// downstream can be misled.
+		//
+		// It is also where the whole problem lives. A transfer of more than one block has full blocks
+		// except possibly the last, so it already spends close to the ratio configured; a transfer of
+		// fewer chunks than one block is where fifteen parity protects five of data.
+		blockParity := tx.FECParityShards
+		if blocking.Blocks() == 1 {
+			blockParity = proportionalParity(len(block), tx.FECDataShards, tx.FECParityShards)
+		}
+
+		repair, err := codec.Encode(shards, blockParity)
 		if err != nil {
 			return err
 		}

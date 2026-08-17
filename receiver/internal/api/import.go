@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"image"
 	"image/draw"
-	"image/png"
 
 	// Registered for their side effects, so image.Decode recognises what a camera actually writes. A
 	// photograph of a printed frame is JPEG on every phone made, and PNG-only was refusing exactly the
@@ -17,6 +16,7 @@ import (
 	_ "image/jpeg"
 	"io"
 	"net/http"
+	"path"
 	"sort"
 	"strings"
 
@@ -57,6 +57,26 @@ const (
 	// import, not something this handler should try to swallow whole.
 	maxImportEntries = 4096
 )
+
+// looksLikeImage reports whether a zip entry is worth handing to the decoder, by extension.
+//
+// The extension rather than the bytes, because the alternative is to decode every entry in the
+// archive to find out — and an archive is allowed to carry a README, a checksum file, or a
+// directory of notes beside its frames. Guessing wrong here is cheap in one direction only: an
+// entry that passes this and then fails to decode is reported as its own skipped row, where one
+// rejected on its name is never looked at again.
+//
+// The set matches what the single-image branch below accepts, and for the same reason: a
+// photographed sheet is a JPEG. An operator who scanned a stack of prints has a folder of JPEGs,
+// and zipping that folder is the obvious way to import the lot — refusing them by extension would
+// leave the bulk path PNG-only while the single-file path had already moved on.
+func looksLikeImage(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".png", ".jpg", ".jpeg", ".gif":
+		return true
+	}
+	return false
+}
 
 // importEntry is one image the importer looked at, whether it came from a zip entry or a half
 // of a split composite.
@@ -157,8 +177,8 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 			if f.FileInfo().IsDir() {
 				continue
 			}
-			if !strings.HasSuffix(strings.ToLower(f.Name), ".png") {
-				entries = append(entries, importEntry{Name: f.Name, Skipped: "not a .png"})
+			if !looksLikeImage(f.Name) {
+				entries = append(entries, importEntry{Name: f.Name, Skipped: "not an image"})
 				continue
 			}
 
@@ -178,12 +198,12 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			// Checked from the IHDR chunk alone, before png.Decode reads any pixel data: see
-			// maxDecodedPixels. A zip entry can declare whatever dimensions it likes regardless
-			// of how few bytes actually follow.
-			cfg, err := png.DecodeConfig(bytes.NewReader(data))
+			// Checked from the header alone, before any pixel data is read: see maxDecodedPixels.
+			// A zip entry can declare whatever dimensions it likes regardless of how few bytes
+			// actually follow.
+			cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 			if err != nil {
-				entries = append(entries, importEntry{Name: f.Name, Skipped: "not a decodable PNG"})
+				entries = append(entries, importEntry{Name: f.Name, Skipped: "not a decodable image"})
 				continue
 			}
 			if err := checkImageDimensions(cfg.Width, cfg.Height); err != nil {
@@ -191,12 +211,12 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			img, err := png.Decode(bytes.NewReader(data))
+			img, _, err := image.Decode(bytes.NewReader(data))
 			if err != nil {
 				// A bad entry is reported in its own row rather than failing the whole request —
 				// the operator wants to know which frame was bad, and the rest are still worth
 				// ingesting.
-				entries = append(entries, importEntry{Name: f.Name, Skipped: "not a decodable PNG"})
+				entries = append(entries, importEntry{Name: f.Name, Skipped: "not a decodable image"})
 				continue
 			}
 
