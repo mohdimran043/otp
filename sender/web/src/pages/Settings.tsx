@@ -14,10 +14,12 @@ import {
   Select,
   Slider,
   Stack,
+  Tab,
   Table,
   TableBody,
   TableCell,
   TableRow,
+  Tabs,
   TextField,
   ToggleButton,
   ToggleButtonGroup,
@@ -27,6 +29,7 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, formatRate, type DisplaySettingsPatch } from '../api/client'
+import { Certificates } from '../components/Certificates'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { Grid } from '../components/Grid'
 import { Stat } from '../components/Stat'
@@ -108,6 +111,7 @@ function measureRefreshRate(samples = 90, budgetMs = 2500): Promise<number> {
 }
 
 export function Settings() {
+  const [tab, setTab] = useState(0)
   const client = useQueryClient()
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, refetchInterval: 5000 })
   const profiles = useQuery({ queryKey: ['profiles'], queryFn: api.profiles })
@@ -201,6 +205,18 @@ export function Settings() {
 
   return (
     <Stack spacing={3}>
+      {/* Two tabs rather than one long page. Certificates are managed rather than watched — an operator
+          comes here to do something and leaves — so they do not belong interleaved with the figures
+          above, which are read at a glance and never touched. */}
+      <Tabs value={tab} onChange={(_, next: number) => setTab(next)} sx={{ borderBottom: 1, borderColor: 'divider' }}>
+        <Tab label="Display" />
+        <Tab label="Certificates" />
+      </Tabs>
+
+      {tab === 1 && <Certificates />}
+
+      {tab === 0 && (
+        <>
       <Typography variant="h5">Display</Typography>
       <ErrorNotice error={settings.error} />
 
@@ -521,6 +537,8 @@ export function Settings() {
         permanent. See <code>docs/OPTIMAL-CONFIG.md</code> for the settings that reach 1 MB/s and what they
         require of the panel and the camera.
       </Typography>
+        </>
+      )}
     </Stack>
   )
 }

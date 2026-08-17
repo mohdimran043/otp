@@ -9,6 +9,12 @@ import (
 	"image"
 	"image/draw"
 	"image/png"
+
+	// Registered for their side effects, so image.Decode recognises what a camera actually writes. A
+	// photograph of a printed frame is JPEG on every phone made, and PNG-only was refusing exactly the
+	// case this endpoint exists to serve.
+	_ "image/gif"
+	_ "image/jpeg"
 	"io"
 	"net/http"
 	"sort"
@@ -208,20 +214,30 @@ func (s *Server) postImport(w http.ResponseWriter, r *http.Request) {
 		}
 
 	default:
-		// Checked from the IHDR chunk alone, before png.Decode reads any pixel data: see
-		// maxDecodedPixels.
-		cfg, err := png.DecodeConfig(bytes.NewReader(body))
+		// Any still image the standard library can read, not only PNG.
+		//
+		// PNG-only was wrong for the case this endpoint most obviously serves: photographing a printed
+		// frame. Every phone writes JPEG, so an operator holding a sheet in front of a camera got "the
+		// file is neither a zip nor a PNG" for doing exactly what the feature is for. The rendered frames
+		// this receiver hands out are PNG, and a picture *of* one is not.
+		//
+		// The size is checked from the header alone, before any pixel data is read: see maxDecodedPixels.
+		// image.DecodeConfig dispatches on the registered formats, so this covers whatever the imports at
+		// the top of this file bring in.
+		cfg, _, err := image.DecodeConfig(bytes.NewReader(body))
 		if err != nil {
-			s.fail(w, http.StatusUnsupportedMediaType, "the file is neither a zip nor a PNG", err)
+			s.fail(w, http.StatusUnsupportedMediaType,
+				"the file is not a zip or an image this receiver can read (PNG, JPEG or GIF)", err)
 			return
 		}
 		if err := checkImageDimensions(cfg.Width, cfg.Height); err != nil {
 			s.fail(w, http.StatusRequestEntityTooLarge, err.Error(), err)
 			return
 		}
-		img, err := png.Decode(bytes.NewReader(body))
+		img, _, err := image.Decode(bytes.NewReader(body))
 		if err != nil {
-			s.fail(w, http.StatusUnsupportedMediaType, "the file is neither a zip nor a PNG", err)
+			s.fail(w, http.StatusUnsupportedMediaType,
+				"the file is not a zip or an image this receiver can read (PNG, JPEG or GIF)", err)
 			return
 		}
 		for i, part := range splitComposite(img, s.probe) {

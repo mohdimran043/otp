@@ -18,6 +18,7 @@ import {
 import VideocamIcon from '@mui/icons-material/Videocam'
 
 import { instrument } from './theme'
+import { Scan } from './pages/Scan'
 import { Camera } from './pages/Camera'
 import { LiveCapture } from './pages/LiveCapture'
 import { Transmissions } from './pages/Transmissions'
@@ -32,6 +33,7 @@ const tabs = [
   // camera is a prompt an operator has to answer, and a page that exists only to ask it can ask on arrival —
   // buried in Settings, the prompt only ever fired from a Start button most operators never reached.
   { path: '/camera', label: 'Camera' },
+  { path: '/scan', label: 'Scan a sheet' },
   { path: '/transmissions', label: 'Transmissions' },
   { path: '/failures', label: 'Decode failures' },
   { path: '/settings', label: 'Settings' },
@@ -91,6 +93,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<LiveCapture />} />
           <Route path="/camera" element={<Camera />} />
+          <Route path="/scan" element={<Scan />} />
           <Route path="/transmissions" element={<Transmissions />} />
           <Route path="/transmissions/:id" element={<TransmissionDetail />} />
           <Route path="/failures" element={<DecodeFailures />} />

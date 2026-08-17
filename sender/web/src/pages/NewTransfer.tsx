@@ -171,6 +171,11 @@ export function NewTransfer() {
   const profiles = useQuery({ queryKey: ['profiles'], queryFn: api.profiles })
   const keys = useQuery({ queryKey: ['keys'], queryFn: api.keys })
   const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings })
+  // Whether certificate encryption can be offered at all. It needs this sender's keypair and the
+  // receiver's certificate installed, and offering a mode that cannot work — then refusing the transfer
+  // on submit — is a worse way to say so than not offering it.
+  const certificates = useQuery({ queryKey: ['certificates'], queryFn: api.certificates })
+  const certificatesReady = certificates.data?.ready ?? false
 
   const [file, setFile] = useState<File | null>(null)
   const [autostart, setAutostart] = useState(true)
@@ -205,7 +210,12 @@ export function NewTransfer() {
   // encryption choice a caller sees matches what leaving it alone has always meant.
   const effectiveEncryption =
     encryption || (defaults?.encryption_configured ? 'default' : 'none')
-  const needsKey = effectiveEncryption !== 'none' && effectiveEncryption !== 'default'
+  // Certificate mode is excluded: it generates a key per transfer and seals it to the receiver's
+  // certificate, so there is nothing for an operator to supply and the sender refuses one outright.
+  const needsKey =
+    effectiveEncryption !== 'none' &&
+    effectiveEncryption !== 'default' &&
+    effectiveEncryption !== 'certificate'
 
   const keyValid = /^[0-9a-fA-F]{64}$/.test(keyHex.trim())
   const hasSavedKeys = (keys.data ?? []).length > 0
@@ -458,7 +468,24 @@ export function NewTransfer() {
                         </MenuItem>
                         <MenuItem value="aes256gcm">AES-256-GCM</MenuItem>
                         <MenuItem value="chacha20poly1305">ChaCha20-Poly1305</MenuItem>
+                        <MenuItem value="certificate" disabled={!certificatesReady}>
+                          Certificate — random key, sealed to the receiver
+                          {certificatesReady ? '' : ' (certificates not installed)'}
+                        </MenuItem>
                       </TextField>
+                      {effectiveEncryption === 'certificate' && (
+                        <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                          A fresh key is generated for this transfer and sealed to the receiver's
+                          certificate, so nothing has to be carried across the gap. Only the receiver can
+                          open it, and only this sender could have produced it.
+                        </Typography>
+                      )}
+                      {!certificatesReady && (
+                        <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                          Certificate encryption needs a keypair here and the receiver's certificate
+                          installed — see Settings, Certificates.
+                        </Typography>
+                      )}
                     </Grid>
 
                     {needsKey && (

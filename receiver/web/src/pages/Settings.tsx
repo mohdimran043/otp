@@ -7,10 +7,12 @@ import {
   Paper,
   Slider,
   Stack,
+  Tab,
   Table,
   TableBody,
   TableCell,
   TableRow,
+  Tabs,
   TextField,
   Typography,
 } from '@mui/material'
@@ -18,6 +20,7 @@ import DeleteIcon from '@mui/icons-material/Delete'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import { api, formatPercent } from '../api/client'
+import { Certificates } from '../components/Certificates'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { Grid } from '../components/Grid'
 import { Stat } from '../components/Stat'
@@ -39,6 +42,7 @@ function randomKeyHex(): string {
 // browser for permission. This page is for reading numbers and loading keys, and an operator who came to do
 // either should not be answering a hardware prompt on the way.
 export function Settings() {
+  const [tab, setTab] = useState(0)
   const { refreshMs, setRefreshMs } = useUi()
   const client = useQueryClient()
   const config = useQuery({ queryKey: ['config'], queryFn: api.config })
@@ -80,6 +84,18 @@ export function Settings() {
 
   return (
     <Stack spacing={3}>
+      {/* Two tabs rather than one long page. Certificates are managed rather than watched — an operator
+          comes here to do something and leaves — so they do not belong interleaved with the figures
+          above, which are read at a glance and never touched. */}
+      <Tabs value={tab} onChange={(_, next: number) => setTab(next)} sx={{ borderBottom: 1, borderColor: 'divider' }}>
+        <Tab label="Decoder" />
+        <Tab label="Certificates" />
+      </Tabs>
+
+      {tab === 1 && <Certificates />}
+
+      {tab === 0 && (
+        <>
       <Typography variant="h5">Decoder</Typography>
       <ErrorNotice error={config.error} />
 
@@ -324,6 +340,8 @@ export function Settings() {
           </TableBody>
         </Table>
       </Paper>
+        </>
+      )}
     </Stack>
   )
 }

@@ -293,6 +293,31 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return text ? (JSON.parse(text) as T) : ({} as T)
 }
 
+/** One stored certificate. The private key is never carried here — it does not leave the server. */
+export interface CertificateView {
+  role: 'local' | 'peer'
+  certificate_pem: string
+  fingerprint: string
+  subject: string
+  not_before?: string
+  not_after?: string
+  installed_at: string
+  has_private_key: boolean
+}
+
+/**
+ * What this side can do with certificates right now.
+ *
+ * `ready` is reported rather than left to be inferred from two absences, because it is the question every
+ * caller is really asking: can certificate encryption be used at all.
+ */
+export interface CertificateStatus {
+  local?: CertificateView
+  peer?: CertificateView
+  ready: boolean
+  note: string
+}
+
 export const api = {
   profiles: () => request<Profiles>('/api/v1/profiles'),
 
@@ -420,6 +445,26 @@ export const api = {
   // of this endpoint is that one request carries the bytes and the URL the result should go to.
   submit: (form: FormData) =>
     request<TransferAccepted>('/api/v1/transfers', { method: 'POST', body: form }),
+
+  certificates: () => request<CertificateStatus>('/api/v1/certificates'),
+
+  generateCertificate: (name?: string) =>
+    request<CertificateStatus>('/api/v1/certificates/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(name ? { name } : {}),
+    }),
+
+  /** Installs the other side's public certificate. The PEM is posted as-is. */
+  installPeerCertificate: (certificatePEM: string) =>
+    request<CertificateStatus>('/api/v1/certificates/peer', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ certificate_pem: certificatePEM }),
+    }),
+
+  removePeerCertificate: () =>
+    request<CertificateStatus>('/api/v1/certificates/peer', { method: 'DELETE' }),
 
   health: () => request<{ status: string; protocol_version: number }>('/health'),
 }
