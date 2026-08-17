@@ -141,47 +141,57 @@ func TestAShortFinalSheetIsStillAFullSizedSheet(t *testing.T) {
 // Composed pixels, not a photograph, so this proves the geometry rather than the optics. The camera's
 // share of the problem is the px/cell floor in shared/readable, which is a different question and not one
 // a unit test can settle.
+// Several grids and both arrangements, and the range is the point rather than thoroughness for its own
+// sake. The first version of this test checked 64 cells four-up, passed, and was wrong to be reassuring:
+// LocateAll lost a lane on every stacked tiling above 128 cells, and a test pinned at the smallest grid in
+// the range could not see it. See TestLocateAllFindsEveryLaneOnAStackedTiling in shared/protocol, which is
+// where that was tracked down and fixed.
 func TestAComposedSheetReadsBackAsEveryFrameOnIt(t *testing.T) {
-	// Eight pixels a cell: a printed cell is read from paper, and the sheet has to survive being located
-	// at a size a scanner actually resolves rather than at the encoder's cheapest.
-	lane, err := protocol.NewLayoutQuiet(64, 64, 8, 2)
-	require.NoError(t, err)
+	for _, grid := range []int{64, 128, 192, 256} {
+		for _, perPage := range []int{2, 4} {
+			// Eight pixels a cell: a printed cell is read from paper, and the sheet has to survive being
+			// located at a size a scanner actually resolves rather than at the encoder's cheapest.
+			lane, err := protocol.NewLayoutQuiet(grid, grid, 8, 2)
+			require.NoError(t, err)
 
-	enc, err := encoding.ByName("binary")
-	require.NoError(t, err)
-	depth := enc.DefaultBitDepth()
+			enc, err := encoding.ByName("binary")
+			require.NoError(t, err)
+			depth := enc.DefaultBitDepth()
 
-	txID := uuid.New()
-	frames := make([]image.Image, 0, 4)
-	for i := range 4 {
-		f := protocol.NewFrame(protocol.Header{
-			TransmissionID: txID,
-			FrameNumber:    uint32(i),
-			ChunkNumber:    uint32(i),
-			TotalChunks:    4,
-		}, []byte{byte(i), byte(i + 1), byte(i + 2)})
-		img, err := enc.Encode(f, lane, depth)
-		require.NoError(t, err)
-		frames = append(frames, img)
+			txID := uuid.New()
+			frames := make([]image.Image, 0, perPage)
+			for i := range perPage {
+				f := protocol.NewFrame(protocol.Header{
+					TransmissionID: txID,
+					FrameNumber:    uint32(i),
+					ChunkNumber:    uint32(i),
+					TotalChunks:    uint32(perPage),
+				}, []byte{byte(i), byte(i + 1), byte(i + 2)})
+				img, err := enc.Encode(f, lane, depth)
+				require.NoError(t, err)
+				frames = append(frames, img)
+			}
+
+			sheets, err := composeSheets(frames, lane, perPage)
+			require.NoError(t, err)
+			require.Len(t, sheets, 1)
+
+			found := protocol.LocateAll(sheets[0], protocol.LocateOptions{}, 16)
+			require.Len(t, found, perPage,
+				"grid %d %d-up: every frame printed on the sheet must be locatable in it", grid, perPage)
+
+			// Located is not read. Decode each one and require the frame numbers back, so a layout that
+			// put findable fiducial sets on a page while sampling the wrong cells cannot pass.
+			numbers := map[int]bool{}
+			for _, g := range found {
+				frame, err := encoding.DecodeAt(g, sheets[0], protocol.LocateOptions{})
+				require.NoError(t, err, "grid %d %d-up", grid, perPage)
+				numbers[int(frame.Header.FrameNumber)] = true
+			}
+			require.Len(t, numbers, perPage,
+				"grid %d %d-up: all frames must decode, each as itself", grid, perPage)
+		}
 	}
-
-	sheets, err := composeSheets(frames, lane, 4)
-	require.NoError(t, err)
-	require.Len(t, sheets, 1)
-
-	found := protocol.LocateAll(sheets[0], protocol.LocateOptions{}, 16)
-	require.Len(t, found, 4, "every frame printed on the sheet must be locatable in it")
-
-	// Located is not read. Decode each one and require the frame numbers back, so a layout that put four
-	// findable fiducial sets on a page while sampling the wrong cells cannot pass.
-	numbers := map[int]bool{}
-	for _, g := range found {
-		frame, err := encoding.DecodeAt(g, sheets[0], protocol.LocateOptions{})
-		require.NoError(t, err)
-		numbers[int(frame.Header.FrameNumber)] = true
-	}
-	require.Equal(t, map[int]bool{0: true, 1: true, 2: true, 3: true}, numbers,
-		"all four frames must decode, each as itself")
 }
 
 // One-up composes to exactly the frame, with no gap and no wrapper — the behaviour every existing

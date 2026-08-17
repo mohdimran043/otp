@@ -91,6 +91,7 @@ manual nobody reads front to back.
 | **[The channel](docs/channel.md)** | The three ways frames cross the gap — a shared directory, a display and a camera, or paper — and how to aim a camera at one. |
 | **[Transfer speed](docs/performance.md)** | What this moves in practice, and the one setting that decides it. |
 | **[Production camera setup](docs/production-camera.md)** | Specifying real hardware, and the arithmetic that says whether a camera can read a geometry before you buy it. |
+| **[Print and scan](docs/PRINT-AND-SCAN.md)** | What one A4 sheet holds, measured — and which geometries survive being printed and read back. |
 | **[Security](docs/security.md)** | The four encryption modes, including certificates, and what an air gap does not buy you. |
 | **[Running it](docs/operations.md)** | Storage, retention, deletion, long runs, and the tests. |
 | **[Deploying it](deploy/README.md)** | The proxy, TLS, and the admin consoles. |

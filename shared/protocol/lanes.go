@@ -462,6 +462,27 @@ func LocateAll(img image.Image, opts LocateOptions, maxFrames int) []*Geometry {
 			// span two lanes is what this loop is for, and the descriptor checksum is what does it.
 			continue
 		}
+		if g.TimingScore < minLaneTimingScore {
+			// Located, checksummed, and still not this quad's frame.
+			//
+			// The comment above this loop says the descriptor checksum is what rejects a quad spanning two
+			// lanes. That is true of lanes side by side and false of lanes stacked, which is a gap nothing
+			// caught until a printed sheet went through it. A stacked pair's outer corners describe an
+			// almost-square region once the gap is counted — 1480 by 1616 at grid 192, a ratio of 1.09 —
+			// so plausibleLaneShape's 1.6 tolerance passes it, and the descriptor read at its top-left
+			// corner is a real lane's real descriptor, so the CRC passes too. The quad is then accepted,
+			// consumes the corners of the lane it borrowed them from, and both frames are lost.
+			//
+			// The timing pattern is what actually knows. It alternates down the first and last payload
+			// columns, so a homography stretched to span two lanes walks off it within a few rows: measured
+			// on exactly this failure, a true lane scores 1.000 and the spanning quad scores 0.488 — chance,
+			// for a two-valued pattern. There is no overlap to trade off against, which is why this is a
+			// gate rather than a weighting.
+			//
+			// Cheaper than it looks, too: the score is already computed by Locate for the receiver's decode
+			// quality, so this costs a comparison.
+			continue
+		}
 		if knownSpan == 0 {
 			knownSpan = s.span
 		}
@@ -490,6 +511,18 @@ func LocateAll(img image.Image, opts LocateOptions, maxFrames int) []*Geometry {
 // twenty is already fifteen thousand quads to filter — cheap, since the filter is arithmetic on four
 // points, but not something to leave unbounded on a noisy capture.
 const maxLaneCandidates = 20
+
+// minLaneTimingScore is how well a located quad must match the timing pattern to be believed.
+//
+// Set against what the two populations actually score rather than by taste, because they do not overlap:
+// a real lane composed and read back scores 1.000, and a quad spanning two stacked lanes scores 0.488 —
+// which is chance, since the pattern has two values. Anything in between is a capture degrading, and 0.65
+// sits clear of chance while leaving a wide margin for one.
+//
+// It is deliberately not tighter. A soft or skewed capture loses timing cells honestly, and a threshold
+// close to 1.0 would reject frames that decode perfectly well — trading a bug that loses lanes for a
+// gate that does the same thing on purpose.
+const minLaneTimingScore = 0.65
 
 // quadSpan is the largest distance between any two of a quad's fiducials.
 func quadSpan(q [4]FinderCandidate) float64 {
