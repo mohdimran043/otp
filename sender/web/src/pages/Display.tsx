@@ -19,6 +19,7 @@ import { useSearchParams } from 'react-router-dom'
 
 import { api, formatBytes, type DisplayFrame } from '../api/client'
 import { displayRoom } from '../lib/cellFit'
+import { onPanel } from '../theme'
 
 // The display: the page a camera is pointed at.
 //
@@ -336,7 +337,9 @@ export function Display() {
         placeItems: 'center',
         border: '1px dashed',
         borderColor: 'divider',
-        color: 'text.secondary',
+        // Not text.secondary: this box is on the black panel in either theme, and the light theme's
+        // secondary is a slate meant for a white page.
+        color: onPanel,
       }}
     >
       <Typography variant="body2">nothing on the display</Typography>

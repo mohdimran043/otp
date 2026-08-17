@@ -13,7 +13,7 @@ import {
 import { useQuery } from '@tanstack/react-query'
 
 import { api, formatPercent, type CapturedFrame } from '../api/client'
-import { mono, signal } from '../theme'
+import { mono, useSignal } from '../theme'
 
 // What happened to one photograph.
 //
@@ -78,11 +78,19 @@ function Row({ label, value, tone }: { label: string; value: string; tone?: stri
   )
 }
 
-/** outcome is the one-word verdict and the colour that carries it. */
-function outcome(frame: CapturedFrame): { word: string; colour: string } {
-  if (!frame.decoded) return { word: 'UNREADABLE', colour: signal.fault }
-  if (frame.recovered) return { word: 'RECOVERED', colour: signal.marginal }
-  return { word: 'READ', colour: signal.lock }
+/**
+ * outcome is the one-word verdict and the colour that carries it.
+ *
+ * Takes the palette rather than reading it, because the two grounds need different weights of the same
+ * hue and this is called from module scope as well as from inside a component.
+ */
+function outcome(
+  frame: CapturedFrame,
+  sig: ReturnType<typeof useSignal>,
+): { word: string; colour: string } {
+  if (!frame.decoded) return { word: 'UNREADABLE', colour: sig.fault }
+  if (frame.recovered) return { word: 'RECOVERED', colour: sig.marginal }
+  return { word: 'READ', colour: sig.lock }
 }
 
 /** what the frame carried, in the operator's terms rather than the protocol's. */
@@ -95,6 +103,7 @@ function carried(frame: CapturedFrame): string {
 
 /** LaneSummary is one row per frame found in this photograph. */
 function LaneSummary({ lanes, currentId }: { lanes: CapturedFrame[]; currentId: string }) {
+  const sig = useSignal()
   if (lanes.length <= 1) return null
 
   return (
@@ -110,7 +119,7 @@ function LaneSummary({ lanes, currentId }: { lanes: CapturedFrame[]; currentId: 
       </Typography>
       <Stack spacing={0.5}>
         {lanes.map((lane) => {
-          const o = outcome(lane)
+          const o = outcome(lane, sig)
           return (
             <Stack
               key={lane.id}
@@ -149,6 +158,7 @@ export function FrameDetailDialog({
   frameId: string | null
   onClose: () => void
 }) {
+  const sig = useSignal()
   const detail = useQuery({
     queryKey: ['frame', frameId],
     queryFn: () => api.frame(frameId!),
@@ -157,7 +167,7 @@ export function FrameDetailDialog({
 
   const frame = detail.data?.frame
   const lanes = detail.data?.lanes ?? []
-  const o = frame ? outcome(frame) : null
+  const o = frame ? outcome(frame, sig) : null
   const advice = frame?.failure_stage ? stageAdvice[frame.failure_stage] : undefined
 
   return (
@@ -251,14 +261,14 @@ export function FrameDetailDialog({
               <Row
                 label="fiducials"
                 value={formatPercent(frame.finder_score)}
-                tone={frame.finder_score >= 0.99 ? signal.lock : signal.adjust}
+                tone={frame.finder_score >= 0.99 ? sig.lock : sig.adjust}
               />
               <Row label="timing" value={formatPercent(frame.timing_score)} />
               <Row label="contrast" value={frame.contrast.toFixed(1)} />
               <Row
                 label="header bit errors"
                 value={formatPercent(frame.bit_error_rate)}
-                tone={frame.bit_error_rate > 0 ? signal.adjust : undefined}
+                tone={frame.bit_error_rate > 0 ? sig.adjust : undefined}
               />
             </Box>
 
@@ -278,7 +288,7 @@ export function FrameDetailDialog({
                 <Row
                   label="merged shots"
                   value={`${frame.merged_shots} photographs of this frame combined`}
-                  tone={signal.marginal}
+                  tone={sig.marginal}
                 />
               ) : null}
               <Row
@@ -292,16 +302,16 @@ export function FrameDetailDialog({
                       ? 'not needed — it read first time'
                       : 'attempted and did not succeed'
                 }
-                tone={frame.recovered ? signal.marginal : undefined}
+                tone={frame.recovered ? sig.marginal : undefined}
               />
-              {frame.failure_stage && <Row label="died at" value={frame.failure_stage} tone={signal.fault} />}
+              {frame.failure_stage && <Row label="died at" value={frame.failure_stage} tone={sig.fault} />}
               {frame.decode_error && (
                 <Stack direction="row" spacing={2} sx={{ py: 0.4 }}>
                   <Typography variant="caption" sx={{ color: 'text.secondary', minWidth: 128 }}>
                     error
                   </Typography>
                   <Typography
-                    sx={{ fontFamily: mono, fontSize: '0.72rem', color: signal.fault, wordBreak: 'break-word' }}
+                    sx={{ fontFamily: mono, fontSize: '0.72rem', color: sig.fault, wordBreak: 'break-word' }}
                   >
                     {frame.decode_error}
                   </Typography>

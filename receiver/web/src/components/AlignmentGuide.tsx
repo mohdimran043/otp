@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 
 import { api, type AlignmentStatus, type AlignmentView } from '../api/client'
 import { laneOutlines } from '../lib/laneOutlines'
-import { mono, signal } from '../theme'
+import { mono, signal, useSignal } from '../theme'
 
 // Live aiming feedback: the instrument face of this application.
 //
@@ -22,18 +22,26 @@ const pollMs = 400
 // Each verdict is one imperative and one clause of explanation. The imperative is what to do; the
 // clause is why, for the operator who has time to wonder. Icons were tried here and removed: at this
 // size the word is faster to read than a glyph, and a glyph beside it only competes with it.
-const verdict: Record<AlignmentStatus, { colour: string; word: string; sub: string }> = {
-  searching: { colour: signal.idle, word: 'SEARCHING', sub: 'no grid in view' },
-  too_far: { colour: signal.adjust, word: 'CLOSER', sub: 'cells too small to read' },
-  too_close: { colour: signal.adjust, word: 'BACK', sub: 'past the useful range' },
-  off_axis: { colour: signal.adjust, word: 'SQUARE UP', sub: 'angle too steep' },
-  marginal: { colour: signal.marginal, word: 'ALMOST', sub: 'found, not yet readable' },
-  too_dense: { colour: signal.fault, word: 'TOO DENSE', sub: 'no aim fixes this' },
-  good: { colour: signal.lock, word: 'LOCKED', sub: 'frames are decoding' },
+//
+// A function of the palette rather than a constant, because the colours differ between the two grounds
+// and a module-level table would freeze whichever theme happened to be loaded first.
+type signals = ReturnType<typeof useSignal>
+
+function verdicts(sig: signals): Record<AlignmentStatus, { colour: string; word: string; sub: string }> {
+  return {
+    searching: { colour: sig.idle, word: 'SEARCHING', sub: 'no grid in view' },
+    too_far: { colour: sig.adjust, word: 'CLOSER', sub: 'cells too small to read' },
+    too_close: { colour: sig.adjust, word: 'BACK', sub: 'past the useful range' },
+    off_axis: { colour: sig.adjust, word: 'SQUARE UP', sub: 'angle too steep' },
+    marginal: { colour: sig.marginal, word: 'ALMOST', sub: 'found, not yet readable' },
+    too_dense: { colour: sig.fault, word: 'TOO DENSE', sub: 'no aim fixes this' },
+    good: { colour: sig.lock, word: 'LOCKED', sub: 'frames are decoding' },
+  }
 }
 
-function look(a: AlignmentView | undefined) {
-  return verdict[a?.status ?? 'searching'] ?? verdict.searching
+function look(a: AlignmentView | undefined, sig: signals) {
+  const table = verdicts(sig)
+  return table[a?.status ?? 'searching'] ?? table.searching
 }
 
 /**
@@ -56,12 +64,17 @@ function look(a: AlignmentView | undefined) {
  * Drawn in a 0..1 viewBox because the corners arrive normalised and the preview's size is a layout
  * decision with nothing to do with the capture's resolution. The SVG does that conversion for free and
  * stays correct when the element resizes or the phone is turned.
+ *
+ * This is the one place that keeps the dark signals in either theme, and deliberately: the outline is
+ * drawn over the camera preview, not over the page. The ground underneath it is a photograph of a lit
+ * panel in a dim room whatever the rest of the interface is doing, and the light theme's green — chosen
+ * to carry on white — is a dark line that disappears against it.
  */
 export function AlignmentOverlay({ alignment }: { alignment: AlignmentView | undefined }) {
   const outlines = laneOutlines(alignment)
   if (outlines.length === 0) return null
 
-  const { colour } = look(alignment)
+  const { colour } = look(alignment, signal)
 
   return (
     <Box
@@ -123,17 +136,20 @@ export function useAlignment(enabled: boolean) {
  * most needs to know which way to move.
  */
 function BandMeter({ value, lo, hi }: { value: number; lo: number; hi: number }) {
+  const sig = useSignal()
   const span = Math.max(hi - lo, 1)
   const min = lo - span
   const max = hi + span
   const at = (v: number) => Math.min(100, Math.max(0, ((v - min) / (max - min)) * 100))
 
   const inside = value >= lo && (hi <= 0 || value <= hi)
-  const colour = inside ? signal.lock : signal.adjust
+  const colour = inside ? sig.lock : sig.adjust
 
   return (
     <Box sx={{ position: 'relative', height: 36 }}>
-      <Box sx={{ position: 'absolute', top: 16, left: 0, right: 0, height: 6, bgcolor: '#1e222a', borderRadius: 1 }} />
+      <Box
+        sx={{ position: 'absolute', top: 16, left: 0, right: 0, height: 6, bgcolor: 'divider', borderRadius: 1 }}
+      />
       <Box
         sx={{
           position: 'absolute',
@@ -141,9 +157,9 @@ function BandMeter({ value, lo, hi }: { value: number; lo: number; hi: number })
           height: 6,
           left: `${at(lo)}%`,
           width: `${at(hi) - at(lo)}%`,
-          bgcolor: `${signal.lock}30`,
-          borderLeft: `2px solid ${signal.lock}99`,
-          borderRight: `2px solid ${signal.lock}99`,
+          bgcolor: `${sig.lock}30`,
+          borderLeft: `2px solid ${sig.lock}99`,
+          borderRight: `2px solid ${sig.lock}99`,
         }}
       />
       <Box
@@ -209,9 +225,10 @@ export function AlignmentGuide({
   steadiness: number
   blurred: number
 }) {
+  const sig = useSignal()
   if (!alignment) return null
 
-  const { colour, word, sub } = look(alignment)
+  const { colour, word, sub } = look(alignment, sig)
   const lo = alignment.required_module_pixels
   const hi = alignment.max_module_pixels
   // Null rather than zero when the receiver does not report lanes, so an older one shows nothing here
@@ -255,7 +272,7 @@ export function AlignmentGuide({
       </Typography>
 
       {shaky && (
-        <Typography variant="body2" sx={{ mt: 1, color: signal.adjust }}>
+        <Typography variant="body2" sx={{ mt: 1, color: sig.adjust }}>
           Hold steadier — {blurred} frame{blurred === 1 ? '' : 's'} dropped for movement. Bracing your
           elbows, or resting the phone against something, is worth more here than any setting.
         </Typography>
@@ -282,7 +299,7 @@ export function AlignmentGuide({
               <Readout
                 label="frames in view"
                 value={`${alignment.lanes_found} / ${alignment.lanes_expected}`}
-                tone={alignment.lanes_found >= alignment.lanes_expected ? signal.lock : signal.adjust}
+                tone={alignment.lanes_found >= alignment.lanes_expected ? sig.lock : sig.adjust}
               />
             )}
             {/* In view and reading are different questions on a tiling, and only the second one is
@@ -292,14 +309,14 @@ export function AlignmentGuide({
               <Readout
                 label="frames reading"
                 value={`${reading} / ${alignment.lanes_found}`}
-                tone={reading >= alignment.lanes_found ? signal.lock : signal.adjust}
+                tone={reading >= alignment.lanes_found ? sig.lock : sig.adjust}
               />
             )}
             <Readout label="fill" value={`${Math.round(alignment.fill * 100)}%`} />
             <Readout
               label="off-square"
               value={`${Math.round(alignment.perspective * 100)}%`}
-              tone={alignment.perspective > 0.2 ? signal.adjust : undefined}
+              tone={alignment.perspective > 0.2 ? sig.adjust : undefined}
             />
             <Readout label="fiducials" value={`${Math.round(alignment.finder_score * 100)}%`} />
             <Readout label="contrast" value={Math.round(alignment.contrast).toString()} />

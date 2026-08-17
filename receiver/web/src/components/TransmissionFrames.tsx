@@ -5,7 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 
 import { api, formatPercent, type CapturedFrame } from '../api/client'
 import { FrameDetailDialog } from './FrameDetail'
-import { signal } from '../theme'
+import { useSignal } from '../theme'
 
 // Every photograph this transfer was built from.
 //
@@ -18,16 +18,25 @@ import { signal } from '../theme'
 // claims to decode better has to be measured against the frames that actually failed — which is what
 // receiver/ai/corpus replays. Downloading them is how a bad session becomes a regression test.
 
-/** kindOf sorts a capture into what an operator needs to distinguish at a glance. */
-function kindOf(frame: CapturedFrame): { label: string; colour: string } {
-  if (!frame.decoded) return { label: frame.failure_stage || 'unreadable', colour: signal.fault }
-  if (frame.recovered) return { label: `chunk ${frame.chunk_number ?? '?'}`, colour: signal.marginal }
-  if (frame.is_manifest) return { label: 'manifest', colour: signal.idle }
-  if (frame.is_parity) return { label: `parity ${frame.chunk_number ?? '?'}`, colour: signal.adjust }
-  return { label: `chunk ${frame.chunk_number ?? '?'}`, colour: signal.lock }
+/**
+ * kindOf sorts a capture into what an operator needs to distinguish at a glance.
+ *
+ * Takes the palette so the tile borders follow the theme; the same hue at a different weight in each
+ * ground, so green still means "read first time" on white as it does on black.
+ */
+function kindOf(
+  frame: CapturedFrame,
+  sig: ReturnType<typeof useSignal>,
+): { label: string; colour: string } {
+  if (!frame.decoded) return { label: frame.failure_stage || 'unreadable', colour: sig.fault }
+  if (frame.recovered) return { label: `chunk ${frame.chunk_number ?? '?'}`, colour: sig.marginal }
+  if (frame.is_manifest) return { label: 'manifest', colour: sig.idle }
+  if (frame.is_parity) return { label: `parity ${frame.chunk_number ?? '?'}`, colour: sig.adjust }
+  return { label: `chunk ${frame.chunk_number ?? '?'}`, colour: sig.lock }
 }
 
 export function TransmissionFrames({ transmissionId }: { transmissionId: string }) {
+  const sig = useSignal()
   const [open, setOpen] = useState<string | null>(null)
 
   const frames = useQuery({
@@ -97,7 +106,7 @@ export function TransmissionFrames({ transmissionId }: { transmissionId: string 
             }}
           >
             {list.map((frame) => {
-              const kind = kindOf(frame)
+              const kind = kindOf(frame, sig)
               return (
                 <Tooltip
                   key={frame.id}

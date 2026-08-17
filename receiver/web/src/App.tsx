@@ -12,7 +12,9 @@ import {
   Tab,
   Tabs,
   ThemeProvider,
+  IconButton,
   Toolbar,
+  Tooltip,
   Typography,
 } from '@mui/material'
 import VideocamIcon from '@mui/icons-material/Videocam'
@@ -25,6 +27,11 @@ import { Transmissions } from './pages/Transmissions'
 import { TransmissionDetail } from './pages/TransmissionDetail'
 import { DecodeFailures } from './pages/DecodeFailures'
 import { Settings } from './pages/Settings'
+import DarkModeIcon from '@mui/icons-material/DarkMode'
+import LightModeIcon from '@mui/icons-material/LightMode'
+
+import { useUi } from './store/ui'
+
 import { HealthBadge } from './components/HealthBadge'
 
 const tabs = [
@@ -42,7 +49,11 @@ const tabs = [
 export function App() {
   const location = useLocation()
 
-  const theme = useMemo(() => instrument(), [])
+  // The theme follows the operator's choice, which the store persists. Rebuilt only when the mode
+  // changes, so a toggle re-themes the tree and nothing else does.
+  const mode = useUi((state) => state.theme)
+  const setTheme = useUi((state) => state.setTheme)
+  const theme = useMemo(() => instrument(mode), [mode])
 
   const current = tabs.find((tab) =>
     tab.path === '/' ? location.pathname === '/' : location.pathname.startsWith(tab.path),
@@ -85,6 +96,18 @@ export function App() {
             ))}
           </Tabs>
 
+          {/* Dark is still the default and the right choice at a camera: the operator is facing a bright
+              panel in a dim room, and a pale interface beside it ruins their dark adaptation. Light is for
+              everywhere else this gets used — a desk, a projector, a screenshot in a document. */}
+          <Tooltip title={mode === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'}>
+            <IconButton
+              size="small"
+              onClick={() => setTheme(mode === 'dark' ? 'light' : 'dark')}
+              aria-label={mode === 'dark' ? 'Switch to the light theme' : 'Switch to the dark theme'}
+            >
+              {mode === 'dark' ? <LightModeIcon fontSize="small" /> : <DarkModeIcon fontSize="small" />}
+            </IconButton>
+          </Tooltip>
           <HealthBadge />
         </Toolbar>
       </AppBar>

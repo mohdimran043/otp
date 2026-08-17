@@ -24,6 +24,7 @@ import { useUi } from '../store/ui'
 import { previewAspect } from '../lib/previewBox'
 import type { CaptureDetail } from '../lib/videoConstraints'
 import { AlignmentGuide, AlignmentOverlay, useAlignment } from './AlignmentGuide'
+import { onPanel } from '../theme'
 
 // Capturing with this browser's camera.
 //
@@ -245,8 +246,10 @@ export function BrowserCamera({ onStart, onStop, taking }: Props) {
               "is it working" is answered by looking at the screen instead of by reading a counter. */}
           {state.running && <AlignmentOverlay alignment={alignment.data} />}
 
+          {/* Not text.secondary: this sits on the preview, which is black in either theme, and the
+              light theme's secondary is a slate meant for a white page. */}
           {!state.running && (
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="body2" sx={{ color: onPanel }}>
               no camera running
             </Typography>
           )}
