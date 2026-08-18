@@ -26,7 +26,7 @@ import PlayArrowIcon from '@mui/icons-material/PlayArrow'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
 
-import { api, eta, formatBytes, formatDuration, formatRate } from '../api/client'
+import { api, eta, formatBytes, formatDuration, formatRate, type TransferStatus } from '../api/client'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { FrameAudit } from '../components/FrameAudit'
 import { Grid } from '../components/Grid'
@@ -35,6 +35,123 @@ import { Stat } from '../components/Stat'
 import { StatusChip } from '../components/StatusChip'
 import { TransferControls } from '../components/TransferControls'
 import { useUi } from '../store/ui'
+import { mono } from '../theme'
+
+/** Spec is one settled fact about how this transfer was built. */
+function Spec({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <Stack spacing={0.25}>
+      <Typography variant="caption" color="text.secondary">
+        {label}
+      </Typography>
+      <Typography sx={{ fontFamily: mono, fontSize: '0.82rem' }}>{value}</Typography>
+      {hint && (
+        <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'none', letterSpacing: 0 }}>
+          {hint}
+        </Typography>
+      )}
+    </Stack>
+  )
+}
+
+/**
+ * Profile is what this transfer was actually encoded at.
+ *
+ * Every figure here was fixed when the file was uploaded and then written into every frame, so none of it
+ * can be inferred from the settings page — those describe what the *next* transfer will use. A transfer
+ * that read badly is diagnosed by its geometry, and until now the only way to know what a given transfer
+ * was sent at was to remember what the form said when you filled it in.
+ *
+ * Pixels per cell is the figure that decides whether a capture can be read at all, so the frame's rendered
+ * edge is given beside the grid rather than left as arithmetic for the reader.
+ */
+function Profile({ status }: { status: TransferStatus | undefined }) {
+  if (!status) return null
+
+  const cells = Math.max(status.grid_width, status.grid_height)
+  const edge = cells > 0 && status.cell_pixels > 0 ? cells * status.cell_pixels : 0
+
+  // A ratio, because that is how the pair is meant to be read: 15 per 100 is 15% redundancy. The count
+  // actually emitted is scaled down for a transfer smaller than one block, which is why the frame and
+  // chunk counts above can imply less parity than this suggests.
+  const parity =
+    status.fec_codec === 'none' || status.fec_parity_shards === 0
+      ? 'none — a dropped frame cannot be repaired'
+      : `${status.fec_codec} · ${status.fec_parity_shards} per ${status.fec_data_shards} ` +
+        `(${Math.round((status.fec_parity_shards / Math.max(status.fec_data_shards, 1)) * 100)}% redundancy)`
+
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Stack direction="row" alignItems="baseline" spacing={2} sx={{ mb: 1.5 }} flexWrap="wrap" useFlexGap>
+        <Typography variant="subtitle1">Profile</Typography>
+        <Typography variant="caption" color="text.secondary">
+          settled at upload and written into every frame — it cannot change for this transfer
+        </Typography>
+      </Stack>
+
+      {/* Said explicitly, because its absence here would otherwise look like an omission. How many frames
+          are tiled onto the panel at once is not a property of a transfer: every lane is an ordinary
+          frame, nothing per-transfer records a lane count, and the display's setting decides it — and can
+          be changed while this transfer is running. It belongs on the display page and only there. */}
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5, textTransform: 'none', letterSpacing: 0 }}>
+        Tiling is not listed: how many frames share the panel is the display's setting, not this
+        transfer's, and it can be changed mid-transfer.
+      </Typography>
+
+      <Grid container spacing={2}>
+        <Grid size={{ xs: 6, sm: 4, md: 3 }}>
+          <Spec
+            label="grid"
+            value={`${status.grid_width}×${status.grid_height} cells`}
+            hint={edge > 0 ? `${edge}×${edge} px rendered` : undefined}
+          />
+        </Grid>
+        <Grid size={{ xs: 6, sm: 4, md: 3 }}>
+          <Spec
+            label="cell size"
+            value={`${status.cell_pixels} px`}
+            hint="the figure a camera has to resolve"
+          />
+        </Grid>
+        <Grid size={{ xs: 6, sm: 4, md: 3 }}>
+          <Spec label="quiet zone" value={`${status.quiet_zone} cells`} hint="the margin around the grid" />
+        </Grid>
+        <Grid size={{ xs: 6, sm: 4, md: 3 }}>
+          <Spec
+            label="encoding"
+            value={status.encoder}
+            hint={status.bit_depth > 0 ? `${status.bit_depth} bit${status.bit_depth === 1 ? '' : 's'} per cell` : undefined}
+          />
+        </Grid>
+        <Grid size={{ xs: 6, sm: 4, md: 3 }}>
+          <Spec
+            label="compression"
+            value={status.compression === 'none' ? 'none' : `${status.compression} level ${status.compression_level}`}
+            hint={
+              status.original_size > 0 && status.compressed_size > 0
+                ? `${formatBytes(status.original_size)} → ${formatBytes(status.compressed_size)}`
+                : undefined
+            }
+          />
+        </Grid>
+        <Grid size={{ xs: 12, sm: 8, md: 3 }}>
+          <Spec label="loss protection" value={parity} />
+        </Grid>
+        <Grid size={{ xs: 6, sm: 4, md: 3 }}>
+          <Spec
+            label="encryption"
+            value={status.encryption}
+            hint={
+              status.encryption === 'none'
+                ? 'the payload crossed the gap in the clear'
+                : 'the payload only; a manifest is never encrypted'
+            }
+          />
+        </Grid>
+      </Grid>
+    </Paper>
+  )
+}
 
 export function TransferDetail() {
   const { id = '' } = useParams()
@@ -269,6 +386,8 @@ export function TransferDetail() {
           />
         </Grid>
       </Grid>
+
+      <Profile status={status} />
 
       <Paper variant="outlined" sx={{ p: 2 }}>
         <Typography variant="subtitle1" sx={{ mb: 1 }}>

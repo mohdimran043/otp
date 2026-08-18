@@ -50,10 +50,19 @@ export interface TransferStatus {
   compression: string
   fec_codec: string
   encryption: string
-  /** How many frames are tiled onto the display at once. */
-  lanes: number
+  // No `lanes` here, deliberately. The server does not send one — see the note on TransferRequest — and
+  // declaring it made TypeScript vouch for a field that is always undefined, which is how a profile panel
+  // came to state "1 frame at a time" for a display tiling four. The lane count lives in the display
+  // settings, which is the only place that has it.
   grid_width: number
   grid_height: number
+  // The rest of the profile the transfer was built with, fixed at upload and written into every frame.
+  cell_pixels: number
+  quiet_zone: number
+  bit_depth: number
+  compression_level: number
+  fec_data_shards: number
+  fec_parity_shards: number
   error?: string
   result?: ResultView
 }

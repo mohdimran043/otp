@@ -2,6 +2,12 @@ import {
   Alert,
   Button,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
+  IconButton,
   Link,
   Paper,
   Stack,
@@ -10,13 +16,15 @@ import {
   TableCell,
   TableHead,
   TableRow,
+  Tooltip,
   Typography,
 } from '@mui/material'
+import DeleteIcon from '@mui/icons-material/Delete'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link as RouterLink, useNavigate } from 'react-router-dom'
 
-import { api, formatBytes, formatPercent, type ImportSummary } from '../api/client'
+import { api, formatBytes, formatPercent, type ImportSummary, type TransmissionView } from '../api/client'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { useUi } from '../store/ui'
 
@@ -48,6 +56,21 @@ export function Transmissions() {
   })
 
   const problemEntries = (importResult?.entries ?? []).filter((e) => e.skipped || e.error)
+
+  // Deleting from the list, behind the same confirmation the detail page uses.
+  //
+  // It was previously reachable only by opening a transmission, which made clearing out a few failed
+  // captures a matter of navigating in and back out for each one. The dialog is owned here rather than by
+  // the row so there is one of it rather than one per transmission.
+  const [pendingDelete, setPendingDelete] = useState<TransmissionView | null>(null)
+
+  const deleteTransmission = useMutation({
+    mutationFn: (id: string) => api.deleteTransmission(id),
+    onSuccess: async () => {
+      setPendingDelete(null)
+      await client.invalidateQueries({ queryKey: ['transmissions'] })
+    },
+  })
 
   return (
     <Stack spacing={2}>
@@ -112,6 +135,7 @@ export function Transmissions() {
               <TableCell align="right">Outstanding</TableCell>
               <TableCell align="right">From parity</TableCell>
               <TableCell>Verified</TableCell>
+              <TableCell align="right" sx={{ width: 48 }} />
             </TableRow>
           </TableHead>
           <TableBody>
@@ -144,6 +168,17 @@ export function Transmissions() {
                     <Chip size="small" label="in progress" />
                   )}
                 </TableCell>
+                <TableCell align="right" sx={{ py: 0.25 }}>
+                  <Tooltip title="Delete this transmission">
+                    <IconButton
+                      size="small"
+                      aria-label="Delete this transmission"
+                      onClick={() => setPendingDelete(transmission)}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -154,6 +189,52 @@ export function Transmissions() {
           </Typography>
         )}
       </Paper>
+
+      {/* The same warning as the detail page, including the part that only applies to a transmission still
+          arriving: deleting one does not stop the sender, so the next chunk that decodes starts a fresh row
+          from nothing. That is the sentence that stops someone deleting a transfer they meant to keep. */}
+      <Dialog open={pendingDelete !== null} onClose={() => setPendingDelete(null)}>
+        <DialogTitle>Delete this transmission?</DialogTitle>
+        <DialogContent>
+          <ErrorNotice error={deleteTransmission.error} />
+          <DialogContentText component="div">
+            This removes {pendingDelete?.filename} entirely — its manifest, every chunk received for it, the
+            merged file, and the acknowledgements written back to the sender. There is no undo, and the file
+            cannot be downloaded again afterwards.
+            {pendingDelete && !pendingDelete.merged && (
+              <>
+                <br />
+                <br />
+                Nothing has been merged yet, so frames for this transmission may still be arriving. Deleting
+                it does not stop the sender: the next chunk that decodes will simply start a fresh row from
+                nothing
+                {/* Only when something would actually be lost. At zero the clause read "having lost the 0
+                    chunks already here", which is both awkward and the opposite of the reassurance it
+                    should give — there is nothing to lose yet, and that is worth saying plainly. */}
+                {pendingDelete.chunks_arrived > 0 ? (
+                  <>
+                    , having lost the {pendingDelete.chunks_arrived} chunk
+                    {pendingDelete.chunks_arrived === 1 ? '' : 's'} already here.
+                  </>
+                ) : (
+                  <> — no chunk has arrived yet, so nothing is lost by deleting it.</>
+                )}
+              </>
+            )}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPendingDelete(null)}>Keep it</Button>
+          <Button
+            color="error"
+            variant="contained"
+            disabled={deleteTransmission.isPending}
+            onClick={() => pendingDelete && deleteTransmission.mutate(pendingDelete.transmission_id)}
+          >
+            {deleteTransmission.isPending ? 'Deleting…' : 'Delete the transmission'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   )
 }

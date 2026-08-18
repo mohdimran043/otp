@@ -115,8 +115,18 @@ export function TransmissionDetail() {
                 <br />
                 Nothing has been merged yet, so frames for this transmission may still be arriving. Deleting
                 it does not stop the sender: the next chunk that decodes will simply start a fresh row from
-                nothing, having lost the {data?.chunks_arrived ?? 0} chunk
-                {(data?.chunks_arrived ?? 0) === 1 ? '' : 's'} already here.
+                nothing
+                {/* Kept identical to the same warning in the transmissions list. At zero this read
+                    "having lost the 0 chunks already here", which is awkward and says the opposite of
+                    what is true: nothing has arrived, so nothing is lost. */}
+                {(data?.chunks_arrived ?? 0) > 0 ? (
+                  <>
+                    , having lost the {data?.chunks_arrived ?? 0} chunk
+                    {(data?.chunks_arrived ?? 0) === 1 ? '' : 's'} already here.
+                  </>
+                ) : (
+                  <> — no chunk has arrived yet, so nothing is lost by deleting it.</>
+                )}
               </>
             )}
           </DialogContentText>

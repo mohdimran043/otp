@@ -7,7 +7,9 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
+  IconButton,
   Stack,
+  Tooltip,
 } from '@mui/material'
 import PauseIcon from '@mui/icons-material/Pause'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
@@ -25,22 +27,30 @@ import { ErrorNotice } from './ErrorNotice'
 //
 // The dialog says how far it got, because that is the number that decides whether cancelling is the right
 // call. Ninety per cent acknowledged is worth finishing; five per cent is not.
-
-interface Props {
-  transmissionId: string
-  status: string
-  ackedChunks: number
-  chunkCount: number
-}
+//
+// Two presentations, one policy. The detail page has room for labelled buttons and inline notes; a row in
+// the transfers list has room for three icons. What must not differ between them is *what stopping means* —
+// which queries go stale, what the confirmation says, which statuses can be paused — so that lives in
+// useTransferActions and StopDialog below and both presentations are thin.
+//
+// This matters because the previous arrangement put pause and stop on the detail page only, so acting on a
+// transfer meant opening it, while delete sat in the list. The two halves of "manage this transfer" were in
+// different places for no reason a user could see.
 
 /** running is whether there is anything to stop. */
-function running(status: string): boolean {
+export function running(status: string): boolean {
   return ['pending', 'preparing', 'ready', 'transmitting', 'paused'].includes(status)
 }
 
-export function TransferControls({ transmissionId, status, ackedChunks, chunkCount }: Props) {
+/**
+ * useTransferActions owns the three mutations and what they invalidate.
+ *
+ * The invalidation list is the part worth keeping in one place. A pause changes the transfer, the list it
+ * appears in, its chunks, and the display's own settings — miss one and the interface keeps showing a
+ * transfer as transmitting after it has stopped.
+ */
+export function useTransferActions(transmissionId: string) {
   const client = useQueryClient()
-  const [confirming, setConfirming] = useState(false)
   const [note, setNote] = useState<string | null>(null)
 
   const refresh = () => {
@@ -53,7 +63,6 @@ export function TransferControls({ transmissionId, status, ackedChunks, chunkCou
   const cancel = useMutation({
     mutationFn: () => api.cancel(transmissionId),
     onSuccess: (result) => {
-      setConfirming(false)
       setNote(result.note ?? 'Cancelled.')
       refresh()
     },
@@ -75,8 +84,83 @@ export function TransferControls({ transmissionId, status, ackedChunks, chunkCou
     },
   })
 
-  const busy = cancel.isPending || pause.isPending || resume.isPending
+  return {
+    cancel,
+    pause,
+    resume,
+    busy: cancel.isPending || pause.isPending || resume.isPending,
+    error: cancel.error ?? pause.error ?? resume.error,
+    note,
+    clearNote: () => setNote(null),
+  }
+}
+
+interface StopDialogProps {
+  open: boolean
+  onClose: () => void
+  onStop: () => void
+  stopping: boolean
+  busy: boolean
+  status: string
+  ackedChunks: number
+  chunkCount: number
+}
+
+/** StopDialog is the confirmation, shared so both presentations warn in the same words. */
+function StopDialog({
+  open,
+  onClose,
+  onStop,
+  stopping,
+  busy,
+  status,
+  ackedChunks,
+  chunkCount,
+}: StopDialogProps) {
   const percent = chunkCount > 0 ? Math.round((ackedChunks / chunkCount) * 100) : 0
+
+  return (
+    <Dialog open={open} onClose={onClose}>
+      <DialogTitle>Stop this transfer?</DialogTitle>
+      <DialogContent>
+        <DialogContentText component="div">
+          {ackedChunks} of {chunkCount} chunks have been acknowledged — {percent}% of the file has arrived
+          and been confirmed.
+          <br />
+          <br />
+          Stopping cannot be undone: the frames stay rendered, but nothing will display them again. The
+          receiver is not told, because there is nothing to tell it — it simply stops seeing frames, which
+          is the same event as the sender being switched off.
+          {status === 'transmitting' && (
+            <>
+              <br />
+              <br />
+              To stop for now and carry on later, <strong>Pause</strong> instead. Acknowledged chunks are
+              kept, so resuming shows only what is still outstanding.
+            </>
+          )}
+        </DialogContentText>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Keep going</Button>
+        <Button color="error" variant="contained" disabled={busy} onClick={onStop}>
+          {stopping ? 'Stopping…' : 'Stop the transfer'}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  )
+}
+
+interface Props {
+  transmissionId: string
+  status: string
+  ackedChunks: number
+  chunkCount: number
+}
+
+export function TransferControls({ transmissionId, status, ackedChunks, chunkCount }: Props) {
+  const [confirming, setConfirming] = useState(false)
+  const actions = useTransferActions(transmissionId)
 
   if (!running(status)) {
     return null
@@ -90,8 +174,8 @@ export function TransferControls({ transmissionId, status, ackedChunks, chunkCou
             size="small"
             variant="outlined"
             startIcon={<PauseIcon />}
-            disabled={busy}
-            onClick={() => pause.mutate()}
+            disabled={actions.busy}
+            onClick={() => actions.pause.mutate()}
           >
             Pause
           </Button>
@@ -101,8 +185,8 @@ export function TransferControls({ transmissionId, status, ackedChunks, chunkCou
             size="small"
             variant="contained"
             startIcon={<PlayArrowIcon />}
-            disabled={busy}
-            onClick={() => resume.mutate()}
+            disabled={actions.busy}
+            onClick={() => actions.resume.mutate()}
           >
             Resume
           </Button>
@@ -112,48 +196,105 @@ export function TransferControls({ transmissionId, status, ackedChunks, chunkCou
           variant="outlined"
           color="error"
           startIcon={<StopIcon />}
-          disabled={busy}
+          disabled={actions.busy}
           onClick={() => setConfirming(true)}
         >
           Stop
         </Button>
       </Stack>
 
-      <ErrorNotice error={cancel.error ?? pause.error ?? resume.error} />
-      {note && (
-        <Alert severity="info" variant="outlined" onClose={() => setNote(null)}>
-          {note}
+      <ErrorNotice error={actions.error} />
+      {actions.note && (
+        <Alert severity="info" variant="outlined" onClose={actions.clearNote}>
+          {actions.note}
         </Alert>
       )}
 
-      <Dialog open={confirming} onClose={() => setConfirming(false)}>
-        <DialogTitle>Stop this transfer?</DialogTitle>
-        <DialogContent>
-          <DialogContentText component="div">
-            {ackedChunks} of {chunkCount} chunks have been acknowledged — {percent}% of the file has
-            arrived and been confirmed.
-            <br />
-            <br />
-            Stopping cannot be undone: the frames stay rendered, but nothing will display them again. The
-            receiver is not told, because there is nothing to tell it — it simply stops seeing frames,
-            which is the same event as the sender being switched off.
-            {status === 'transmitting' && (
-              <>
-                <br />
-                <br />
-                To stop for now and carry on later, <strong>Pause</strong> instead. Acknowledged chunks are
-                kept, so resuming shows only what is still outstanding.
-              </>
-            )}
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setConfirming(false)}>Keep going</Button>
-          <Button color="error" variant="contained" disabled={busy} onClick={() => cancel.mutate()}>
-            {cancel.isPending ? 'Stopping…' : 'Stop the transfer'}
-          </Button>
-        </DialogActions>
-      </Dialog>
+      <StopDialog
+        open={confirming}
+        onClose={() => setConfirming(false)}
+        onStop={() => actions.cancel.mutate(undefined, { onSuccess: () => setConfirming(false) })}
+        stopping={actions.cancel.isPending}
+        busy={actions.busy}
+        status={status}
+        ackedChunks={ackedChunks}
+        chunkCount={chunkCount}
+      />
+    </Stack>
+  )
+}
+
+/**
+ * TransferRowControls is the same three actions, sized for a table row.
+ *
+ * Icons rather than labels because this sits in a cell beside delete, and a row of labelled buttons would
+ * dominate the table it is meant to annotate. Every icon carries a tooltip, so nothing depends on the
+ * reader already knowing what the glyph means.
+ *
+ * A failure surfaces on the icon itself rather than as a banner: a row has nowhere to put an alert, and an
+ * error that scrolled the table would be worse than one attached to the thing that failed. Notes are
+ * dropped here on purpose — "Paused." adds nothing next to a status chip that now reads paused.
+ */
+export function TransferRowControls({ transmissionId, status, ackedChunks, chunkCount }: Props) {
+  const [confirming, setConfirming] = useState(false)
+  const actions = useTransferActions(transmissionId)
+
+  if (!running(status)) {
+    return null
+  }
+
+  const failure = actions.error ? String(actions.error) : null
+
+  return (
+    <Stack direction="row" spacing={0} justifyContent="flex-end" sx={{ whiteSpace: 'nowrap' }}>
+      {status === 'transmitting' && (
+        <Tooltip title={failure ?? 'Pause this transfer'}>
+          <IconButton
+            size="small"
+            color={failure ? 'error' : 'default'}
+            disabled={actions.busy}
+            aria-label="Pause this transfer"
+            onClick={() => actions.pause.mutate()}
+          >
+            <PauseIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      )}
+      {status === 'paused' && (
+        <Tooltip title={failure ?? 'Resume this transfer'}>
+          <IconButton
+            size="small"
+            color={failure ? 'error' : 'primary'}
+            disabled={actions.busy}
+            aria-label="Resume this transfer"
+            onClick={() => actions.resume.mutate()}
+          >
+            <PlayArrowIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      )}
+      <Tooltip title={failure ?? 'Stop this transfer'}>
+        <IconButton
+          size="small"
+          color={failure ? 'error' : 'default'}
+          disabled={actions.busy}
+          aria-label="Stop this transfer"
+          onClick={() => setConfirming(true)}
+        >
+          <StopIcon fontSize="small" />
+        </IconButton>
+      </Tooltip>
+
+      <StopDialog
+        open={confirming}
+        onClose={() => setConfirming(false)}
+        onStop={() => actions.cancel.mutate(undefined, { onSuccess: () => setConfirming(false) })}
+        stopping={actions.cancel.isPending}
+        busy={actions.busy}
+        status={status}
+        ackedChunks={ackedChunks}
+        chunkCount={chunkCount}
+      />
     </Stack>
   )
 }

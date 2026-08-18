@@ -728,8 +728,23 @@ type TransferStatus struct {
 	// Encryption is the cipher name, never the key: a status response is read by anyone
 	// watching a transfer, and the key must never appear in it.
 	Encryption string `json:"encryption"`
-	GridWidth  int    `json:"grid_width"`
-	GridHeight int    `json:"grid_height"`
+
+	// The rest of the profile this transfer was actually built with.
+	//
+	// Every one of these was decided at upload and then written into every frame, and none of them can
+	// change afterwards — which is exactly why they are worth reporting. A transfer that decoded badly
+	// is diagnosed by what it was encoded at, and reading back "80x80 at 4 px, colour, zstd level 3"
+	// from the transfer itself is the difference between knowing and remembering what the form said.
+	// Configuration defaults are no substitute: they are what the *next* transfer will use.
+	CellPixels       int `json:"cell_pixels"`
+	QuietZone        int `json:"quiet_zone"`
+	BitDepth         int `json:"bit_depth"`
+	CompressionLevel int `json:"compression_level"`
+	FECDataShards    int `json:"fec_data_shards"`
+	FECParityShards  int `json:"fec_parity_shards"`
+
+	GridWidth  int `json:"grid_width"`
+	GridHeight int `json:"grid_height"`
 
 	Error string `json:"error,omitempty"`
 
@@ -807,9 +822,17 @@ func (s *Server) getTransfer(w http.ResponseWriter, r *http.Request) {
 		Compression:    tx.Compression,
 		FECCodec:       tx.FECCodec,
 		Encryption:     encryptionName,
-		GridWidth:      tx.GridWidth,
-		GridHeight:     tx.GridHeight,
-		Error:          tx.Error,
+
+		CellPixels:       tx.CellPixels,
+		QuietZone:        tx.QuietZone,
+		BitDepth:         tx.BitDepth,
+		CompressionLevel: tx.CompressionLevel,
+		FECDataShards:    tx.FECDataShards,
+		FECParityShards:  tx.FECParityShards,
+
+		GridWidth:  tx.GridWidth,
+		GridHeight: tx.GridHeight,
+		Error:      tx.Error,
 	}
 	if result, ok := s.acks.Result(id); ok {
 		status.Result = resultView(result)
