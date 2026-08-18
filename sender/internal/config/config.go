@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/opticaltransport/otp/shared/fec"
 )
 
 // Config is the sender's complete configuration.
@@ -455,7 +457,7 @@ func Default() Config {
 				DataShards:   100,
 				ParityShards: 15,
 			},
-			Lanes:      4,
+			Lanes: 4,
 			// Eighty, and four pixels a cell.
 			//
 			// Eighty because a colour payload photographed off a panel needs pixels per cell far more than
@@ -545,6 +547,17 @@ func Load(path string) (Config, error) {
 
 	if err := applyEnv(&cfg); err != nil {
 		return Config{}, err
+	}
+	// A codec that makes no parity is handed no parity to make.
+	//
+	// Before this, setting only OTP_SENDER_FEC_CODEC=none left the default count of fifteen beside it and
+	// the sender refused to start, naming a variable the operator had not set. Nobody configures no error
+	// correction and fifteen parity shards, so the leftover is dropped rather than reported. Deliberately
+	// between applyEnv and Validate: it normalises what was loaded, and then the loaded thing is checked,
+	// so Validate stays a pure check rather than something that quietly repairs its input.
+	if codec, err := fec.ByName(cfg.Optical.FEC.Codec); err == nil {
+		cfg.Optical.FEC.DataShards, cfg.Optical.FEC.ParityShards =
+			fec.NormaliseShards(codec, cfg.Optical.FEC.DataShards, cfg.Optical.FEC.ParityShards)
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err

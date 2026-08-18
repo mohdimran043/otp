@@ -507,6 +507,12 @@ func (s *Server) parseTransferRequest(r *http.Request, cfg config.Config) (Trans
 		return request, fmt.Errorf("fec_codec %q is not one of %s",
 			request.FECCodec, strings.Join(fec.Names(), ", "))
 	}
+	// The shard pair is inherited from the deployment above; the codec came from the caller. Choosing
+	// "none" therefore arrived carrying whatever parity count this deployment configures, and was
+	// rejected for a field the caller never set — and which the interface does not offer, so there was
+	// no way to satisfy the error it produced. See fec.NormaliseShards.
+	request.DataShards, request.ParityShards =
+		fec.NormaliseShards(codec, request.DataShards, request.ParityShards)
 	if err := codec.Validate(request.DataShards, request.ParityShards); err != nil {
 		return request, err
 	}

@@ -222,3 +222,29 @@ func equalBytes(a, b []byte) bool {
 	}
 	return true
 }
+
+// NormaliseShards coerces a shard pair to one the codec can actually use.
+//
+// The pair and the codec arrive from different places. A deployment configures "15 parity per 100 data"
+// once; a codec is chosen per transfer, and may be chosen through an interface that offers no shard
+// fields at all. Those two facts met badly: choosing `none` sent a codec that produces no parity
+// alongside an inherited count of fifteen, noneCodec refused — correctly, and by design — and the
+// transfer came back rejected for a field the operator had never set and could not reach. The same pair
+// in the environment stopped the sender starting.
+//
+// The judgement here is that a count inherited beside `none` is not an instruction to be honoured or
+// refused; it is a leftover. Nobody asks for no error correction and fifteen parity shards. So it is
+// dropped rather than reported, and the source count is left alone: noneCodec accepts any count in
+// range, and zeroing it would be dividing by it somewhere downstream.
+//
+// Every other codec is returned untouched. For those the pair *is* the instruction, and a geometry a
+// codec genuinely cannot satisfy — Reed-Solomon running out of field — must still fail loudly.
+//
+// It lives here so the two places that inherit the pair share one rule rather than each carrying its own
+// copy of the special case.
+func NormaliseShards(c Codec, dataShards, parityShards int) (int, int) {
+	if c == nil || c.ID() != IDNone {
+		return dataShards, parityShards
+	}
+	return dataShards, 0
+}
